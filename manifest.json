@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "8.0.1",
+  "version": "8.1.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -138,6 +138,30 @@
         {
           "name": "query",
           "description": "Character name to search for",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "voice-actor",
+      "description": "Look up a voice actor's notable character roles.",
+      "options": [
+        {
+          "name": "query",
+          "description": "Voice actor name (Japanese or English)",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "staff",
+      "description": "Look up an anime/manga staff person's production credits (director, writer, etc.).",
+      "options": [
+        {
+          "name": "query",
+          "description": "Staff person's name",
           "type": 3,
           "required": true
         }

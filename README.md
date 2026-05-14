@@ -44,6 +44,8 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/similar [anime]` | Top 5 AniList-recommended anime for a given title. If `anime` is omitted, uses your cached last `/anime` lookup (if any); otherwise tells you ephemerally to run `/anime` first. |
 | `/random [genre]` | Roll a single random anime. If `genre` is given, the roll is constrained to that genre. Caches the result as your "last anime." |
 | `/character <query>` | Look up an AniList character by name. Returns a card with image, native + romaji name, description, and the top 5 media they appear in. First match only. |
+| `/voice-actor <query>` | Look up a voice actor. Shows bio, primary language, and the top 5 most-favourited character roles, each with parent media link. First match only. |
+| `/staff <query>` | Look up an anime/manga staff person (director, writer, composer, etc.). Shows bio, primary occupations, and the top 5 production credits prefixed with the staff role at each project. First match only. |
 | `/help` | Lists every otaku command with a one-line description and example. Built from `manifest.json` so it always reflects what's registered. |
 | `/genres` | Shows AniList's canonical genre list. Cached in KV at `genres:global` (24h TTL); falls back to a live AniList call on cache miss. |
 | `/favorite [anime] [remove]` | Mark (or unmark) the user's last `/anime` lookup as a favorite, or pass an `anime:` title explicitly. Stored in SQL. |

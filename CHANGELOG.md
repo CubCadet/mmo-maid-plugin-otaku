@@ -20,6 +20,49 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [8.1.0] - 2026-05-14
+
+### Added
+- `/voice-actor query:<name>` — look up a voice actor's notable character
+  roles. Renders bio, primary language, and up to 5 character roles (each
+  with its most-popular parent media as a linked anchor).
+- `/staff query:<name>` — look up an anime/manga production staff person.
+  Renders bio, primary occupations (Director, Writer, Composer, etc.),
+  and up to 5 production credits — each prefixed with the `staffRole`
+  AniList records for that production (`*Director* — [Spirited Away]…`).
+- New AniList query `QUERY_STAFF` — single GraphQL constant powering both
+  commands. AniList's `Staff` type covers voice actors AND production
+  staff; the embed builders pull different field framings (`characters`
+  for /voice-actor, `staffMedia` for /staff) from the same record.
+- `_make_voice_actor_embed`, `_make_staff_embed`, and a shared
+  `_staff_display_name` helper that formats `Full (Native)` when both
+  are present and different.
+- Open-on-AniList link button when `siteUrl` is present, same pattern
+  as `/character`.
+
+### Tests
+- New regression file `tests/regression/test_v8_1_0.py` (18 tests):
+  manifest contract, QUERY_STAFF field shape (must request
+  `characters(perPage:5, sort:FAVOURITES_DESC)` + `staffMedia` with
+  `staffRole`), `_staff_display_name` three-way contract,
+  /voice-actor + /staff empty-query short-circuit (no AniList call),
+  not-found error path, happy-path embed rendering for both shapes,
+  no-roles graceful-empty, and the assertion that BOTH commands route
+  to the single `QUERY_STAFF` constant.
+
+### Capability surface
+- **No new capabilities.** Read-only AniList lookups; reuses
+  `proxy:http` + `interaction:respond`.
+
+### Notes
+- AniList search returns multiple hits but `/voice-actor` and `/staff`
+  surface only the top match — same first-match-only contract as
+  `/character`. The embed footer (`S.FOOTER_CHARACTER` reused) flags
+  this for the user.
+- AniList's `description` for staff can run very long; truncated to
+  `DESC_MAX` (350 chars) per the project-wide standard, with a
+  `*(no bio on AniList)*` empty-state when the field is null.
+
 ## [8.0.1] - 2026-05-14
 
 ### Migration hardening — production-safety patch

@@ -861,10 +861,19 @@ surfaces.
 
 ---
 
-### v8.1.0 — Voice actors & staff
+### v8.1.0 — Voice actors & staff ✅ shipped 2026-05-14
 
-`/voice-actor <name>` — Look up a VA with their notable roles.
-`/staff <name>` — Director, writer, animator lookups.
+~~`/voice-actor <name>` — Look up a VA with their notable roles.~~
+~~`/staff <name>` — Director, writer, animator lookups.~~
+
+Both shipped. AniList's single `Staff` type powers both; `QUERY_STAFF`
+is one GraphQL constant. The embed builders (`_make_voice_actor_embed`
+and `_make_staff_embed`) pull different field framings from the same
+record — `characters` (top 5 by FAVOURITES_DESC, each with parent
+media) for /voice-actor; `staffMedia.edges` with `staffRole` (top 5
+by POPULARITY_DESC) for /staff. First-match-only, mirrors /character.
+
+**Capability:** no new capabilities. Read-only AniList lookups.
 
 ---
 

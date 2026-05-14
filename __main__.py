@@ -267,6 +267,18 @@ class _Strings:
     CHARACTER_NO_DESCRIPTION = "*(no description on AniList)*"
     CHARACTER_UNKNOWN_NAME = "Unknown character"
 
+    # /voice-actor (v8.1.0).
+    VOICE_ACTOR_USAGE = "Usage: `/voice-actor query: <name>`"
+    VOICE_ACTOR_NOT_FOUND = "No voice actor found matching **{query}**."
+    VOICE_ACTOR_NO_DESCRIPTION = "*(no bio on AniList)*"
+    VOICE_ACTOR_NO_ROLES = "*(no notable character roles on AniList)*"
+
+    # /staff (v8.1.0).
+    STAFF_USAGE = "Usage: `/staff query: <name>`"
+    STAFF_NOT_FOUND = "No staff found matching **{query}**."
+    STAFF_NO_DESCRIPTION = "*(no bio on AniList)*"
+    STAFF_NO_CREDITS = "*(no production credits on AniList)*"
+
     # /genres.
     GENRES_FETCH_FAIL = "Couldn't fetch AniList's genre list — try again in a moment."
     GENRES_EMPTY = "*(no genres returned)*"
@@ -947,6 +959,40 @@ QUERY_CHARACTER = (
     "}"
 )
 
+# v8.1.0 — staff lookups. AniList's `Staff` type covers both voice actors
+# AND production staff (directors, writers, composers). The same query
+# powers /voice-actor and /staff; the embed builders pull different fields:
+# /voice-actor leans on `characters` (top characters they voice + parent
+# media); /staff leans on `staffMedia` (production credits with role).
+QUERY_STAFF = (
+    "query ($q: String) {"
+    "  Staff(search: $q) {"
+    "    id"
+    "    name { full native }"
+    "    image { large }"
+    "    description(asHtml: false)"
+    "    primaryOccupations"
+    "    languageV2"
+    "    siteUrl"
+    "    characters(perPage: 5, sort: FAVOURITES_DESC) {"
+    "      nodes {"
+    "        id"
+    "        name { full }"
+    "        media(perPage: 1, sort: POPULARITY_DESC) {"
+    "          nodes { id title { romaji english } siteUrl }"
+    "        }"
+    "      }"
+    "    }"
+    "    staffMedia(perPage: 5, sort: POPULARITY_DESC) {"
+    "      edges {"
+    "        staffRole"
+    "        node { id title { romaji english } siteUrl }"
+    "      }"
+    "    }"
+    "  }"
+    "}"
+)
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1160,6 +1206,111 @@ def _make_character_embed(char: dict) -> dict:
             url = m.get("siteUrl") or ""
             lines.append(f"• [{mtitle}]({url})" if url else f"• {mtitle}")
         embed["fields"] = [{"name": "Appears in", "value": "\n".join(lines), "inline": False}]
+    return embed
+
+
+def _staff_display_name(staff: dict) -> str:
+    """Render a Staff person's display name — `Full (Native)` if both present."""
+    name = staff.get("name") or {}
+    full = (name.get("full") or "").strip()
+    native = (name.get("native") or "").strip()
+    if full and native and full != native:
+        return f"{full} ({native})"
+    return full or native or "Unknown"
+
+
+def _make_voice_actor_embed(staff: dict) -> dict:
+    """Voice-actor card — bio + top character roles (each with parent media)."""
+    title = _staff_display_name(staff)
+    site_url = staff.get("siteUrl") or None
+    description = _truncate(_strip_html(staff.get("description")), DESC_MAX) or S.VOICE_ACTOR_NO_DESCRIPTION
+
+    embed: dict = {
+        "title": title,
+        "url": site_url,
+        "description": description,
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.FOOTER_CHARACTER},
+    }
+    image = (staff.get("image") or {}).get("large")
+    if image:
+        embed["thumbnail"] = {"url": image}
+
+    # Language field — AniList exposes the VA's primary dub language as
+    # `languageV2`. Most-common values: Japanese, English, Korean, Mandarin.
+    language = (staff.get("languageV2") or "").strip()
+    fields: list[dict] = []
+    if language:
+        fields.append({"name": "Language", "value": language, "inline": True})
+
+    # Notable characters — five most-favourited, each with their single most-
+    # popular parent media. Render as "Character (Parent Title)".
+    char_nodes = ((staff.get("characters") or {}).get("nodes")) or []
+    if char_nodes:
+        lines = []
+        for c in char_nodes[:5]:
+            cname = (c.get("name") or {}).get("full") or "?"
+            parent = (((c.get("media") or {}).get("nodes")) or [None])[0]
+            if parent:
+                ptitle = _format_title(parent)
+                purl = parent.get("siteUrl") or ""
+                anchor = f"[{ptitle}]({purl})" if purl else ptitle
+                lines.append(f"• **{cname}** — {anchor}")
+            else:
+                lines.append(f"• **{cname}**")
+        fields.append({"name": "Notable roles", "value": "\n".join(lines), "inline": False})
+    else:
+        fields.append({"name": "Notable roles", "value": S.VOICE_ACTOR_NO_ROLES, "inline": False})
+
+    embed["fields"] = fields
+    return embed
+
+
+def _make_staff_embed(staff: dict) -> dict:
+    """Production-staff card — bio + production credits with role (director,
+    writer, etc.). Same Staff object as /voice-actor; different framing."""
+    title = _staff_display_name(staff)
+    site_url = staff.get("siteUrl") or None
+    description = _truncate(_strip_html(staff.get("description")), DESC_MAX) or S.STAFF_NO_DESCRIPTION
+
+    embed: dict = {
+        "title": title,
+        "url": site_url,
+        "description": description,
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.FOOTER_CHARACTER},
+    }
+    image = (staff.get("image") or {}).get("large")
+    if image:
+        embed["thumbnail"] = {"url": image}
+
+    # Primary occupations — AniList stores a list (e.g. ["Director", "Writer"]).
+    occupations = staff.get("primaryOccupations") or []
+    fields: list[dict] = []
+    if occupations:
+        fields.append({
+            "name": "Role",
+            "value": ", ".join(occupations[:5]),
+            "inline": True,
+        })
+
+    # Production credits — five most-popular media they worked on, each
+    # prefixed by the staffRole at that production.
+    edges = ((staff.get("staffMedia") or {}).get("edges")) or []
+    if edges:
+        lines = []
+        for e in edges[:5]:
+            role = (e.get("staffRole") or "").strip() or "Worked on"
+            node = e.get("node") or {}
+            mtitle = _format_title(node)
+            url = node.get("siteUrl") or ""
+            anchor = f"[{mtitle}]({url})" if url else mtitle
+            lines.append(f"• *{role}* — {anchor}")
+        fields.append({"name": "Production credits", "value": "\n".join(lines), "inline": False})
+    else:
+        fields.append({"name": "Production credits", "value": S.STAFF_NO_CREDITS, "inline": False})
+
+    embed["fields"] = fields
     return embed
 
 
@@ -1963,6 +2114,73 @@ def cmd_character(ctx: Context, event: dict) -> None:
     ctx.interaction.followup(embeds=[embed], components=components)
 
 
+# ── v8.1.0 — /voice-actor and /staff ────────────────────────────────────────
+#
+# Both commands query AniList's single `Staff` type; the embed builders pull
+# different framings of the same record. /voice-actor highlights `characters`
+# (notable roles + parent media). /staff highlights `staffMedia` (production
+# credits with role). Same first-match-only contract as /character — AniList
+# search returns multiple hits but the embed surfaces only the top match.
+
+
+@plugin.on_slash_command("voice-actor")
+def cmd_voice_actor(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    query = (opts.get("query") or "").strip()
+    if not query:
+        ctx.interaction.respond(content=S.VOICE_ACTOR_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    data = _anilist_query(ctx, QUERY_STAFF, {"q": query.lower()}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    staff = data.get("Staff")
+    if not staff:
+        _reply_error(ctx, S.VOICE_ACTOR_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
+        return
+
+    embed = _make_voice_actor_embed(staff)
+    components = None
+    site_url = staff.get("siteUrl")
+    if site_url:
+        components = [ActionRow(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))]
+    ctx.interaction.followup(embeds=[embed], components=components)
+
+
+@plugin.on_slash_command("staff")
+def cmd_staff(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    query = (opts.get("query") or "").strip()
+    if not query:
+        ctx.interaction.respond(content=S.STAFF_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    data = _anilist_query(ctx, QUERY_STAFF, {"q": query.lower()}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    staff = data.get("Staff")
+    if not staff:
+        _reply_error(ctx, S.STAFF_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
+        return
+
+    embed = _make_staff_embed(staff)
+    components = None
+    site_url = staff.get("siteUrl")
+    if site_url:
+        components = [ActionRow(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))]
+    ctx.interaction.followup(embeds=[embed], components=components)
+
+
 # Static usage examples — one per command. The /help embed merges these with the
 # descriptions in manifest.json so the help text never drifts behind a new
 # slash command being declared.
@@ -1972,7 +2190,9 @@ _HELP_EXAMPLES = {
     "trending":  "`/trending`",
     "similar":   "`/similar` (uses your last lookup) or `/similar anime: Your Name`",
     "random":    "`/random` or `/random genre: Romance`",
-    "character": "`/character query: Edward Elric`",
+    "character":     "`/character query: Edward Elric`",
+    "voice-actor":   "`/voice-actor query: Aoi Yuuki`",
+    "staff":         "`/staff query: Hayao Miyazaki`",
     "help":      "`/help`",
     "genres":    "`/genres`",
 }
