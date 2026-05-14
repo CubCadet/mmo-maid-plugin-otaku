@@ -20,6 +20,19 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-14
+
+### Added
+- `/help` — lists every command in `manifest.json` with a one-line
+  description and an example. Generated from the manifest at boot so it
+  cannot drift behind newly-registered commands.
+- `/genres` — shows AniList's canonical genre list. Cached in KV at
+  `genres:global` for 24h, with a live HTTP fallback on cache miss.
+- Regression test file `tests/regression/test_v1_3_0.py`.
+
+### Changed
+- KV key conventions doc: `genres:global` is now a documented key.
+
 ## [1.2.0] - 2026-05-14
 
 ### Added

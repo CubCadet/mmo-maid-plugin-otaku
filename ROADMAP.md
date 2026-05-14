@@ -341,33 +341,25 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 ---
 
-### v1.3.0 — Genre catalog + /help
+### v1.3.0 — Genre catalog + /help ✅ shipped 2026-05-14
 
 **Target:** Minor. Discoverability of the plugin itself.
 
 **New slash commands:**
 
-- `/help` — Lists every otaku command with a one-line description and an example. Pure interaction reply, no API call.
-- `/genres` — Shows the canonical AniList genre list as an ephemeral embed. Pulls from AniList's `GenreCollection` query and caches it for 24 hours.
+- ~~`/help` — Lists every otaku command with a one-line description and an example. Pure interaction reply, no API call.~~ Generated from `manifest.json` at boot.
+- ~~`/genres` — Shows the canonical AniList genre list as an ephemeral embed. Pulls from AniList's `GenreCollection` query and caches it for 24 hours.~~ Cached in KV at `genres:global`.
 
 **Implementation hints:**
-- `GenreCollection` is a single GraphQL query returning a list of strings.
-- Store the genre list in KV at `genres:global` with a 24h TTL. Refresh on first command after expiry.
-- `/help` is static; no API dependency, no cache.
+- ~~`GenreCollection` is a single GraphQL query returning a list of strings.~~
+- ~~Store the genre list in KV at `genres:global` with a 24h TTL.~~
+- ~~`/help` is static; no API dependency, no cache.~~
 
-**Regression check:** Existing tests pass. New tests verify `/help` lists all commands present in `manifest.json.slash_commands`.
+**Regression check:** ~~Existing tests pass. New tests verify `/help` lists all commands present in `manifest.json.slash_commands`.~~ Done in `tests/regression/test_v1_3_0.py`.
 
 **Failure modes:**
-- The KV key `genres:global` could be evicted if the plugin's KV quota fills — fall back to an HTTP lookup if read returns None.
-- `/help` should auto-update if a new command is added — generate the content from `manifest.json` at boot, not hardcode it.
-
-**Commits:**
-- `feat(slash): add /help that lists all commands from manifest`
-- `feat(slash): add /genres backed by KV-cached AniList GenreCollection`
-- `test: /help reflects every command in manifest.json`
-- `docs(readme): document /help and /genres`
-- `docs(changelog): v1.3.0 entry`
-- `chore(release): v1.3.0`
+- ~~The KV key `genres:global` could be evicted if the plugin's KV quota fills — fall back to an HTTP lookup if read returns None.~~ Implemented.
+- ~~`/help` should auto-update if a new command is added — generate the content from `manifest.json` at boot, not hardcode it.~~ Implemented.
 
 ---
 

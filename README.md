@@ -32,6 +32,8 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/similar [anime]` | Top 5 AniList-recommended anime for a given title. If `anime` is omitted, uses your cached last `/anime` lookup (if any); otherwise tells you ephemerally to run `/anime` first. |
 | `/random [genre]` | Roll a single random anime. If `genre` is given, the roll is constrained to that genre. Caches the result as your "last anime." |
 | `/character <query>` | Look up an AniList character by name. Returns a card with image, native + romaji name, description, and the top 5 media they appear in. First match only. |
+| `/help` | Lists every otaku command with a one-line description and example. Built from `manifest.json` so it always reflects what's registered. |
+| `/genres` | Shows AniList's canonical genre list. Cached in KV at `genres:global` (24h TTL); falls back to a live AniList call on cache miss. |
 
 ### Politeness throttle
 
@@ -39,10 +41,11 @@ Every command checks an ephemeral per-user cooldown (`otaku:user:<id>`, 2 s) bef
 
 ## KV key convention
 
-The plugin uses one KV key per user:
+The plugin uses two KV keys:
 
 ```
-last_anime:user:<discord_user_id>   →   <anilist_media_id>   (TTL: 7 days)
+last_anime:user:<discord_user_id>   →   <anilist_media_id>   (TTL: 7 days, per-user)
+genres:global                       →   ["Action", ...]      (TTL: 24h, server-wide)
 ```
 
 KV is per-server and per-plugin, so the same user is tracked independently on each server. The 7-day TTL means an inactive user's cache expires on its own — no explicit cleanup needed. KV is wiped automatically on uninstall.

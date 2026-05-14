@@ -457,6 +457,50 @@ def test_character_handles_missing_description_gracefully():
     assert "no description" in embed["description"]
 
 
+# ── v1.3.0 /help + /genres ──────────────────────────────────────────────────
+
+def test_help_lists_every_manifest_command():
+    """/help builds its body from manifest.json — no hardcoded list."""
+    ctx = MockContext()
+    p.cmd_help(ctx, _slash_event("help", {}, user_id="h1"))
+
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    body = resp["embeds"][0]["description"]
+    # Every slash command in the manifest must appear in /help body.
+    from pathlib import Path
+    manifest = json.loads((Path(p.__file__).resolve().parent / "manifest.json").read_text())
+    for cmd in manifest["slash_commands"]:
+        assert f"/{cmd['name']}" in body
+
+
+def test_genres_cached_in_kv_avoids_http():
+    """If genres:global is already in KV, /genres serves without an HTTP call."""
+    ctx = MockContext()
+    ctx.kv.set(p.GENRES_KV_KEY, ["Action", "Romance", "Sci-Fi"], ttl_seconds=p.GENRES_TTL)
+
+    p.cmd_genres(ctx, _slash_event("genres", {}, user_id="g1"))
+
+    assert not ctx.http.requests, "cached path must not hit AniList"
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "Action" in resp["embeds"][0]["description"]
+
+
+def test_genres_uncached_fetches_and_writes_kv():
+    """First /genres call hits AniList, writes KV, and shows the list."""
+    ctx = MockContext()
+    _mock_anilist(ctx, {"GenreCollection": ["Action", "Romance"]})
+
+    p.cmd_genres(ctx, _slash_event("genres", {}, user_id="g2"))
+
+    assert ctx.http.requests, "expected an HTTP call when KV is empty"
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    # Now the KV should be populated.
+    assert ctx.kv.get(p.GENRES_KV_KEY) == ["Action", "Romance"]
+
+
 # ── v1.2.0 retry + better errors ────────────────────────────────────────────
 
 def test_retry_recovers_after_first_timeout():

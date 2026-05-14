@@ -155,6 +155,8 @@ QUERY_RANDOM_PICK = (
     "}"
 )
 
+QUERY_GENRES = "query { GenreCollection }"
+
 QUERY_CHARACTER = (
     "query ($q: String) {"
     "  Character(search: $q) {"
@@ -901,6 +903,117 @@ def cmd_character(ctx: Context, event: dict) -> None:
     if site_url:
         components = [ActionRow(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))]
     ctx.interaction.followup(embeds=[embed], components=components)
+
+
+# Static usage examples — one per command. The /help embed merges these with the
+# descriptions in manifest.json so the help text never drifts behind a new
+# slash command being declared.
+_HELP_EXAMPLES = {
+    "anime":     "`/anime query: Your Name`",
+    "discover":  "`/discover genre: Action sort: trending`",
+    "trending":  "`/trending`",
+    "similar":   "`/similar` (uses your last lookup) or `/similar anime: Your Name`",
+    "random":    "`/random` or `/random genre: Romance`",
+    "character": "`/character query: Edward Elric`",
+    "help":      "`/help`",
+    "genres":    "`/genres`",
+}
+
+
+def _load_manifest_slash_commands() -> list[dict]:
+    """Read manifest.json at boot. Cached after the first call."""
+    global _MANIFEST_COMMANDS_CACHE
+    if _MANIFEST_COMMANDS_CACHE is not None:
+        return _MANIFEST_COMMANDS_CACHE
+    try:
+        from pathlib import Path as _Path
+        manifest_path = _Path(__file__).resolve().parent / "manifest.json"
+        with manifest_path.open() as fh:
+            manifest = json.load(fh)
+        _MANIFEST_COMMANDS_CACHE = list(manifest.get("slash_commands") or [])
+    except Exception:  # noqa: BLE001 — /help must never crash
+        _MANIFEST_COMMANDS_CACHE = []
+    return _MANIFEST_COMMANDS_CACHE
+
+
+_MANIFEST_COMMANDS_CACHE: list[dict] | None = None
+
+
+@plugin.on_slash_command("help")
+def cmd_help(ctx: Context, event: dict) -> None:
+    """List every otaku command, one per line. Reads from manifest.json so it auto-updates."""
+    commands = _load_manifest_slash_commands()
+    lines = []
+    for cmd in commands:
+        name = cmd.get("name") or ""
+        if not name:
+            continue
+        desc = cmd.get("description") or ""
+        example = _HELP_EXAMPLES.get(name, "")
+        line = f"**`/{name}`** — {desc}"
+        if example:
+            line += f"\n  · Example: {example}"
+        lines.append(line)
+    body = "\n\n".join(lines) if lines else "*(no commands registered)*"
+
+    embed = {
+        "title": "Otaku — commands",
+        "description": body,
+        "color": ANILIST_COLOR,
+        "footer": {"text": "All data comes from AniList. Type `/help` any time."},
+    }
+    ctx.interaction.respond(embeds=[embed], ephemeral=True)
+
+
+GENRES_KV_KEY = "genres:global"
+GENRES_TTL = 24 * 60 * 60  # 24 hours
+
+
+@plugin.on_slash_command("genres")
+def cmd_genres(ctx: Context, event: dict) -> None:
+    """Show AniList's canonical genre list. Cached in KV for 24h."""
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+
+    cached = None
+    try:
+        cached = ctx.kv.get(GENRES_KV_KEY)
+    except Exception:  # noqa: BLE001 — fall back to HTTP if KV trips
+        cached = None
+
+    if cached and isinstance(cached, list) and cached:
+        genres = cached
+    else:
+        ctx.interaction.defer(ephemeral=True)
+        data = _anilist_query(ctx, QUERY_GENRES, {}, cache=True)
+        if data is None or not data.get("GenreCollection"):
+            _reply_anilist_failure(
+                ctx,
+                deferred=True,
+                fallback="Couldn't fetch AniList's genre list — try again in a moment.",
+            )
+            return
+        genres = data["GenreCollection"]
+        try:
+            ctx.kv.set(GENRES_KV_KEY, genres, ttl_seconds=GENRES_TTL)
+        except Exception:  # noqa: BLE001 — KV failures don't block the reply
+            pass
+        embed = _genres_embed(genres)
+        ctx.interaction.followup(embeds=[embed], ephemeral=True)
+        return
+
+    # Cached path — respond directly, no defer needed.
+    ctx.interaction.respond(embeds=[_genres_embed(genres)], ephemeral=True)
+
+
+def _genres_embed(genres: list[str]) -> dict:
+    return {
+        "title": "AniList genres",
+        "description": "\n".join(f"• {g}" for g in genres) or "*(no genres returned)*",
+        "color": ANILIST_COLOR,
+        "footer": {"text": f"{len(genres)} genres · refreshed daily · use with /discover or /random"},
+    }
 
 
 # ── Component handlers ──────────────────────────────────────────────────────
