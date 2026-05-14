@@ -456,6 +456,242 @@ def test_character_handles_missing_description_gracefully():
     assert "no description" in embed["description"]
 
 
+# ── v2.0.0 schema bootstrap + tracking commands ─────────────────────────────
+
+
+def _list_event(options: dict | None = None, **extra) -> dict:
+    """Slash event helper that allows the `user` mention option to flow through."""
+    return _slash_event("list", options=options or {}, **extra)
+
+
+def test_schema_bootstrap_is_idempotent():
+    """Running _bootstrap_schema twice must not raise — CREATE IF NOT EXISTS."""
+    ctx = MockContext()
+    p._bootstrap_schema(ctx)
+    p._bootstrap_schema(ctx)
+    # Each call: 2 DDLs (table + index). Two calls = 4 records.
+    assert len(ctx.sql.executed) == 4
+    assert all("CREATE TABLE IF NOT EXISTS" in call["sql"] or "CREATE INDEX IF NOT EXISTS" in call["sql"]
+               for call in ctx.sql.executed)
+
+
+def test_on_install_bootstraps_schema():
+    ctx = MockContext()
+    p._on_install(ctx)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert any("CREATE INDEX IF NOT EXISTS" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_on_ready_bootstraps_schema():
+    """Pool-mode safety: on_ready also runs the DDL."""
+    ctx = MockContext()
+    p._on_ready(ctx)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+
+
+# ── /favorite ───────────────────────────────────────────────────────────────
+
+
+def test_favorite_uses_last_anime_cache_when_no_arg():
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:fav1", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_favorite(ctx, _slash_event("favorite", {}, user_id="fav1"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "favorites" in (follow.get("content") or "").lower()
+    # Upsert should set is_favorite=True.
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts, "expected an INSERT"
+    assert inserts[-1]["params"][3] is True  # is_favorite param
+
+
+def test_favorite_with_no_cache_and_no_arg_prompts_user():
+    ctx = MockContext()
+    p.cmd_favorite(ctx, _slash_event("favorite", {}, user_id="fav-new"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "/anime" in (follow.get("content") or "")
+
+
+def test_favorite_remove_path():
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:fav2", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # Pre-populate so the row exists as a favorite.
+    ctx.sql.query_one = lambda sql, params=None: {"is_favorite": True}  # type: ignore[assignment]
+
+    p.cmd_favorite(ctx, _slash_event("favorite", {"remove": True}, user_id="fav2"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "Removed" in (follow.get("content") or "")
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts and inserts[-1]["params"][3] is False  # is_favorite set False
+
+
+def test_favorite_with_explicit_anime_arg_searches_anilist():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_favorite(ctx, _slash_event("favorite", {"anime": "your name"}, user_id="fav3"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    # Cached the resolved id.
+    assert ctx.kv.get("last_anime:user:fav3") == SAMPLE_MEDIA["id"]
+
+
+# ── /watch ──────────────────────────────────────────────────────────────────
+
+
+def test_watch_sets_status_for_cached_anime():
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:w1", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_watch(ctx, _slash_event("watch", {"status": "completed"}, user_id="w1"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "Completed" in (follow.get("content") or "")
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts and inserts[-1]["params"][2] == "completed"
+
+
+def test_watch_rejects_invalid_status():
+    ctx = MockContext()
+    p.cmd_watch(ctx, _slash_event("watch", {"status": "garbage"}, user_id="w2"))
+    # Invalid status short-circuits before defer — ephemeral respond.
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "watching" in (resp.get("content") or "")
+
+
+def test_watch_without_cache_prompts_user():
+    ctx = MockContext()
+    p.cmd_watch(ctx, _slash_event("watch", {"status": "watching"}, user_id="w-new"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "/anime" in (follow.get("content") or "")
+
+
+# ── /list ───────────────────────────────────────────────────────────────────
+
+
+def _stub_rows(rows: list[dict]):
+    """Return a callable suitable for monkeypatching ctx.sql.query."""
+
+    def _q(sql, params=None):  # noqa: ANN001
+        return rows
+    return _q
+
+
+def test_list_paginates_with_has_next():
+    """Page 1 with 6 rows should report has_next=True and display 5 entries."""
+    ctx = MockContext()
+    rows = [{"media_id": i, "status": "watching", "is_favorite": False} for i in range(1, 7)]
+    ctx.sql.query = _stub_rows(rows)  # type: ignore[assignment]
+    # AniList batch returns the matching media.
+    media_list = [_make_other(i, f"Show {i}") for i in range(1, 7)]
+    _mock_anilist(ctx, {"Page": {"media": media_list[:5]}})
+
+    p.cmd_list(ctx, _list_event({}, user_id="l1"))
+
+    follow = ctx.interaction.followups[-1]
+    embed = follow["embeds"][0]
+    assert "Your" in embed["title"] or "your" in embed["title"]
+    # has_next=True footer should NOT show "(last page)"
+    assert "last page" not in embed["footer"]["text"]
+    # Has a Next button — the second component is the select row, first is pagination.
+    components = follow.get("components") or []
+    assert components, "expected pagination row"
+
+
+def test_list_no_rows_replies_empty():
+    ctx = MockContext()
+    ctx.sql.query = _stub_rows([])  # type: ignore[assignment]
+    # No HTTP needed — empty fast-path.
+    p.cmd_list(ctx, _list_event({}, user_id="l-empty"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "/favorite" in (follow.get("content") or "") or "haven't" in (follow.get("content") or "")
+
+
+def test_list_filters_by_status():
+    """When status filter is set, the SQL params include the status string."""
+    ctx = MockContext()
+    rows = [{"media_id": 1, "status": "completed", "is_favorite": False}]
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        captured["params"] = params
+        return rows
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [_make_other(1, "Done")]}})
+
+    p.cmd_list(ctx, _list_event({"status": "completed"}, user_id="l-stat"))
+
+    assert "AND status = $2" in captured["sql"]
+    assert captured["params"][1] == "completed"
+
+
+# ── /favorites ──────────────────────────────────────────────────────────────
+
+
+def test_favorites_filters_is_favorite_true():
+    ctx = MockContext()
+    rows = [{"media_id": 42, "status": "watching", "is_favorite": True}]
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        captured["params"] = params
+        return rows
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [_make_other(42, "Fave")]}})
+
+    p.cmd_favorites(ctx, _slash_event("favorites", {}, user_id="ufav"))
+
+    assert "AND is_favorite = TRUE" in captured["sql"]
+    follow = ctx.interaction.followups[-1]
+    assert follow["embeds"][0]["description"].count("⭐") >= 1  # ⭐ in line prefix
+
+
+# ── otaku:list:* pagination button ──────────────────────────────────────────
+
+
+def test_list_page_button_dispatches_to_page_two():
+    ctx = MockContext()
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["params"] = params
+        # 1 row on page 2 (offset 5)
+        return [{"media_id": 6, "status": "watching", "is_favorite": False}]
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [_make_other(6, "Six")]}})
+
+    p._route_components(ctx, _component_event("otaku:list:u-pag:all:2", user_id="u-pag"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    # Offset for page 2 = (2 - 1) * 5 = 5
+    assert captured["params"][-1] == 5  # offset is last param for 'all' scope
+
+
+def test_list_page_button_malformed_id_replies_ephemerally():
+    ctx = MockContext()
+    p._route_components(ctx, _component_event("otaku:list:u:all:notanumber", user_id="u"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "malformed" in (resp.get("content") or "").lower()
+
+
 # ── v1.4.0 i18n string table ────────────────────────────────────────────────
 
 def test_strings_namespace_is_present_and_complete():

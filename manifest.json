@@ -1,14 +1,15 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "1.5.0",
-  "description": "Discover, search, and learn about anime from Discord — search by title, browse by genre, see what's trending this season, and find shows similar to ones you've looked up. Powered by AniList.",
+  "version": "2.0.0",
+  "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
-  "tags": ["anime", "anilist", "discovery", "search"],
+  "tags": ["anime", "anilist", "discovery", "search", "tracking"],
   "capabilities_required": [
     "interaction:respond",
     "proxy:http",
-    "storage:kv"
+    "storage:kv",
+    "storage:sql"
   ],
   "proxy_domains_requested": ["graphql.anilist.co"],
   "slash_commands": [
@@ -94,6 +95,80 @@
     {
       "name": "genres",
       "description": "Show AniList's canonical genre list."
+    },
+    {
+      "name": "favorite",
+      "description": "Mark your last /anime lookup (or a passed title) as a favorite.",
+      "options": [
+        {
+          "name": "anime",
+          "description": "Anime to favorite (defaults to your last /anime lookup)",
+          "type": 3,
+          "required": false
+        },
+        {
+          "name": "remove",
+          "description": "Unfavorite instead of favoriting",
+          "type": 5,
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "favorites",
+      "description": "List a user's favorite anime.",
+      "options": [
+        {
+          "name": "user",
+          "description": "Whose favorites to show (defaults to you)",
+          "type": 6,
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "watch",
+      "description": "Set watch status for your last /anime lookup.",
+      "options": [
+        {
+          "name": "status",
+          "description": "Watch status",
+          "type": 3,
+          "required": true,
+          "choices": [
+            {"name": "Watching", "value": "watching"},
+            {"name": "Completed", "value": "completed"},
+            {"name": "On hold", "value": "on_hold"},
+            {"name": "Dropped", "value": "dropped"},
+            {"name": "Plan to watch", "value": "plan"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "list",
+      "description": "List a user's tracked anime, paginated and optionally filtered by status.",
+      "options": [
+        {
+          "name": "status",
+          "description": "Filter by watch status",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "Watching", "value": "watching"},
+            {"name": "Completed", "value": "completed"},
+            {"name": "On hold", "value": "on_hold"},
+            {"name": "Dropped", "value": "dropped"},
+            {"name": "Plan to watch", "value": "plan"}
+          ]
+        },
+        {
+          "name": "user",
+          "description": "Whose list to show (defaults to you)",
+          "type": 6,
+          "required": false
+        }
+      ]
     }
   ]
 }

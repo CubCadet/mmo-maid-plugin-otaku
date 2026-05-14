@@ -33,6 +33,26 @@ from mmo_maid_sdk import (
 plugin = Plugin()
 
 
+# ── SQL schema ───────────────────────────────────────────────────────────────
+# Per-user anime tracking. Rows auto-scoped to ctx.server_id by the runner —
+# no server_id column needed. DDL is idempotent (IF NOT EXISTS) and runs from
+# both on_install and on_ready so pool-mode workers and v1.x→v2.0 upgrades
+# both seed cleanly. See ROADMAP.md "Phase 2" for the rationale.
+_SCHEMA_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_user_anime ("
+    "  user_id TEXT NOT NULL,"
+    "  media_id INTEGER NOT NULL,"
+    "  status TEXT NOT NULL,"
+    "  is_favorite BOOLEAN NOT NULL DEFAULT FALSE,"
+    "  added_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (user_id, media_id))"
+)
+_SCHEMA_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx "
+    "ON otaku_user_anime (user_id, status, added_at DESC)"
+)
+
+
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
 # Every string the user could ever see lives here. The runtime upload zip's
 # allowlist doesn't permit a sibling strings.py module, so we keep them in a
@@ -113,6 +133,36 @@ class _Strings:
     LIST_NO_RESULTS = "*No results.*"
     LIST_LAST_PAGE = "(last page)"
 
+    # /favorite.
+    FAVORITE_NO_CACHE = (
+        "You haven't looked up an anime yet. Try `/anime query: <title>` first."
+    )
+    FAVORITE_ADDED = "⭐ Added **{title}** to your favorites."
+    FAVORITE_ALREADY = "**{title}** is already in your favorites."
+    FAVORITE_REMOVED = "Removed **{title}** from your favorites."
+    FAVORITE_NOT_PRESENT = "**{title}** wasn't in your favorites."
+
+    # /watch.
+    WATCH_NO_CACHE = (
+        "You haven't looked up an anime yet. Try `/anime query: <title>` first."
+    )
+    WATCH_SET = "Marked **{title}** as **{status}**."
+
+    # /list & /favorites.
+    LIST_HEADER_OWN = "📚 Your {scope} list"
+    LIST_HEADER_OTHER = "📚 {who}'s {scope} list"
+    LIST_SCOPE_ALL = "anime"
+    LIST_SCOPE_FAVORITES = "favorites"
+    LIST_EMPTY_OWN = (
+        "You haven't added any anime yet. Try `/favorite` or "
+        "`/watch status: watching` after a `/anime` lookup."
+    )
+    LIST_EMPTY_OTHER = "{who} hasn't added any anime yet."
+
+    # Generic errors for v2 paths.
+    SQL_FAIL = "Couldn't reach the database — try again in a moment."
+    LIST_PAGE_MALFORMED = "List button malformed."
+
 
 S = _Strings
 
@@ -125,6 +175,23 @@ COOLDOWN_SECONDS = 2
 LAST_ANIME_TTL = 7 * 24 * 60 * 60  # 7 days
 ANILIST_CACHE_TTL = 5 * 60          # 5 minutes — short enough that fresh trends still update
 ANILIST_CACHE_MAX_ENTRIES = 128     # bounded; LRU-ish via insertion-order pop
+
+# v2.0.0 — per-user anime tracking.
+VALID_STATUSES = ("watching", "completed", "on_hold", "dropped", "plan")
+STATUS_EMOJI = {
+    "watching":  "📺",
+    "completed": "✅",
+    "on_hold":   "⏸",
+    "dropped":   "❌",
+    "plan":      "📌",
+}
+STATUS_LABEL = {
+    "watching":  "Watching",
+    "completed": "Completed",
+    "on_hold":   "On hold",
+    "dropped":   "Dropped",
+    "plan":      "Plan to watch",
+}
 
 # Retry budget for AniList transient failures (RpcTimeoutError, 5xx).
 # Sleeps 0.5s then 1.5s — total worst case 2s, well under the 15-min followup
@@ -242,6 +309,15 @@ QUERY_RANDOM_PICK = (
 )
 
 QUERY_GENRES = "query { GenreCollection }"
+
+# /list and /favorites — batch fetch titles for up to PER_PAGE media_ids in one round trip.
+QUERY_MEDIA_BATCH = (
+    "query ($ids: [Int]) {"
+    "  Page(perPage: 50) {"
+    "    media(id_in: $ids, type: ANIME) {" + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
 
 QUERY_CHARACTER = (
     "query ($q: String) {"
@@ -795,6 +871,78 @@ def _render_similar(ctx: Context, media: dict, *, deferred: bool, ephemeral_repl
         ctx.interaction.respond(embeds=[embed], components=components or None, ephemeral=ephemeral_reply)
 
 
+# ── Schema bootstrap + lifecycle ─────────────────────────────────────────────
+
+def _bootstrap_schema(ctx: Context) -> None:
+    """Create the otaku_user_anime table and its index if missing. Idempotent."""
+    ctx.sql.execute(_SCHEMA_DDL)
+    ctx.sql.execute(_SCHEMA_INDEX_DDL)
+
+
+@plugin.on_install
+def _on_install(ctx: Context) -> None:
+    _bootstrap_schema(ctx)
+
+
+@plugin.on_ready
+def _on_ready(ctx: Context) -> None:
+    # Pool-mode safety: on_install doesn't fire on v1.x→v2.0 upgrades, but
+    # on_ready does (synchronously, before the first event handler).
+    _bootstrap_schema(ctx)
+
+
+# ── SQL helpers ──────────────────────────────────────────────────────────────
+
+def _resolve_last_anime_id(ctx: Context, user_id: str) -> int | None:
+    """Read the user's cached last-anime ID and coerce it to int, or None."""
+    if not user_id:
+        return None
+    cached = ctx.kv.get(f"last_anime:user:{user_id}")
+    if cached is None:
+        return None
+    try:
+        return int(cached)
+    except (TypeError, ValueError):
+        return None
+
+
+def _upsert_user_anime(
+    ctx: Context,
+    user_id: str,
+    media_id: int,
+    *,
+    status: str | None = None,
+    is_favorite: bool | None = None,
+) -> None:
+    """Insert or update a row in otaku_user_anime, mutating only the fields passed."""
+    # Defaults for new rows; for existing rows the ON CONFLICT DO UPDATE
+    # branch only touches the columns the caller actually set.
+    insert_status = status if status is not None else "watching"
+    insert_favorite = bool(is_favorite) if is_favorite is not None else False
+
+    update_clauses = []
+    if status is not None:
+        update_clauses.append("status = EXCLUDED.status")
+    if is_favorite is not None:
+        update_clauses.append("is_favorite = EXCLUDED.is_favorite")
+    update_sql = ", ".join(update_clauses) if update_clauses else "user_id = otaku_user_anime.user_id"
+
+    sql = (
+        "INSERT INTO otaku_user_anime (user_id, media_id, status, is_favorite) "
+        "VALUES ($1, $2, $3, $4) "
+        f"ON CONFLICT (user_id, media_id) DO UPDATE SET {update_sql}"
+    )
+    ctx.sql.execute(sql, [user_id, media_id, insert_status, insert_favorite])
+
+
+def _is_favorite(ctx: Context, user_id: str, media_id: int) -> bool:
+    row = ctx.sql.query_one(
+        "SELECT is_favorite FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
+        [user_id, media_id],
+    )
+    return bool(row and row.get("is_favorite"))
+
+
 # ── Slash command handlers ───────────────────────────────────────────────────
 
 @plugin.on_slash_command("anime")
@@ -1099,6 +1247,285 @@ def _genres_embed(genres: list[str]) -> dict:
     }
 
 
+# ── v2.0.0 — /favorite, /favorites, /watch, /list ───────────────────────────
+
+def _resolve_media_by_anime_arg(
+    ctx: Context, user_id: str, anime_arg: str
+) -> tuple[dict | None, str | None]:
+    """Resolve the `anime:` slash option (or last lookup) to a media dict.
+
+    Returns (media, error_message). On success media is the dict and error is None.
+    On failure media is None and error is a user-facing string.
+    """
+    anime_arg = (anime_arg or "").strip()
+    if anime_arg:
+        data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": anime_arg.lower()}, cache=True)
+        if data is None:
+            return None, None  # caller surfaces the standard AniList failure
+        media = data.get("Media")
+        if not media:
+            return None, S.ANIME_NOT_FOUND.format(query=_truncate(anime_arg, 80))
+        return media, None
+
+    # No argument — fall back to cached last lookup.
+    media_id = _resolve_last_anime_id(ctx, user_id)
+    if media_id is None:
+        return None, S.FAVORITE_NO_CACHE
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id})
+    if data is None:
+        return None, None
+    media = data.get("Media")
+    if not media:
+        return None, S.SIMILAR_INVALID_CACHED
+    return media, None
+
+
+@plugin.on_slash_command("favorite")
+def cmd_favorite(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    anime_arg = (opts.get("anime") or "").strip()
+    remove = bool(opts.get("remove"))
+
+    ctx.interaction.defer(ephemeral=True)
+    media, err = _resolve_media_by_anime_arg(ctx, user_id, anime_arg)
+    if media is None:
+        if err is not None:
+            _reply_error(ctx, err, deferred=True)
+        else:
+            _reply_anilist_failure(ctx, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    title = _format_title(media)
+    if not media_id:
+        _reply_error(ctx, S.SIMILAR_INVALID_CACHED, deferred=True)
+        return
+
+    already_favorite = _is_favorite(ctx, user_id, media_id)
+    if remove:
+        if not already_favorite:
+            ctx.interaction.followup(content=S.FAVORITE_NOT_PRESENT.format(title=title), ephemeral=True)
+            return
+        _upsert_user_anime(ctx, user_id, media_id, is_favorite=False)
+        ctx.interaction.followup(content=S.FAVORITE_REMOVED.format(title=title), ephemeral=True)
+        # Keep the user's "last anime" cache fresh so /similar still works.
+        ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
+        return
+
+    if already_favorite:
+        ctx.interaction.followup(content=S.FAVORITE_ALREADY.format(title=title), ephemeral=True)
+        return
+    _upsert_user_anime(ctx, user_id, media_id, is_favorite=True)
+    ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
+    ctx.interaction.followup(content=S.FAVORITE_ADDED.format(title=title), ephemeral=True)
+
+
+@plugin.on_slash_command("watch")
+def cmd_watch(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    status = (opts.get("status") or "").strip().lower()
+    if status not in VALID_STATUSES:
+        ctx.interaction.respond(
+            content=f"Status must be one of: {', '.join(VALID_STATUSES)}",
+            ephemeral=True,
+        )
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    media_id = _resolve_last_anime_id(ctx, user_id)
+    if media_id is None:
+        _reply_error(ctx, S.WATCH_NO_CACHE, deferred=True)
+        return
+
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id})
+    if data is None or not data.get("Media"):
+        _reply_anilist_failure(
+            ctx,
+            deferred=True,
+            fallback=S.SIMILAR_FETCH_FAIL_CACHED,
+        )
+        return
+    title = _format_title(data["Media"])
+    _upsert_user_anime(ctx, user_id, media_id, status=status)
+    ctx.interaction.followup(
+        content=S.WATCH_SET.format(title=title, status=STATUS_LABEL[status]),
+        ephemeral=True,
+    )
+
+
+def _select_user_anime(
+    ctx: Context,
+    target_user_id: str,
+    scope: str,
+    *,
+    page: int,
+) -> tuple[list[dict], bool]:
+    """Read PER_PAGE+1 rows for the given user/scope/page. Returns (rows, has_next)."""
+    offset = max(0, (page - 1) * PER_PAGE)
+    limit = PER_PAGE + 1
+    if scope == "favorites":
+        sql = (
+            "SELECT media_id, status, is_favorite FROM otaku_user_anime "
+            "WHERE user_id = $1 AND is_favorite = TRUE "
+            "ORDER BY added_at DESC LIMIT $2 OFFSET $3"
+        )
+        params = [target_user_id, limit, offset]
+    elif scope == "all":
+        sql = (
+            "SELECT media_id, status, is_favorite FROM otaku_user_anime "
+            "WHERE user_id = $1 "
+            "ORDER BY added_at DESC LIMIT $2 OFFSET $3"
+        )
+        params = [target_user_id, limit, offset]
+    else:
+        sql = (
+            "SELECT media_id, status, is_favorite FROM otaku_user_anime "
+            "WHERE user_id = $1 AND status = $2 "
+            "ORDER BY added_at DESC LIMIT $3 OFFSET $4"
+        )
+        params = [target_user_id, scope, limit, offset]
+
+    rows = ctx.sql.query(sql, params) or []
+    has_next = len(rows) > PER_PAGE
+    return rows[:PER_PAGE], has_next
+
+
+def _list_scope_label(scope: str) -> str:
+    if scope == "all":
+        return S.LIST_SCOPE_ALL
+    if scope == "favorites":
+        return S.LIST_SCOPE_FAVORITES
+    return STATUS_LABEL.get(scope, scope)
+
+
+def _decorate_list_lines(media_list: list[dict], rows_by_id: dict[int, dict]) -> list[str]:
+    """Build the body of /list / /favorites with status emoji + favorite ⭐."""
+    lines = []
+    for i, m in enumerate(media_list, start=1):
+        title = _format_title(m)
+        score = _score(m)
+        url = m.get("siteUrl") or ""
+        row = rows_by_id.get(int(m.get("id") or 0)) or {}
+        status = row.get("status") or "watching"
+        emoji = STATUS_EMOJI.get(status, "•")
+        fav = " ⭐" if row.get("is_favorite") else ""
+        lines.append(f"{emoji}{fav} **{i}. [{title}]({url})** · ⭐ {score}")
+    return lines
+
+
+def _render_user_list(
+    ctx: Context,
+    *,
+    target_user_id: str,
+    target_display: str,
+    is_self: bool,
+    scope: str,
+    page: int,
+    deferred: bool,
+    ephemeral_reply: bool = True,
+) -> None:
+    """Shared renderer for /list, /favorites, and their pagination clicks."""
+    rows, has_next = _select_user_anime(ctx, target_user_id, scope, page=page)
+    scope_label = _list_scope_label(scope)
+
+    if not rows:
+        empty = (
+            S.LIST_EMPTY_OWN if is_self
+            else S.LIST_EMPTY_OTHER.format(who=target_display)
+        )
+        _reply_error(ctx, empty, deferred=deferred)
+        return
+
+    rows_by_id = {int(r["media_id"]): r for r in rows}
+    ids = list(rows_by_id.keys())
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": ids}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+    media_list = ((data.get("Page") or {}).get("media")) or []
+    # Preserve SQL order (newest first), not AniList's response order.
+    def _sort_key(m: dict) -> int:
+        mid = int(m.get("id") or -1)
+        return ids.index(mid) if mid in ids else 9999
+
+    ordered = sorted(media_list, key=_sort_key)
+
+    header_template = S.LIST_HEADER_OWN if is_self else S.LIST_HEADER_OTHER
+    header = header_template.format(scope=scope_label, who=target_display)
+    embed = _make_list_embed(ordered, header, page=page, has_next=has_next)
+    # Override the description with status-emoji-decorated lines.
+    embed["description"] = "\n\n".join(_decorate_list_lines(ordered, rows_by_id))
+
+    prev_id = f"otaku:list:{target_user_id}:{scope}:{page - 1}" if page > 1 else None
+    next_id = f"otaku:list:{target_user_id}:{scope}:{page + 1}" if has_next else None
+    components = [_page_buttons(prev_id, next_id)]
+    select_row = _make_select_row(ordered)
+    if select_row is not None:
+        components.append(select_row)
+
+    if deferred:
+        ctx.interaction.followup(embeds=[embed], components=components, ephemeral=ephemeral_reply)
+    else:
+        ctx.interaction.respond(embeds=[embed], components=components, ephemeral=ephemeral_reply)
+
+
+def _extract_target_user(event: dict, opts: dict) -> tuple[str, str, bool]:
+    """Return (target_user_id, display_name, is_self) based on the optional `user` option."""
+    caller_id = event.get("user_id") or ""
+    target_raw = opts.get("user")
+    if target_raw and str(target_raw).strip() and str(target_raw) != caller_id:
+        target_id = str(target_raw).strip()
+        return target_id, f"<@{target_id}>", False
+    return caller_id, "you", True
+
+
+@plugin.on_slash_command("favorites")
+def cmd_favorites(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    target_id, display, is_self = _extract_target_user(event, opts)
+    ctx.interaction.defer(ephemeral=True)
+    _render_user_list(
+        ctx,
+        target_user_id=target_id,
+        target_display=display,
+        is_self=is_self,
+        scope="favorites",
+        page=1,
+        deferred=True,
+    )
+
+
+@plugin.on_slash_command("list")
+def cmd_list(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    status = (opts.get("status") or "all").strip().lower()
+    if status != "all" and status not in VALID_STATUSES:
+        status = "all"
+    target_id, display, is_self = _extract_target_user(event, opts)
+    ctx.interaction.defer(ephemeral=True)
+    _render_user_list(
+        ctx,
+        target_user_id=target_id,
+        target_display=display,
+        is_self=is_self,
+        scope=status,
+        page=1,
+        deferred=True,
+    )
+
+
 # ── Component handlers ──────────────────────────────────────────────────────
 
 # Components with dynamic args (otaku:similar:<id>, otaku:page:<g>:<s>:<p>,
@@ -1162,6 +1589,35 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _render_similar(ctx, data["Media"], deferred=True, ephemeral_reply=True)
         return
 
+    if cid.startswith("otaku:list:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        # otaku:list:<target_user_id>:<scope>:<page>
+        parts = cid.split(":", 4)
+        if len(parts) < 5:
+            ctx.interaction.respond(content=S.LIST_PAGE_MALFORMED, ephemeral=True)
+            return
+        _, _, target_user_id, scope, page_s = parts
+        try:
+            page = max(1, int(page_s))
+        except ValueError:
+            ctx.interaction.respond(content=S.LIST_PAGE_MALFORMED, ephemeral=True)
+            return
+        is_self = (target_user_id == user_id)
+        display = "you" if is_self else f"<@{target_user_id}>"
+        ctx.interaction.defer(ephemeral=True)
+        _render_user_list(
+            ctx,
+            target_user_id=target_user_id,
+            target_display=display,
+            is_self=is_self,
+            scope=scope,
+            page=page,
+            deferred=True,
+            ephemeral_reply=True,
+        )
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -1172,7 +1628,12 @@ def _route_components(ctx: Context, event: dict) -> None:
     cid = event.get("custom_id") or ""
     if cid == "otaku:expand":
         return  # handled by @plugin.on_component above
-    if cid.startswith("otaku:page:") or cid.startswith("otaku:trend:") or cid.startswith("otaku:similar:"):
+    if (
+        cid.startswith("otaku:page:")
+        or cid.startswith("otaku:trend:")
+        or cid.startswith("otaku:similar:")
+        or cid.startswith("otaku:list:")
+    ):
         _component_dispatch(ctx, event)
 
 

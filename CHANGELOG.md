@@ -20,6 +20,46 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-05-15
+
+### Added
+- **New capability:** `storage:sql` (Risky tier — staff-reviewed). Triggers
+  marketplace re-review.
+- New SQL table `otaku_user_anime` (`user_id`, `media_id`, `status`,
+  `is_favorite`, `added_at`) plus composite index on
+  `(user_id, status, added_at DESC)`. Auto-scoped to `server_id` by the runner.
+- `@plugin.on_install` and `@plugin.on_ready` both run a shared
+  `_bootstrap_schema(ctx)` so v1.x → v2.0.0 upgrades on pool-mode workers
+  bootstrap before the first event handler.
+- `/favorite [anime] [remove]` — toggle a favorite for the user's last
+  `/anime` lookup or for an explicit title.
+- `/favorites [user]` — paginated list of favorites, optionally for another
+  in-server user.
+- `/watch <status>` — set watch status (`watching | completed | on_hold |
+  dropped | plan`) for the user's last lookup.
+- `/list [status] [user]` — paginated tracker view. Status filter optional;
+  defaults to "all". Reuses the existing `_page_buttons` + select-row
+  affordances.
+- New AniList batch query `Page.media(id_in: [...])` so one HTTP call
+  fetches every title on a `/list` page.
+- Status emojis on list rows: 📺 watching, ✅ completed, ⏸ on_hold,
+  ❌ dropped, 📌 plan, ⭐ favorite.
+- Regression file `tests/regression/test_v2_0_0.py` freezes the new schema,
+  manifest entries, and pagination custom_id format.
+
+### Changed
+- Manifest description updated to mention tracking alongside discovery.
+- `tags` now includes `"tracking"`.
+
+### Migration notes
+- **No data migration required.** v1.x had no SQL. On first event after the
+  upgrade, `@plugin.on_ready` creates the table.
+- The KV key `last_anime:user:<id>` is preserved verbatim — old caches keep
+  driving `/similar`, `/favorite`, and `/watch` when called without an
+  `anime:` arg.
+- Privacy: `/list user:@them` is public-within-server by design. Explicit
+  opt-out (`/otaku-privacy hide`) lands in v2.5.x per ROADMAP.md.
+
 ## [1.5.0] - 2026-05-14
 
 ### Added

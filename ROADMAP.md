@@ -401,38 +401,43 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 **Capability needed:** `storage:sql` arrives here (KV alone won't scale — leaderboards, watch history pagination, multi-field rows all want a relational shape).
 
-### v2.0.0 — Favorites & watch status
+### v2.0.0 — Favorites & watch status ✅ shipped 2026-05-15
 
 **Target:** Major. First MAJOR bump.
 
-**Schema introduced (per server):**
+**Schema landed:**
 
 ```sql
-CREATE TABLE otaku_user_anime (
+CREATE TABLE IF NOT EXISTS otaku_user_anime (
   user_id      TEXT NOT NULL,
   media_id     INTEGER NOT NULL,
   status       TEXT NOT NULL,   -- 'watching' | 'completed' | 'on_hold' | 'dropped' | 'plan'
   is_favorite  BOOLEAN NOT NULL DEFAULT FALSE,
-  added_at     TIMESTAMP NOT NULL DEFAULT now(),
+  added_at     TIMESTAMP NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id, media_id)
 );
+
+-- Added vs. roadmap: composite index for /list pagination and Phase-3
+-- leaderboards.
+CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx
+  ON otaku_user_anime (user_id, status, added_at DESC);
 ```
 
-**New slash commands:**
-- `/favorite [add|remove]` — Mark/unmark the user's last `/anime` lookup (or pass an `anime` option). Persists to SQL.
-- `/favorites [user]` — List a user's favorites. Defaults to the caller; takes an optional user mention.
-- `/watch <status>` — Set watch status for the last lookup. Status is one of `watching`, `completed`, `on_hold`, `dropped`, `plan`.
-- `/list [status] [user]` — List a user's anime by status. Paginated.
+**Slash commands shipped:**
+- ~~`/favorite [add|remove]` — Mark/unmark the user's last `/anime` lookup (or pass an `anime` option). Persists to SQL.~~ — supports `anime:` option and a `remove:` boolean.
+- ~~`/favorites [user]` — List a user's favorites. Defaults to the caller; takes an optional user mention.~~ Paginated.
+- ~~`/watch <status>` — Set watch status for the last lookup.~~
+- ~~`/list [status] [user]` — List a user's anime by status. Paginated.~~
 
-**Migration note:** None — first version with SQL. But **document** that the KV key `last_anime:user:<id>` still drives the "last lookup" semantics for `/favorite` and `/watch` without an explicit argument.
+**Pagination custom_id:** `otaku:list:<target_user_id>:<scope>:<page>` where scope is `all | favorites | watching | completed | on_hold | dropped | plan`. One AniList batch HTTP call per page via `Page.media(id_in: [...])`.
 
-**Regression check:** All v1.x tests pass. v2.0.0 regression file added with happy-path coverage of each new command.
+**Migration:** ~~None — first version with SQL.~~ KV key `last_anime:user:<id>` preserved verbatim.
+
+**Regression check:** ~~All v1.x tests pass.~~ Confirmed. ~~v2.0.0 regression file added.~~ `tests/regression/test_v2_0_0.py`.
 
 **Failure modes:**
-- SQL schema bootstrap belongs in `@plugin.on_install` (and now reliably also `@plugin.on_ready` for pool mode in SDK 0.5.2+). Wrap in `CREATE TABLE IF NOT EXISTS` for idempotency.
-- The `PRIMARY KEY (user_id, media_id)` means re-favoriting is a no-op — that's correct, but make sure the user gets feedback ("Already in your favorites").
-
-**Commits:** ~12 across schema setup, each command, tests, README, changelog.
+- ~~SQL schema bootstrap belongs in `@plugin.on_install` (and now reliably also `@plugin.on_ready` for pool mode in SDK 0.5.2+).~~ Both wired; share a `_bootstrap_schema(ctx)` helper.
+- ~~The `PRIMARY KEY (user_id, media_id)` means re-favoriting is a no-op — make sure the user gets feedback.~~ Done — separate "already in your favorites" / "wasn't in your favorites" messages.
 
 ---
 

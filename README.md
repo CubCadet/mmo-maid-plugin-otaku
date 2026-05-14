@@ -16,7 +16,8 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 |---|---|---|
 | `interaction:respond` | Safe | Reply to slash commands and component (button/select) clicks. Auto-added because the manifest declares `slash_commands`. |
 | `proxy:http` | Safe | Call AniList's GraphQL endpoint (`graphql.anilist.co`) — the only outbound host. |
-| `storage:kv` | Safe | Cache each user's last-viewed anime ID for 7 days so `/similar` can default to it. |
+| `storage:kv` | Safe | Cache each user's last-viewed anime ID for 7 days so `/similar` can default to it. Also caches AniList's genre list for 24h. |
+| `storage:sql` | Risky | Per-user anime tracking (`/favorite`, `/watch`, `/list`, `/favorites`). Single table `otaku_user_anime`, auto-scoped per server. |
 
 No Discord-side write capabilities are requested — the plugin never sends, edits, or deletes channel content directly; everything is an interaction reply.
 
@@ -34,6 +35,10 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/character <query>` | Look up an AniList character by name. Returns a card with image, native + romaji name, description, and the top 5 media they appear in. First match only. |
 | `/help` | Lists every otaku command with a one-line description and example. Built from `manifest.json` so it always reflects what's registered. |
 | `/genres` | Shows AniList's canonical genre list. Cached in KV at `genres:global` (24h TTL); falls back to a live AniList call on cache miss. |
+| `/favorite [anime] [remove]` | Mark (or unmark) the user's last `/anime` lookup as a favorite, or pass an `anime:` title explicitly. Stored in SQL. |
+| `/favorites [user]` | Paginated list of favorites for the caller or a mentioned user. ⭐ next to each row. |
+| `/watch <status>` | Set watch status for the user's last `/anime` lookup. Status is one of `watching`, `completed`, `on_hold`, `dropped`, `plan`. |
+| `/list [status] [user]` | Paginated tracker. Status filter optional; defaults to "all." Status emojis (📺 ✅ ⏸ ❌ 📌) prefix every row. |
 
 ### Politeness throttle
 
@@ -50,6 +55,25 @@ genres:global                       →   ["Action", ...]      (TTL: 24h, server
 
 KV is per-server and per-plugin, so the same user is tracked independently on each server. The 7-day TTL means an inactive user's cache expires on its own — no explicit cleanup needed. KV is wiped automatically on uninstall.
 
+## SQL schema
+
+v2.0.0 added one table for tracking commands. Rows are auto-scoped to `ctx.server_id` by the runner, so the schema has no explicit `server_id` column.
+
+```sql
+CREATE TABLE IF NOT EXISTS otaku_user_anime (
+  user_id      TEXT NOT NULL,
+  media_id     INTEGER NOT NULL,
+  status       TEXT NOT NULL,                 -- watching | completed | on_hold | dropped | plan
+  is_favorite  BOOLEAN NOT NULL DEFAULT FALSE,
+  added_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, media_id)
+);
+CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx
+  ON otaku_user_anime (user_id, status, added_at DESC);
+```
+
+The DDL is idempotent (`IF NOT EXISTS`) and runs from both `@plugin.on_install` and `@plugin.on_ready`. The `on_ready` path covers pool-mode workers picking up a tenant that upgraded from v1.x (where `on_install` does not re-fire).
+
 ## Custom_id namespace
 
 All component custom_ids are prefixed with `otaku:`:
@@ -60,6 +84,7 @@ All component custom_ids are prefixed with `otaku:`:
 | `otaku:page:<genre>:<sort>:<page>` | `/discover` prev/next buttons | Re-queries AniList on each click. |
 | `otaku:trend:<page>` | `/trending` prev/next buttons | Re-queries the current season. |
 | `otaku:expand` | List-view select menu | The selected option's `value` is the media ID. |
+| `otaku:list:<user>:<scope>:<page>` | `/list` and `/favorites` prev/next buttons | scope is `all`, `favorites`, or one of the watch statuses. |
 
 ## Quick start (development)
 
