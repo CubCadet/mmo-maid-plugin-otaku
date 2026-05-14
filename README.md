@@ -78,6 +78,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/review` | Open a modal to write or edit a review of your last `/anime` lookup. Existing review (if any) is pre-filled. One review per user per anime. |
 | `/reviews [anime]` | Browse this server's reviews for an anime. Accepts a title, a numeric AniList ID, or defaults to your last `/anime` lookup. Paginated, sorted by most-recently-edited. |
 | `/aotw start \| status \| end` | Anime-of-the-week voting. Admin starts (top 5 from server watchlist); members vote via numbered buttons; admin ends and winner gets posted in the announcement channel. One active poll per server. |
+| `/poll create \| status \| end` | Free-form server polls. Admin creates with a question and 2–4 options; members vote via A/B/C/D buttons; admin ends. Multiple concurrent polls allowed; each has its own `poll_id`. |
 
 ### Politeness throttle
 

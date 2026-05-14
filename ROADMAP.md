@@ -799,9 +799,28 @@ the announcement.
 
 ---
 
-### v7.2.0 — Server polls
+### v7.2.0 — Server polls ✅ shipped 2026-05-14
 
-General "which of these 4 anime should we watch next" polls with `/poll` and reactions.
+~~General "which of these 4 anime should we watch next" polls with `/poll` and reactions.~~ Shipped as **`/poll`** with three
+subcommands:
+- `/poll create question:<…> a:<…> b:<…> [c] [d]` (admin) — creates
+  a poll with 2–4 options, posts embed + numbered vote buttons.
+- `/poll status id:<…>` (public) — live standings any time.
+- `/poll end id:<…>` (admin) — closes the poll. No winner crowned —
+  /poll is a discussion tool, use /aotw if you want a "winner."
+
+**Buttons, not reactions.** Every other interactive surface in the
+plugin uses buttons; staying consistent and avoiding reaction-event
+capability bloat outweighs the literal roadmap wording.
+
+**Multiple concurrent polls per server** are allowed (unlike /aotw
+which enforces single-active). Each poll has its own poll_id.
+
+**Schema:** three new tables (`otaku_polls`, `otaku_poll_options`,
+`otaku_poll_votes`). PK on votes is `(poll_id, user_id)` so re-voting
+UPDATEs the existing row.
+
+**Capability:** none new. Closes Phase 7.
 
 ---
 

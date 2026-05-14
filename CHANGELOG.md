@@ -20,6 +20,43 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [7.2.0] - 2026-05-14
+
+### Added — Phase 7 closes
+- `/poll` — generic server polls, three subcommands:
+  - `/poll create question:<…> a:<…> b:<…> [c:<…>] [d:<…>]`
+    (admin only) — 2 to 4 options. Posts an embed with one button per
+    option (labels A/B/C/D) and the poll_id in the footer.
+  - `/poll status id:<…>` (public) — live standings for any poll
+    (active or ended), with a vote-bar indicator.
+  - `/poll end id:<…>` (admin only) — closes the poll. No winner
+    crowned — /poll is a discussion tool; use /aotw for "winner".
+- Three new SQL tables wired into `_bootstrap_schema`:
+  `otaku_polls`, `otaku_poll_options`, `otaku_poll_votes`. PK on votes
+  is `(poll_id, user_id)`; re-voting UPDATEs the row.
+- Vote button routing — `otaku:poll-vote:<poll_id>:<option_key>` runs
+  through the existing `_route_components` dispatcher with ephemeral
+  vote confirmations.
+- Concurrent polls — multiple polls can be active per server at once
+  (unlike /aotw which enforces single-active). Each is addressed by
+  its `poll_id`.
+- Regression file `tests/regression/test_v7_2_0.py` (17 tests) freezes
+  the schema bootstrap, the option-key set (`a`/`b`/`c`/`d`),
+  POLL_MIN_OPTIONS=2 / POLL_MAX_OPTIONS=4, admin gating on create/end
+  (status stays public), option-insert ordering, vote insert/update/
+  noop branches, vote-button custom_id shape, and end-of-already-ended
+  poll graceful no-op.
+
+### Deviation from the roadmap
+- The roadmap mentioned **reactions** for /poll voting. v7.2 ships
+  **buttons** instead — every other interactive surface in the plugin
+  already uses buttons (cleaner state model, no reaction-event
+  capability needed). Notes in CHANGELOG so the reactive variant is on
+  record if someone asks.
+
+### Capability surface
+- **No new capabilities.** All of Phase 7 added zero capabilities.
+
 ## [7.1.0] - 2026-05-14
 
 ### Added

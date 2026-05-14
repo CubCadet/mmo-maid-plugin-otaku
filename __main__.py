@@ -142,6 +142,33 @@ _SCHEMA_AOTW_VOTES_DDL = (
     "  voted_at TIMESTAMP NOT NULL DEFAULT NOW(),"
     "  PRIMARY KEY (poll_id, user_id))"
 )
+# v7.2.0 — generic server polls. Free-form question + up to 4 options;
+# admin-only create/end, public status. One vote per user per poll
+# (changing your choice UPDATEs).
+_SCHEMA_POLLS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_polls ("
+    "  poll_id SERIAL PRIMARY KEY,"
+    "  started_by TEXT NOT NULL,"
+    "  question TEXT NOT NULL,"
+    "  started_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  ended_at TIMESTAMP,"
+    "  status TEXT NOT NULL DEFAULT 'active')"
+)
+_SCHEMA_POLL_OPTIONS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_poll_options ("
+    "  poll_id INTEGER NOT NULL,"
+    "  option_key TEXT NOT NULL,"
+    "  text TEXT NOT NULL,"
+    "  PRIMARY KEY (poll_id, option_key))"
+)
+_SCHEMA_POLL_VOTES_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_poll_votes ("
+    "  poll_id INTEGER NOT NULL,"
+    "  user_id TEXT NOT NULL,"
+    "  option_key TEXT NOT NULL,"
+    "  voted_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (poll_id, user_id))"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -465,6 +492,26 @@ class _Strings:
         "You haven't tracked any anime yet. Try `/favorite` or `/rate score: <n>` "
         "after a `/anime` lookup."
     )
+
+    # /poll (v7.2.0).
+    POLL_NOT_ADMIN = (
+        "Only server admins can run `/poll {action}`. Ask a moderator with "
+        "`Manage Server` or `Administrator`."
+    )
+    POLL_USAGE = "Pick a subcommand: `create`, `status`, or `end`."
+    POLL_QUESTION_REQUIRED = "Poll needs a question."
+    POLL_OPTIONS_REQUIRED = "Poll needs at least 2 options."
+    POLL_CREATED_HEADER = "📊 {question}"
+    POLL_STATUS_HEADER = "📊 Poll #{poll_id} — {question}"
+    POLL_FOOTER_LIVE = "{n} votes cast · poll #{poll_id}"
+    POLL_FOOTER_ENDED = "Closed poll #{poll_id} · {n} votes cast"
+    POLL_NOT_FOUND = "No poll with id `{poll_id}` on this server."
+    POLL_ENDED_OK = "Closed poll #{poll_id} ({n} votes)."
+    POLL_VOTE_BUTTON_MALFORMED = "Poll vote button malformed."
+    POLL_VOTE_CLOSED = "That poll is closed — `/poll status id: {poll_id}` shows the result."
+    POLL_VOTE_RECORDED = "🗳 Voted **{label}**."
+    POLL_VOTE_CHANGED = "🗳 Changed your vote to **{label}**."
+    POLL_VOTE_NOOP = "You already voted for **{label}**."
 
     # /aotw (v7.1.0).
     AOTW_NOT_ADMIN = (
@@ -1399,6 +1446,10 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_AOTW_POLLS_DDL)
     ctx.sql.execute(_SCHEMA_AOTW_CANDIDATES_DDL)
     ctx.sql.execute(_SCHEMA_AOTW_VOTES_DDL)
+    # v7.2.0
+    ctx.sql.execute(_SCHEMA_POLLS_DDL)
+    ctx.sql.execute(_SCHEMA_POLL_OPTIONS_DDL)
+    ctx.sql.execute(_SCHEMA_POLL_VOTES_DDL)
 
 
 @plugin.on_install
@@ -4342,6 +4393,10 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _handle_aotw_vote(ctx, event)
         return
 
+    if cid.startswith("otaku:poll-vote:"):
+        _handle_poll_vote(ctx, event)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -4374,6 +4429,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:mood:")
         or cid.startswith("otaku:reviews:")
         or cid.startswith("otaku:aotw-vote:")
+        or cid.startswith("otaku:poll-vote:")
     ):
         _component_dispatch(ctx, event)
 
@@ -4672,6 +4728,295 @@ def cmd_reviews(ctx: Context, event: dict) -> None:
         media_id = cached
 
     _render_reviews(ctx, media_id, page=1, deferred=True)
+
+
+# ── v7.2.0 — /poll (generic server polls) ───────────────────────────────────
+#
+# Free-form question + 2-to-4 options. Unlike /aotw, multiple polls can be
+# open at once per server, each addressed by its poll_id (returned at create
+# time). Admins create and close; voting is open to everyone. PK on votes
+# is (poll_id, user_id) — re-voting UPDATEs.
+
+POLL_MIN_OPTIONS = 2
+POLL_MAX_OPTIONS = 4
+POLL_OPTION_KEYS = ["a", "b", "c", "d"]
+POLL_OPTION_LABELS = ["A", "B", "C", "D"]
+POLL_QUESTION_MAX = 200
+POLL_OPTION_TEXT_MAX = 100
+
+
+def _poll_row(ctx: Context, poll_id: int) -> dict | None:
+    rows = ctx.sql.query(
+        "SELECT poll_id, started_by, question, started_at, ended_at, status "
+        "FROM otaku_polls WHERE poll_id = $1",
+        [poll_id],
+    ) or []
+    return rows[0] if rows else None
+
+
+def _poll_options(ctx: Context, poll_id: int) -> list[dict]:
+    return ctx.sql.query(
+        "SELECT option_key, text FROM otaku_poll_options "
+        "WHERE poll_id = $1 ORDER BY option_key ASC",
+        [poll_id],
+    ) or []
+
+
+def _poll_vote_counts(ctx: Context, poll_id: int) -> dict[str, int]:
+    rows = ctx.sql.query(
+        "SELECT option_key, COUNT(*) AS n FROM otaku_poll_votes "
+        "WHERE poll_id = $1 GROUP BY option_key",
+        [poll_id],
+    ) or []
+    return {str(r["option_key"]): int(r["n"]) for r in rows}
+
+
+def _poll_existing_vote(ctx: Context, poll_id: int, user_id: str) -> str | None:
+    rows = ctx.sql.query(
+        "SELECT option_key FROM otaku_poll_votes "
+        "WHERE poll_id = $1 AND user_id = $2",
+        [poll_id, user_id],
+    ) or []
+    if not rows:
+        return None
+    key = rows[0].get("option_key")
+    return str(key) if key is not None else None
+
+
+def _poll_render_embed(
+    ctx: Context, poll_id: int, *, header_template: str, ended: bool = False
+) -> dict | None:
+    poll = _poll_row(ctx, poll_id)
+    if poll is None:
+        return None
+    options = _poll_options(ctx, poll_id)
+    counts = _poll_vote_counts(ctx, poll_id)
+    total = sum(counts.values())
+    lines = []
+    for opt in options:
+        key = opt["option_key"]
+        text = opt["text"]
+        n = counts.get(key, 0)
+        bar = "🟩" * min(10, n) if n else "—"
+        suffix = "vote" if n == 1 else "votes"
+        lines.append(f"**{key.upper()}**) {text} · {n} {suffix} {bar}")
+    footer_template = S.POLL_FOOTER_ENDED if ended else S.POLL_FOOTER_LIVE
+    return {
+        "title": header_template.format(poll_id=poll_id, question=_truncate(poll["question"], 200)),
+        "description": "\n".join(lines) if lines else "*(no options)*",
+        "color": ANILIST_COLOR,
+        "footer": {"text": footer_template.format(n=total, poll_id=poll_id)},
+    }
+
+
+def _poll_vote_buttons(poll_id: int, options: list[dict]) -> ActionRow:
+    buttons = []
+    for opt in options[:POLL_MAX_OPTIONS]:
+        key = opt["option_key"]
+        label_idx = POLL_OPTION_KEYS.index(key) if key in POLL_OPTION_KEYS else 0
+        buttons.append(
+            Button(
+                POLL_OPTION_LABELS[label_idx],
+                custom_id=f"otaku:poll-vote:{poll_id}:{key}",
+                style="primary",
+            )
+        )
+    return ActionRow(*buttons)
+
+
+def _subopts(event_or_sub: dict) -> dict:
+    """Flatten subcommand options into a dict."""
+    opts = event_or_sub.get("options") or []
+    if isinstance(opts, dict):
+        return opts
+    return {o["name"]: o.get("value") for o in opts if isinstance(o, dict)}
+
+
+def _cmd_poll_create(ctx: Context, user_id: str, sub_opts: dict) -> None:
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.respond(
+            content=S.POLL_NOT_ADMIN.format(action="create"), ephemeral=True
+        )
+        return
+    question = (sub_opts.get("question") or "").strip()
+    if not question:
+        ctx.interaction.respond(content=S.POLL_QUESTION_REQUIRED, ephemeral=True)
+        return
+    question = question[:POLL_QUESTION_MAX]
+
+    options: list[tuple[str, str]] = []
+    for key in POLL_OPTION_KEYS:
+        text = (sub_opts.get(key) or "").strip()
+        if text:
+            options.append((key, text[:POLL_OPTION_TEXT_MAX]))
+    if len(options) < POLL_MIN_OPTIONS:
+        ctx.interaction.respond(content=S.POLL_OPTIONS_REQUIRED, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+
+    ctx.sql.execute(
+        "INSERT INTO otaku_polls (started_by, question) VALUES ($1, $2)",
+        [user_id, question],
+    )
+    poll_rows = ctx.sql.query(
+        "SELECT poll_id FROM otaku_polls "
+        "WHERE started_by = $1 AND question = $2 AND status = 'active' "
+        "ORDER BY started_at DESC LIMIT 1",
+        [user_id, question],
+    ) or []
+    if not poll_rows or poll_rows[0].get("poll_id") is None:
+        _reply_error(ctx, S.SQL_FAIL, deferred=True)
+        return
+    poll_id = int(poll_rows[0]["poll_id"])
+    for key, text in options:
+        ctx.sql.execute(
+            "INSERT INTO otaku_poll_options (poll_id, option_key, text) "
+            "VALUES ($1, $2, $3)",
+            [poll_id, key, text],
+        )
+
+    embed = _poll_render_embed(ctx, poll_id, header_template=S.POLL_STATUS_HEADER)
+    if embed is None:
+        _reply_error(ctx, S.SQL_FAIL, deferred=True)
+        return
+    option_rows = _poll_options(ctx, poll_id)
+    ctx.interaction.followup(
+        embeds=[embed], components=[_poll_vote_buttons(poll_id, option_rows)]
+    )
+
+
+def _cmd_poll_status(ctx: Context, sub_opts: dict) -> None:
+    ctx.interaction.defer()
+    try:
+        poll_id = int(sub_opts.get("id") or 0)
+    except (TypeError, ValueError):
+        _reply_error(ctx, S.POLL_NOT_FOUND.format(poll_id=sub_opts.get("id")), deferred=True)
+        return
+    poll = _poll_row(ctx, poll_id)
+    if poll is None:
+        _reply_error(ctx, S.POLL_NOT_FOUND.format(poll_id=poll_id), deferred=True)
+        return
+    ended = (poll.get("status") != "active")
+    embed = _poll_render_embed(
+        ctx, poll_id, header_template=S.POLL_STATUS_HEADER, ended=ended
+    )
+    if embed is None:
+        _reply_error(ctx, S.POLL_NOT_FOUND.format(poll_id=poll_id), deferred=True)
+        return
+    ctx.interaction.followup(embeds=[embed])
+
+
+def _cmd_poll_end(ctx: Context, user_id: str, sub_opts: dict) -> None:
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.respond(
+            content=S.POLL_NOT_ADMIN.format(action="end"), ephemeral=True
+        )
+        return
+    ctx.interaction.defer(ephemeral=True)
+    try:
+        poll_id = int(sub_opts.get("id") or 0)
+    except (TypeError, ValueError):
+        _reply_error(ctx, S.POLL_NOT_FOUND.format(poll_id=sub_opts.get("id")), deferred=True)
+        return
+    poll = _poll_row(ctx, poll_id)
+    if poll is None:
+        _reply_error(ctx, S.POLL_NOT_FOUND.format(poll_id=poll_id), deferred=True)
+        return
+    if poll.get("status") != "active":
+        ctx.interaction.followup(
+            content=S.POLL_ENDED_OK.format(poll_id=poll_id, n=0), ephemeral=True
+        )
+        return
+    counts = _poll_vote_counts(ctx, poll_id)
+    total = sum(counts.values())
+    ctx.sql.execute(
+        "UPDATE otaku_polls SET status = 'ended', ended_at = NOW() "
+        "WHERE poll_id = $1",
+        [poll_id],
+    )
+    ctx.interaction.followup(
+        content=S.POLL_ENDED_OK.format(poll_id=poll_id, n=total), ephemeral=True
+    )
+
+
+@plugin.on_slash_command("poll")
+def cmd_poll(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = event.get("options") or []
+    if not opts or not isinstance(opts, list):
+        ctx.interaction.respond(content=S.POLL_USAGE, ephemeral=True)
+        return
+    sub = opts[0] if isinstance(opts[0], dict) else {}
+    subcommand = sub.get("name") or ""
+    sub_opts = _subopts(sub)
+    if subcommand == "create":
+        _cmd_poll_create(ctx, user_id, sub_opts)
+    elif subcommand == "status":
+        _cmd_poll_status(ctx, sub_opts)
+    elif subcommand == "end":
+        _cmd_poll_end(ctx, user_id, sub_opts)
+    else:
+        ctx.interaction.respond(content=S.POLL_USAGE, ephemeral=True)
+
+
+def _handle_poll_vote(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    cid = event.get("custom_id") or ""
+    parts = cid.split(":", 3)
+    if len(parts) < 4:
+        ctx.interaction.respond(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+    try:
+        poll_id = int(parts[2])
+    except ValueError:
+        ctx.interaction.respond(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+    option_key = parts[3]
+    if option_key not in POLL_OPTION_KEYS:
+        ctx.interaction.respond(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+
+    poll = _poll_row(ctx, poll_id)
+    if poll is None or poll.get("status") != "active":
+        ctx.interaction.respond(
+            content=S.POLL_VOTE_CLOSED.format(poll_id=poll_id), ephemeral=True
+        )
+        return
+
+    options = _poll_options(ctx, poll_id)
+    valid_keys = {o["option_key"] for o in options}
+    if option_key not in valid_keys:
+        ctx.interaction.respond(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+    chosen_text = next((o["text"] for o in options if o["option_key"] == option_key), option_key)
+    label = f"{option_key.upper()}) {_truncate(chosen_text, 80)}"
+
+    existing = _poll_existing_vote(ctx, poll_id, user_id)
+    if existing == option_key:
+        ctx.interaction.respond(
+            content=S.POLL_VOTE_NOOP.format(label=label), ephemeral=True
+        )
+        return
+    if existing is None:
+        ctx.sql.execute(
+            "INSERT INTO otaku_poll_votes (poll_id, user_id, option_key) "
+            "VALUES ($1, $2, $3)",
+            [poll_id, user_id, option_key],
+        )
+        msg = S.POLL_VOTE_RECORDED.format(label=label)
+    else:
+        ctx.sql.execute(
+            "UPDATE otaku_poll_votes SET option_key = $1, voted_at = NOW() "
+            "WHERE poll_id = $2 AND user_id = $3",
+            [option_key, poll_id, user_id],
+        )
+        msg = S.POLL_VOTE_CHANGED.format(label=label)
+    ctx.interaction.respond(content=msg, ephemeral=True)
 
 
 # ── v7.1.0 — /aotw (anime of the week voting) ────────────────────────────────

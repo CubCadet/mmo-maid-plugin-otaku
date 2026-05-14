@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "7.1.0",
+  "version": "7.2.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -477,6 +477,40 @@
           "name": "end",
           "description": "End the active vote and announce the winner (admin only).",
           "type": 1
+        }
+      ]
+    },
+    {
+      "name": "poll",
+      "description": "Server polls — create a free-form vote, check status, or end one.",
+      "options": [
+        {
+          "name": "create",
+          "description": "Create a new poll (admin only). 2 to 4 options.",
+          "type": 1,
+          "options": [
+            {"name": "question", "description": "The question to ask", "type": 3, "required": true},
+            {"name": "a", "description": "Option A", "type": 3, "required": true},
+            {"name": "b", "description": "Option B", "type": 3, "required": true},
+            {"name": "c", "description": "Option C (optional)", "type": 3, "required": false},
+            {"name": "d", "description": "Option D (optional)", "type": 3, "required": false}
+          ]
+        },
+        {
+          "name": "status",
+          "description": "Show a poll's current standings.",
+          "type": 1,
+          "options": [
+            {"name": "id", "description": "Poll id (shown in /poll create output)", "type": 4, "required": true}
+          ]
+        },
+        {
+          "name": "end",
+          "description": "Close a poll (admin only).",
+          "type": 1,
+          "options": [
+            {"name": "id", "description": "Poll id to close", "type": 4, "required": true}
+          ]
         }
       ]
     },
