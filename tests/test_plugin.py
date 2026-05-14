@@ -696,6 +696,126 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v4.2.0 /season-premieres + seasonal digest ─────────────────────────────
+
+
+def test_next_season_helper_wraps_at_fall():
+    import datetime as _dt
+    # December — current FALL, next is WINTER of next year.
+    fixed = _dt.datetime(2026, 12, 1, tzinfo=_dt.timezone.utc)
+    season, year = p._next_season(fixed)
+    assert season == "WINTER" and year == 2027
+
+
+def test_next_season_helper_inside_spring():
+    import datetime as _dt
+    fixed = _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+    season, year = p._next_season(fixed)
+    assert season == "SUMMER" and year == 2026
+
+
+def test_season_is_fresh_within_first_week():
+    import datetime as _dt
+    fresh = _dt.datetime(2026, 4, 3, tzinfo=_dt.timezone.utc)  # day 3 of SPRING
+    stale = _dt.datetime(2026, 4, 20, tzinfo=_dt.timezone.utc)  # day 20 of SPRING
+    assert p._season_is_fresh(fresh) is True
+    assert p._season_is_fresh(stale) is False
+
+
+def test_season_premieres_command_uses_next_season_by_default():
+    ctx = MockContext()
+    media_list = [_make_other(i, f"Show {i}") for i in range(1, 4)]
+    _mock_anilist(ctx, {"Page": {
+        "pageInfo": {"hasNextPage": False, "currentPage": 1},
+        "media": media_list,
+    }})
+
+    p.cmd_season_premieres(ctx, _slash_event("season-premieres", {}, user_id="u1"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "premieres" in follow["embeds"][0]["title"].lower()
+    body = ctx.http.requests[-1]["body"]
+    assert any(s in body for s in ("WINTER", "SPRING", "SUMMER", "FALL"))
+
+
+def test_season_premieres_command_accepts_explicit_season_and_year():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Page": {
+        "pageInfo": {"hasNextPage": True, "currentPage": 1},
+        "media": [_make_other(1, "Premiere One")],
+    }})
+
+    p.cmd_season_premieres(
+        ctx,
+        _slash_event("season-premieres", {"season": "SPRING", "year": 2027}, user_id="u2"),
+    )
+
+    body = ctx.http.requests[-1]["body"]
+    assert "SPRING" in body
+    assert "2027" in body
+    # Pagination wired — has_next=True means there's a next button.
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("components")
+
+
+def test_premieres_pagination_button_dispatches():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Page": {
+        "pageInfo": {"hasNextPage": False, "currentPage": 2},
+        "media": [_make_other(99, "Page 2")],
+    }})
+
+    p._route_components(
+        ctx,
+        _component_event("otaku:premieres:FALL:2026:2", user_id="u3"),
+    )
+
+    follow = ctx.interaction.followups[-1]
+    assert follow["embeds"][0]["title"].startswith("🌸 Fall 2026")
+
+
+def test_premieres_pagination_malformed_replies_ephemerally():
+    ctx = MockContext()
+    p._route_components(
+        ctx,
+        _component_event("otaku:premieres:FALL:notayear:2", user_id="u4"),
+    )
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "malformed" in (resp.get("content") or "").lower()
+
+
+def test_dispatch_premieres_digest_no_channel_skips():
+    ctx = MockContext()
+    # No NOTIFY_CHANNEL_KV set.
+    assert p._dispatch_premieres_digest(ctx) is False
+    assert not ctx.discord.messages_sent
+
+
+def test_dispatch_premieres_digest_outside_window_skips(monkeypatch):
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "ch")
+    # Force "fresh" check to False.
+    monkeypatch.setattr(p, "_season_is_fresh", lambda *_a, **_k: False)
+    assert p._dispatch_premieres_digest(ctx) is False
+
+
+def test_dispatch_premieres_digest_posts_once_per_season(monkeypatch):
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "announce-ch")
+    monkeypatch.setattr(p, "_season_is_fresh", lambda *_a, **_k: True)
+    _mock_anilist(ctx, {"Page": {
+        "pageInfo": {"hasNextPage": False, "currentPage": 1},
+        "media": [_make_other(1, "Premiere"), _make_other(2, "Another")],
+    }})
+
+    assert p._dispatch_premieres_digest(ctx) is True
+    assert len(ctx.discord.messages_sent) == 1
+    # Second call same season → KV dedup short-circuits.
+    assert p._dispatch_premieres_digest(ctx) is False
+    assert len(ctx.discord.messages_sent) == 1
+
+
 # ── v4.0.0 /notify + /unnotify + /notify-list + airing dispatch ────────────
 
 

@@ -595,11 +595,11 @@ Originally "server announcement channel." Shipped as part of v4.0.0 above.
 
 ---
 
-### v4.2.0 — Seasonal premieres digest
+### v4.2.0 — Seasonal premieres digest ✅ shipped 2026-05-15
 
 **New slash command:**
-- `/season-premieres` — Show the upcoming season's premiering anime in a paginated embed.
-- Automatic weekly digest posted to the announcement channel during transition weeks.
+- ~~`/season-premieres` — Show the upcoming season's premiering anime in a paginated embed.~~ Defaults to next season when args omitted; explicit `season:` and `year:` options for browsing past or further-ahead seasons.
+- ~~Automatic weekly digest posted to the announcement channel during transition weeks.~~ Implemented as a piggyback on the v4.0 hourly cron — during the first 7 days of each season, the cron posts one digest per server (KV-dedup'd at `premieres_digest_last:guild`). "Weekly" became "once at season start" since that's the only week the digest is novel.
 
 ---
 

@@ -61,6 +61,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/unnotify <anime>` | Stop airing notifications for an anime. |
 | `/notify-list` | Show your active subscriptions with the next-episode ETA. |
 | `/otaku-admin set-channel <#channel>` | Admin-only. Sets where airing pings post. Omit the channel to clear. |
+| `/season-premieres [season] [year]` | Paginated browse of upcoming anime premieres. Defaults to next season. |
 
 ### Politeness throttle
 
@@ -74,6 +75,7 @@ The plugin uses two KV keys:
 last_anime:user:<discord_user_id>   →   <anilist_media_id>   (TTL: 7 days, per-user)
 genres:global                       →   ["Action", ...]      (TTL: 24h, server-wide)
 notify_channel:guild                →   "<channel_id>"       (no TTL, server-wide)
+premieres_digest_last:guild         →   "<SEASON>_<YEAR>"    (no TTL, server-wide)
 ```
 
 KV is per-server and per-plugin, so the same user is tracked independently on each server. The 7-day TTL means an inactive user's cache expires on its own — no explicit cleanup needed. KV is wiped automatically on uninstall.
@@ -148,6 +150,7 @@ All component custom_ids are prefixed with `otaku:`:
 | `otaku:list:<user>:<scope>:<page>` | `/list` and `/favorites` prev/next buttons | scope is `all`, `favorites`, or one of the watch statuses. |
 | `otaku:swl:<page>` | `/server-watchlist view` prev/next | Server watchlist is shared, no user_id in the id. |
 | `otaku:wp-join:<party_id>` | `[🎬 Join party]` button on `/wp create` and `/wp status` embeds | One-click join for a watch party. |
+| `otaku:premieres:<season>:<year>:<page>` | `/season-premieres` prev/next buttons | Season + year baked in so the same buttons work across multiple seasons in flight. |
 
 ## Quick start (development)
 

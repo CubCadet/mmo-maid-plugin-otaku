@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "4.0.0",
+  "version": "4.2.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -394,6 +394,30 @@
     {
       "name": "notify-list",
       "description": "Show your active airing subscriptions."
+    },
+    {
+      "name": "season-premieres",
+      "description": "Show upcoming anime premieres for a season (defaults to next season).",
+      "options": [
+        {
+          "name": "season",
+          "description": "Which season",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "Winter", "value": "WINTER"},
+            {"name": "Spring", "value": "SPRING"},
+            {"name": "Summer", "value": "SUMMER"},
+            {"name": "Fall",   "value": "FALL"}
+          ]
+        },
+        {
+          "name": "year",
+          "description": "Season year (defaults to the next season's year)",
+          "type": 4,
+          "required": false
+        }
+      ]
     },
     {
       "name": "stats",

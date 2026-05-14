@@ -20,6 +20,25 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-05-15
+
+### Added
+- `/season-premieres [season] [year]` — paginated browse of upcoming
+  premieres. Defaults to next season when neither arg is passed.
+- Automatic weekly seasonal digest: the v4.0 hourly cron now also calls
+  `_dispatch_premieres_digest()`. During the first 7 days of each new
+  season, it posts a top-5 premieres embed to the per-server
+  announcement channel (if one is configured). KV-deduped per season per
+  server at `premieres_digest_last:guild`.
+- New helpers `_next_season()`, `_current_season_at(now)`,
+  `_season_is_fresh(now)` for testable season-boundary logic.
+- Pagination button `otaku:premieres:<season>:<year>:<page>`.
+- Regression file `tests/regression/test_v4_2_0.py`.
+
+### Note
+- v4.1.0 stays vacant (per v4.0.0's note — its admin-channel scope was
+  rolled forward into v4.0.0).
+
 ## [4.0.0] - 2026-05-15
 
 ### Added

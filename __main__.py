@@ -238,6 +238,15 @@ class _Strings:
         "{mentions}"
     )
 
+    # /season-premieres.
+    PREMIERES_HEADER = "🌸 {season} {year} premieres"
+    PREMIERES_EMPTY = "No premieres found for {season} {year}."
+    PREMIERES_PAGE_MALFORMED = "Premieres button malformed."
+    PREMIERES_DIGEST_TITLE = "🌸 {season} {year} is starting — top premieres"
+    PREMIERES_DIGEST_FOOTER = (
+        "Use `/notify anime: <title>` to get pinged when episodes air."
+    )
+
     # /otaku-admin set-channel.
     ADMIN_CHANNEL_SET = "Airing notifications will now post in <#{channel_id}>."
     ADMIN_CHANNEL_CLEARED = (
@@ -2297,6 +2306,166 @@ def _dispatch_airing_announcements(ctx: Context) -> int:
     return sent
 
 
+# ── v4.2.0 — seasonal premieres ─────────────────────────────────────────────
+
+# Season transitions roughly align with the calendar quarters.
+_SEASON_ORDER = ("WINTER", "SPRING", "SUMMER", "FALL")
+_SEASON_START_MONTHS = {"WINTER": 1, "SPRING": 4, "SUMMER": 7, "FALL": 10}
+# Per-server KV remembers the most-recent season we auto-digested, so the cron
+# only posts the seasonal digest once per season per server.
+PREMIERES_DIGEST_KV = "premieres_digest_last:guild"
+PREMIERES_DIGEST_WINDOW_DAYS = 7  # post on or before day 7 of a new season
+
+
+def _next_season(now: datetime | None = None) -> tuple[str, int]:
+    """Return the (season, year) immediately AFTER the current one (UTC)."""
+    now = now or datetime.now(timezone.utc)
+    cur, year = _current_season_at(now)
+    idx = _SEASON_ORDER.index(cur)
+    if idx == 3:  # FALL → next is WINTER of year+1
+        return _SEASON_ORDER[0], year + 1
+    return _SEASON_ORDER[idx + 1], year
+
+
+def _current_season_at(now: datetime) -> tuple[str, int]:
+    """Variant of _current_season that takes an explicit `now` for tests."""
+    m = now.month
+    if m <= 3:
+        return "WINTER", now.year
+    if m <= 6:
+        return "SPRING", now.year
+    if m <= 9:
+        return "SUMMER", now.year
+    return "FALL", now.year
+
+
+def _season_is_fresh(now: datetime | None = None) -> bool:
+    """True if `now` lands inside the first PREMIERES_DIGEST_WINDOW_DAYS of a season."""
+    now = now or datetime.now(timezone.utc)
+    season, _year = _current_season_at(now)
+    start_month = _SEASON_START_MONTHS[season]
+    # Day-of-season = (today − first day of start_month).days + 1, but only for
+    # the season's own months. Outside those months we can't be "fresh."
+    if now.month < start_month or now.month > start_month + 2:
+        return False
+    season_start = now.replace(month=start_month, day=1, hour=0, minute=0, second=0, microsecond=0)
+    delta_days = (now - season_start).days
+    return 0 <= delta_days < PREMIERES_DIGEST_WINDOW_DAYS
+
+
+def _render_premieres(
+    ctx: Context, season: str, year: int, page: int, *, deferred: bool
+) -> None:
+    data = _anilist_query(
+        ctx,
+        QUERY_SEASON,
+        {"season": season, "year": year, "sort": ["POPULARITY_DESC"],
+         "page": page, "perPage": PER_PAGE},
+        cache=(page == 1),
+    )
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+    page_obj = (data.get("Page") or {})
+    media_list = page_obj.get("media") or []
+    has_next = bool((page_obj.get("pageInfo") or {}).get("hasNextPage"))
+
+    header = S.PREMIERES_HEADER.format(season=season.title(), year=year)
+    if not media_list:
+        _reply_error(ctx, S.PREMIERES_EMPTY.format(season=season.title(), year=year), deferred=deferred)
+        return
+
+    embed = _make_list_embed(media_list, header, page=page, has_next=has_next)
+    prev_id = f"otaku:premieres:{season}:{year}:{page - 1}" if page > 1 else None
+    next_id = f"otaku:premieres:{season}:{year}:{page + 1}" if has_next else None
+    components = [_page_buttons(prev_id, next_id)]
+    select_row = _make_select_row(media_list)
+    if select_row is not None:
+        components.append(select_row)
+
+    if deferred:
+        ctx.interaction.followup(embeds=[embed], components=components)
+    else:
+        ctx.interaction.respond(embeds=[embed], components=components)
+
+
+@plugin.on_slash_command("season-premieres")
+def cmd_season_premieres(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    raw_season = (opts.get("season") or "").strip().upper()
+    raw_year = opts.get("year")
+
+    if raw_season and raw_year is not None:
+        season = raw_season if raw_season in _SEASON_ORDER else None
+        try:
+            year = int(raw_year)
+        except (TypeError, ValueError):
+            year = None
+        if season is None or year is None:
+            ctx.interaction.respond(
+                content="Pick a season from the choices and pass a valid year.",
+                ephemeral=True,
+            )
+            return
+    else:
+        season, year = _next_season()
+
+    ctx.interaction.defer()
+    _render_premieres(ctx, season, year, page=1, deferred=True)
+
+
+def _dispatch_premieres_digest(ctx: Context) -> bool:
+    """Post the seasonal digest to the announcement channel, once per season.
+
+    Returns True if a digest was actually posted. Skipped silently if:
+    - we're not in the season's freshness window
+    - no announcement channel is configured
+    - we've already posted this season's digest (KV-dedup'd per server)
+    """
+    if not _season_is_fresh():
+        return False
+    channel_id = _resolve_announcement_channel(ctx)
+    if not channel_id:
+        return False
+
+    season, year = _current_season_at(datetime.now(timezone.utc))
+    digest_key = f"{season}_{year}"
+    try:
+        prev = ctx.kv.get(PREMIERES_DIGEST_KV)
+    except Exception:  # noqa: BLE001
+        prev = None
+    if prev == digest_key:
+        return False
+
+    data = _anilist_query(
+        ctx, QUERY_SEASON,
+        {"season": season, "year": year, "sort": ["POPULARITY_DESC"],
+         "page": 1, "perPage": PER_PAGE},
+        cache=True,
+    )
+    media_list = ((data or {}).get("Page") or {}).get("media") or []
+    if not media_list:
+        return False
+
+    header = S.PREMIERES_DIGEST_TITLE.format(season=season.title(), year=year)
+    embed = _make_list_embed(media_list, header, page=1, has_next=False)
+    embed["footer"] = {"text": S.PREMIERES_DIGEST_FOOTER}
+    try:
+        ctx.discord.send_message(channel_id=channel_id, embeds=[embed])
+    except Exception as exc:  # noqa: BLE001
+        ctx.log(f"premieres digest send failed: {exc}", level="warning", tags=["notify", "digest"])
+        return False
+
+    try:
+        ctx.kv.set(PREMIERES_DIGEST_KV, digest_key)
+    except Exception:  # noqa: BLE001 — failing to mark digest done just means we'll try again next cron
+        pass
+    return True
+
+
 @plugin.cron("5 * * * *")  # every hour at :05 UTC (single-tenant only)
 def cron_airing_check(ctx: Context) -> None:
     """In pool mode this never fires. See CHANGELOG v4.0.0 — fallback runs from
@@ -2308,6 +2477,14 @@ def cron_airing_check(ctx: Context) -> None:
         return
     if n:
         ctx.log(f"airing cron sent {n} announcement(s)", level="info", tags=["notify", "cron"])
+
+    # Seasonal-premieres digest piggy-backs on the same cron. Idempotent —
+    # we only post once per season per server thanks to KV dedup.
+    try:
+        if _dispatch_premieres_digest(ctx):
+            ctx.log("posted seasonal premieres digest", level="info", tags=["notify", "digest"])
+    except Exception as exc:  # noqa: BLE001
+        ctx.log(f"premieres digest failed: {exc}", level="error", tags=["notify", "digest"])
 
 
 # ── v3.3.0 — /leaderboard ───────────────────────────────────────────────────
@@ -3643,6 +3820,25 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _wp_join_internal(ctx, party_id, user_id, deferred=True)
         return
 
+    if cid.startswith("otaku:premieres:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        # otaku:premieres:<season>:<year>:<page>
+        parts = cid.split(":", 4)
+        if len(parts) < 5:
+            ctx.interaction.respond(content=S.PREMIERES_PAGE_MALFORMED, ephemeral=True)
+            return
+        _, _, season, year_s, page_s = parts
+        try:
+            year = int(year_s)
+            page = max(1, int(page_s))
+        except ValueError:
+            ctx.interaction.respond(content=S.PREMIERES_PAGE_MALFORMED, ephemeral=True)
+            return
+        ctx.interaction.defer()
+        _render_premieres(ctx, season, year, page=page, deferred=True)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -3662,6 +3858,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:reset-cancel:")
         or cid.startswith("otaku:swl:")
         or cid.startswith("otaku:wp-join:")
+        or cid.startswith("otaku:premieres:")
     ):
         _component_dispatch(ctx, event)
 
