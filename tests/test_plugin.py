@@ -696,6 +696,63 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v2.3.0 /stats ───────────────────────────────────────────────────────────
+
+
+def test_stats_empty_user_replies_empty_state():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    p.cmd_stats(ctx, _slash_event("stats", {}, user_id="stats-empty"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "haven't" in (follow.get("content") or "")
+
+
+def test_stats_aggregates_by_status_and_computes_hours():
+    ctx = MockContext()
+    # First call (aggregate by status), second (top-genre media_ids).
+    call_count = {"n": 0}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        call_count["n"] += 1
+        if "GROUP BY status" in sql:
+            return [
+                {"status": "completed", "count": 5, "episodes": 60, "mean_rating": 16.0},
+                {"status": "watching",  "count": 2, "episodes": 6,  "mean_rating": None},
+            ]
+        if "ORDER BY added_at DESC" in sql:
+            return [{"media_id": 1}, {"media_id": 2}]
+        return []
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    # AniList batch for top-genre returns two media with overlapping genres.
+    _mock_anilist(ctx, {"Page": {"media": [
+        {**_make_other(1, "A"), "genres": ["Action", "Drama"]},
+        {**_make_other(2, "B"), "genres": ["Action"]},
+    ]}})
+
+    p.cmd_stats(ctx, _slash_event("stats", {}, user_id="stats-1"))
+
+    follow = ctx.interaction.followups[-1]
+    embed = follow["embeds"][0]
+    fields = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields["Total tracked"] == "7"
+    assert fields["Episodes"] == "66"
+    # 66 episodes × 24 min = 1584 min = 26.4 hours
+    assert fields["Est. hours"] == "26.4"
+    assert fields["✅ Completed"] == "5"
+    assert fields["📺 Watching"] == "2"
+    # mean rating only weighted across rated rows (5 of 7); rating stored ×2, so 16 → 8.0
+    assert "8.0/10" in fields["Mean score"]
+    assert fields.get("Top genre") == "Action"
+
+
+def test_stats_aggregate_helper_returns_empty_dict_on_no_rows():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    assert p._aggregate_user_stats(ctx, "nobody") == {}
+
+
 # ── v2.2.0 progress ─────────────────────────────────────────────────────────
 
 

@@ -20,6 +20,18 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-15
+
+### Added
+- `/stats [user]` — aggregate per-user stats: total tracked, counts by
+  status (watching/completed/dropped/on_hold/plan), total episodes,
+  estimated hours (24 min/episode heuristic), mean rating, and top
+  genre (sampled from the 50 most-recently-added anime).
+- New helpers `_aggregate_user_stats` and `_top_genre_for_user`. The
+  aggregate query is a single `GROUP BY status` over the existing
+  composite index — no schema change needed.
+- Regression file `tests/regression/test_v2_3_0.py`.
+
 ## [2.2.0] - 2026-05-15
 
 ### Added

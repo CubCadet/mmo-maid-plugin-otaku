@@ -470,12 +470,12 @@ ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT 
 
 ---
 
-### v2.3.0 — Personal stats
+### v2.3.0 — Personal stats ✅ shipped 2026-05-15
 
 **New slash command:**
-- `/stats [user]` — Total anime watched, completed, dropped, mean score, most-watched genre, total episodes, total estimated hours (24 min × episodes).
+- ~~`/stats [user]` — Total anime watched, completed, dropped, mean score, most-watched genre, total episodes, total estimated hours (24 min × episodes).~~
 
-**Implementation hints:** All from the existing `otaku_user_anime` table joined with the genre data we can either cache from AniList or query live.
+**Implementation:** ~~All from the existing `otaku_user_anime` table joined with the genre data we can either cache from AniList or query live.~~ Single `GROUP BY status` SQL for counts/episodes/mean-rating; AniList batch fetch for the 50 most-recent media to compute the top genre (sampled, not full table).
 
 ---
 

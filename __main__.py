@@ -194,6 +194,15 @@ class _Strings:
     PROGRESS_FIELD_VALUE_UNBOUNDED = "Episode {episodes}"
     PROGRESS_FIELD_VALUE_BOUNDED = "Episode {episodes} / {total}"
 
+    # /stats.
+    STATS_HEADER_OWN = "📊 Your anime stats"
+    STATS_HEADER_OTHER = "📊 {who}'s anime stats"
+    STATS_EMPTY_OWN = (
+        "You haven't tracked any anime yet. Try `/favorite`, `/watch`, or `/progress` "
+        "after a `/anime` lookup."
+    )
+    STATS_EMPTY_OTHER = "{who} hasn't tracked any anime yet."
+
     # /ratings.
     RATINGS_HEADER_OWN = "⭐ Your ratings"
     RATINGS_HEADER_OTHER = "⭐ {who}'s ratings"
@@ -1585,6 +1594,128 @@ def cmd_list(ctx: Context, event: dict) -> None:
         page=1,
         deferred=True,
     )
+
+
+# ── v2.3.0 — /stats ─────────────────────────────────────────────────────────
+
+# Heuristic episode length for the "total hours" estimate. Real anime episodes
+# vary 11–24 min; 24 lines up with AniList's standard TV slot length.
+STATS_MINUTES_PER_EPISODE = 24
+STATS_TOP_GENRE_SAMPLE = 50  # Most-recent N anime sampled to pick the top genre.
+
+
+def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
+    """Return a dict of SQL-only aggregate stats. Empty dict if the user has no rows."""
+    # by_status: list of {status, count, episodes, mean_rating}
+    rows = ctx.sql.query(
+        "SELECT status, COUNT(*) AS count, "
+        "       COALESCE(SUM(episodes_watched), 0) AS episodes, "
+        "       AVG(rating) AS mean_rating "
+        "FROM otaku_user_anime WHERE user_id = $1 GROUP BY status",
+        [user_id],
+    ) or []
+    if not rows:
+        return {}
+
+    by_status: dict[str, int] = {s: 0 for s in VALID_STATUSES}
+    total_episodes = 0
+    rating_acc = 0.0  # weighted by count to compute overall mean
+    rated_count = 0
+    for r in rows:
+        status = r.get("status") or "watching"
+        count = int(r.get("count") or 0)
+        by_status[status] = by_status.get(status, 0) + count
+        total_episodes += int(r.get("episodes") or 0)
+        mean = r.get("mean_rating")
+        if mean is not None and count > 0:
+            rating_acc += float(mean) * count
+            rated_count += count
+
+    overall_mean = (rating_acc / rated_count) if rated_count else None
+    total = sum(by_status.values())
+    total_hours = round((total_episodes * STATS_MINUTES_PER_EPISODE) / 60, 1)
+    return {
+        "total": total,
+        "by_status": by_status,
+        "total_episodes": total_episodes,
+        "total_hours": total_hours,
+        "mean_rating": overall_mean,
+        "rated_count": rated_count,
+    }
+
+
+def _top_genre_for_user(ctx: Context, user_id: str) -> str | None:
+    """Look up the user's most-recent N anime on AniList and return their top genre."""
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_user_anime WHERE user_id = $1 "
+        "ORDER BY added_at DESC LIMIT $2",
+        [user_id, STATS_TOP_GENRE_SAMPLE],
+    ) or []
+    if not rows:
+        return None
+    ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+    if not ids:
+        return None
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": ids}, cache=True)
+    if data is None:
+        return None
+    media_list = ((data.get("Page") or {}).get("media")) or []
+    counts: dict[str, int] = {}
+    for m in media_list:
+        for g in (m.get("genres") or []):
+            counts[g] = counts.get(g, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
+@plugin.on_slash_command("stats")
+def cmd_stats(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    target_id, display, is_self = _extract_target_user(event, opts)
+    ctx.interaction.defer(ephemeral=True)
+
+    agg = _aggregate_user_stats(ctx, target_id)
+    if not agg:
+        empty = S.STATS_EMPTY_OWN if is_self else S.STATS_EMPTY_OTHER.format(who=display)
+        _reply_error(ctx, empty, deferred=True)
+        return
+
+    top_genre = _top_genre_for_user(ctx, target_id)
+
+    by_status = agg["by_status"]
+    fields = [
+        {"name": "Total tracked", "value": f"{agg['total']:,}", "inline": True},
+        {"name": "Episodes",      "value": f"{agg['total_episodes']:,}", "inline": True},
+        {"name": "Est. hours",    "value": f"{agg['total_hours']:.1f}", "inline": True},
+        {"name": "📺 Watching",    "value": str(by_status.get("watching", 0)),  "inline": True},
+        {"name": "✅ Completed",   "value": str(by_status.get("completed", 0)), "inline": True},
+        {"name": "❌ Dropped",     "value": str(by_status.get("dropped", 0)),   "inline": True},
+        {"name": "⏸ On hold",     "value": str(by_status.get("on_hold", 0)),   "inline": True},
+        {"name": "📌 Plan",        "value": str(by_status.get("plan", 0)),      "inline": True},
+        {
+            "name": "Mean score",
+            "value": (
+                f"{agg['mean_rating'] / 2:.1f}/10 ({agg['rated_count']} rated)"
+                if agg["mean_rating"] is not None else "—"
+            ),
+            "inline": True,
+        },
+    ]
+    if top_genre:
+        fields.append({"name": "Top genre", "value": top_genre, "inline": False})
+
+    header = S.STATS_HEADER_OWN if is_self else S.STATS_HEADER_OTHER.format(who=display)
+    embed = {
+        "title": header,
+        "color": ANILIST_COLOR,
+        "fields": fields,
+        "footer": {"text": f"{STATS_MINUTES_PER_EPISODE}min/episode heuristic · Data from AniList"},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
 # ── v2.2.0 — episode progress ───────────────────────────────────────────────

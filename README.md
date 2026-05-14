@@ -42,6 +42,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/rate <score>` | Rate the user's last `/anime` lookup on a 1.0–10.0 scale (half-points OK). Stored as `SMALLINT` (score × 2). |
 | `/ratings [user]` | Show a user's rated anime, top 25 sorted by score. |
 | `/progress <episodes>` | Record episodes watched for the user's last `/anime` lookup. Caps at the anime's total; auto-promotes status to `completed` at total. |
+| `/stats [user]` | Aggregate per-user view: counts by status, episodes, est. hours (24min/ep heuristic), mean score, top genre. |
 
 ### Politeness throttle
 
