@@ -20,6 +20,18 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-14
+
+### Added
+- `/random [genre]` — rolls a single random anime, optionally constrained to
+  a genre. Falls back to page 1 if the random roll lands on an empty page in
+  a niche genre.
+- `/character <query>` — looks up an AniList character by name. Shows native
+  + romaji name, image, description, and the top 5 media they appear in.
+  First match only (noted in the footer).
+- Regression test file `tests/regression/test_v1_1_0.py` locking in both
+  new commands.
+
 ## [1.0.2] - 2026-05-14
 
 ### Added

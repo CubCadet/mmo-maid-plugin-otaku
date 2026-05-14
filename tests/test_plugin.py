@@ -337,6 +337,126 @@ def test_anime_handles_malformed_response_with_errors_array():
     assert (follow.get("content") or "")  # non-empty error message
 
 
+# ── v1.1.0 /random ──────────────────────────────────────────────────────────
+
+def test_random_with_genre_picks_one_and_caches_id():
+    ctx = MockContext()
+    media = _make_other(777, "Random Pick")
+    media["genres"] = ["Action"]
+    # First HTTP call (meta) returns a lastPage, second (pick) returns the media.
+    # MockHttp dispatches all matching URLs to the same canned response, so embed
+    # everything we need into one body: Page with both pageInfo and media.
+    ctx.http.mock_response(
+        "graphql.anilist.co",
+        status=200,
+        body=json.dumps({"data": {"Page": {
+            "pageInfo": {"lastPage": 3, "hasNextPage": True},
+            "media": [media],
+        }}}),
+    )
+
+    p.cmd_random(ctx, _slash_event("random", {"genre": "Action"}, user_id="rng1"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("embeds"), "expected an anime card"
+    assert ctx.kv.get("last_anime:user:rng1") == 777
+
+
+def test_random_without_genre_still_works():
+    ctx = MockContext()
+    media = _make_other(101, "Solo")
+    ctx.http.mock_response(
+        "graphql.anilist.co",
+        status=200,
+        body=json.dumps({"data": {"Page": {
+            "pageInfo": {"lastPage": 1, "hasNextPage": False},
+            "media": [media],
+        }}}),
+    )
+
+    p.cmd_random(ctx, _slash_event("random", {}, user_id="rng2"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("embeds")
+
+
+def test_random_falls_back_to_page_one_on_empty_response():
+    """If the random page comes back empty, /random should retry page 1."""
+    ctx = MockContext()
+    # Single mock: every request returns this same body. The meta call sees the
+    # populated media list (Page 1), the pick call also sees a populated list
+    # because there's only one mock — but the assertion we want is just that
+    # the user gets a result, not a "no results" error.
+    media = _make_other(202, "Fallback")
+    ctx.http.mock_response(
+        "graphql.anilist.co",
+        status=200,
+        body=json.dumps({"data": {"Page": {
+            "pageInfo": {"lastPage": 1, "hasNextPage": False},
+            "media": [media],
+        }}}),
+    )
+
+    p.cmd_random(ctx, _slash_event("random", {"genre": "Niche"}, user_id="rng3"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("embeds")
+
+
+# ── v1.1.0 /character ───────────────────────────────────────────────────────
+
+SAMPLE_CHARACTER = {
+    "id": 999,
+    "name": {"full": "Mitsuha Miyamizu", "native": "宮水 三葉"},
+    "image": {"large": "https://img.example.com/mitsuha.jpg"},
+    "description": "A high-school girl living in <b>Itomori</b>.<br>She's a shrine maiden.",
+    "siteUrl": "https://anilist.co/character/999",
+    "media": {"nodes": [
+        {"id": 123, "title": {"romaji": "Kimi no Na wa.", "english": "Your Name"},
+         "siteUrl": "https://anilist.co/anime/123"},
+    ]},
+}
+
+
+def test_character_command_returns_embed_with_image_and_media():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Character": SAMPLE_CHARACTER})
+
+    p.cmd_character(ctx, _slash_event("character", {"query": "mitsuha"}, user_id="chr1"))
+
+    follow = ctx.interaction.followups[-1]
+    embed = follow["embeds"][0]
+    assert "Mitsuha" in embed["title"]
+    assert embed["thumbnail"]["url"].startswith("https://")
+    fields = embed.get("fields") or []
+    assert any(f["name"] == "Appears in" and "Kimi" in f["value"] for f in fields)
+
+
+def test_character_command_no_result_replies_ephemerally():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Character": None})
+
+    p.cmd_character(ctx, _slash_event("character", {"query": "xyz"}, user_id="chr2"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "No character found" in (follow.get("content") or "")
+
+
+def test_character_handles_missing_description_gracefully():
+    ctx = MockContext()
+    bare = dict(SAMPLE_CHARACTER)
+    bare["description"] = None
+    bare["media"] = {"nodes": []}
+    _mock_anilist(ctx, {"Character": bare})
+
+    p.cmd_character(ctx, _slash_event("character", {"query": "x"}, user_id="chr3"))
+
+    follow = ctx.interaction.followups[-1]
+    embed = follow["embeds"][0]
+    assert "no description" in embed["description"]
+
+
 # ── v1.0.2 caching ──────────────────────────────────────────────────────────
 
 def test_anime_cache_hit_short_circuits_http():

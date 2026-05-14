@@ -12,6 +12,7 @@ The plugin is interaction-only — no message events, no schedules, no SQL.
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -116,6 +117,39 @@ QUERY_SIMILAR_BY_NAME = (
     "      nodes {"
     "        mediaRecommendation {" + _MEDIA_FIELDS + "}"
     "      }"
+    "    }"
+    "  }"
+    "}"
+)
+
+# /random — peek at lastPage so we can pick a random page within range.
+QUERY_RANDOM_META = (
+    "query ($genre: String) {"
+    "  Page(page: 1, perPage: 1) {"
+    "    pageInfo { lastPage hasNextPage }"
+    "    media(type: ANIME, genre: $genre, sort: POPULARITY_DESC) { id }"
+    "  }"
+    "}"
+)
+
+QUERY_RANDOM_PICK = (
+    "query ($genre: String, $page: Int) {"
+    "  Page(page: $page, perPage: 1) {"
+    "    media(type: ANIME, genre: $genre, sort: POPULARITY_DESC) {" + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
+
+QUERY_CHARACTER = (
+    "query ($q: String) {"
+    "  Character(search: $q) {"
+    "    id"
+    "    name { full native }"
+    "    image { large }"
+    "    description(asHtml: false)"
+    "    siteUrl"
+    "    media(perPage: 5, sort: POPULARITY_DESC) {"
+    "      nodes { id title { romaji english } siteUrl }"
     "    }"
     "  }"
     "}"
@@ -227,6 +261,40 @@ def _make_anime_embed(media: dict) -> dict:
     banner = media.get("bannerImage")
     if banner:
         embed["image"] = {"url": banner}
+    return embed
+
+
+def _make_character_embed(char: dict) -> dict:
+    """AniList character card — name, image, description, top media."""
+    name = (char.get("name") or {})
+    full = (name.get("full") or "").strip()
+    native = (name.get("native") or "").strip()
+    if full and native and full != native:
+        title = f"{full} ({native})"
+    else:
+        title = full or native or "Unknown character"
+
+    description = _truncate(_strip_html(char.get("description")), DESC_MAX) or "*(no description on AniList)*"
+    site_url = char.get("siteUrl") or None
+    embed: dict = {
+        "title": title,
+        "url": site_url,
+        "description": description,
+        "color": ANILIST_COLOR,
+        "footer": {"text": "Data from AniList · first match only"},
+    }
+    image = (char.get("image") or {}).get("large")
+    if image:
+        embed["thumbnail"] = {"url": image}
+
+    media_nodes = ((char.get("media") or {}).get("nodes")) or []
+    if media_nodes:
+        lines = []
+        for m in media_nodes[:5]:
+            mtitle = _format_title(m)
+            url = m.get("siteUrl") or ""
+            lines.append(f"• [{mtitle}]({url})" if url else f"• {mtitle}")
+        embed["fields"] = [{"name": "Appears in", "value": "\n".join(lines), "inline": False}]
     return embed
 
 
@@ -634,6 +702,88 @@ def cmd_similar(ctx: Context, event: dict) -> None:
         _reply_error(ctx, "Couldn't fetch recommendations for your last anime.", deferred=True)
         return
     _render_similar(ctx, data["Media"], deferred=True)
+
+
+# Cap on /random's page roll. Beyond this AniList's results get very obscure,
+# and the pageInfo.lastPage for a popular genre easily breaks 1000.
+RANDOM_MAX_PAGE = 50
+
+
+@plugin.on_slash_command("random")
+def cmd_random(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    genre_raw = (opts.get("genre") or "").strip()
+    genre: str | None = genre_raw or None
+
+    ctx.interaction.defer()
+    meta = _anilist_query(ctx, QUERY_RANDOM_META, {"genre": genre}, cache=True)
+    if meta is None:
+        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
+        return
+
+    page_info = ((meta.get("Page") or {}).get("pageInfo")) or {}
+    last_page = int(page_info.get("lastPage") or 1)
+    if last_page < 1:
+        last_page = 1
+    upper = min(last_page, RANDOM_MAX_PAGE)
+    page = random.randint(1, upper) if upper >= 1 else 1
+
+    pick = _anilist_query(ctx, QUERY_RANDOM_PICK, {"genre": genre, "page": page})
+    media_list = ((pick or {}).get("Page") or {}).get("media") or []
+    if not media_list and page != 1:
+        # Niche genre with sparse later pages — fall back to page 1.
+        pick = _anilist_query(ctx, QUERY_RANDOM_PICK, {"genre": genre, "page": 1})
+        media_list = ((pick or {}).get("Page") or {}).get("media") or []
+    if not media_list:
+        label = f"the **{genre_raw}** filter" if genre else "AniList"
+        _reply_error(ctx, f"No random anime came back from {label} — try a different genre.", deferred=True)
+        return
+
+    media = media_list[0]
+    media_id = media.get("id")
+    if media_id is not None and user_id:
+        ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
+
+    embed = _make_anime_embed(media)
+    if genre:
+        embed["title"] = f"🎲 {embed['title']}"
+    buttons = [Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁")]
+    site_url = media.get("siteUrl")
+    if site_url:
+        buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
+    ctx.interaction.followup(embeds=[embed], components=[ActionRow(*buttons)])
+
+
+@plugin.on_slash_command("character")
+def cmd_character(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    query = (opts.get("query") or "").strip()
+    if not query:
+        ctx.interaction.respond(content="Usage: `/character query: <name>`", ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    data = _anilist_query(ctx, QUERY_CHARACTER, {"q": query.lower()}, cache=True)
+    if data is None:
+        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
+        return
+    char = data.get("Character")
+    if not char:
+        _reply_error(ctx, f"No character found matching **{_truncate(query, 80)}**.", deferred=True)
+        return
+
+    embed = _make_character_embed(char)
+    components = None
+    site_url = char.get("siteUrl")
+    if site_url:
+        components = [ActionRow(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))]
+    ctx.interaction.followup(embeds=[embed], components=components)
 
 
 # ── Component handlers ──────────────────────────────────────────────────────

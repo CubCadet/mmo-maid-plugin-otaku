@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Discover, search, and learn about anime from Discord — search by title, browse by genre, see what's trending this season, and find shows similar to ones you've looked up. Powered by AniList.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search"],
@@ -60,6 +60,30 @@
           "description": "Anime to find recommendations for (defaults to your last /anime lookup)",
           "type": 3,
           "required": false
+        }
+      ]
+    },
+    {
+      "name": "random",
+      "description": "Roll a single random anime, optionally filtered by genre.",
+      "options": [
+        {
+          "name": "genre",
+          "description": "Optional genre filter (e.g. Action, Romance)",
+          "type": 3,
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "character",
+      "description": "Look up an AniList character by name.",
+      "options": [
+        {
+          "name": "query",
+          "description": "Character name to search for",
+          "type": 3,
+          "required": true
         }
       ]
     }

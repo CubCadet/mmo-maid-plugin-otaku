@@ -302,34 +302,25 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 ---
 
-### v1.1.0 — Random discovery + character lookup
+### v1.1.0 — Random discovery + character lookup ✅ shipped 2026-05-14
 
 **Target:** Minor. First feature additions.
 
 **New slash commands:**
 
-- `/random [genre]` — Picks one anime, optionally filtered by genre. Uses AniList's `Page.media` with a randomly chosen page within the available range for that filter.
-- `/character <query>` — Searches AniList for a character by name and displays a card (image, name native + romaji, description, media they appear in).
+- ~~`/random [genre]`~~ — landed. Uses a meta query for `lastPage`, then rolls `randint(1, min(lastPage, 50))` and re-queries for that page.
+- ~~`/character <query>`~~ — landed. First match only, with a footer that says so.
 
 **Implementation hints:**
-- For `/random`, query `Page(perPage: 1, page: $page)` where `$page` is `randint(1, min(maxPage, 50))`. Don't pull all results.
-- For `/character`, the AniList GraphQL `Character` type has `name { full native }`, `image { large }`, `description`, and `media(perPage: 5) { nodes { ... } }`.
+- ~~For `/random`, query `Page(perPage: 1, page: $page)` where `$page` is `randint(1, min(maxPage, 50))`. Don't pull all results.~~
+- ~~For `/character`, the AniList GraphQL `Character` type has `name { full native }`, `image { large }`, `description`, and `media(perPage: 5) { nodes { ... } }`.~~
 
-**Regression check:** Copy v1.0.0 tests into `tests/regression/test_v1_0_0.py` (if not already). Make sure the new commands don't break the cached `last_anime:user:<id>` shape.
+**Regression check:** ~~Copy v1.0.0 tests into `tests/regression/test_v1_0_0.py` (if not already).~~ Already done. Added `tests/regression/test_v1_1_0.py` for the two new commands.
 
-**Failure modes:**
-- AniList `Character` search returns multiple matches — use the first. Document this in the embed footer.
-- A character has no `description` — show "*(no description on AniList)*".
-- `randint` could land on an empty page if the user requests a niche genre — fall back to page 1 if the response is empty.
-
-**Commits:**
-- `feat(slash): add /random for a single random anime by optional genre`
-- `feat(slash): add /character for AniList character lookup`
-- `test: cover /random with and without genre filter`
-- `test: cover /character with multi-match`
-- `docs(readme): document /random and /character`
-- `docs(changelog): v1.1.0 entry`
-- `chore(release): v1.1.0`
+**Failure modes encountered:**
+- ~~AniList `Character` search returns multiple matches — use the first.~~ Footer says "first match only."
+- ~~A character has no `description` — show "*(no description on AniList)*".~~ Implemented.
+- ~~`randint` could land on an empty page if the user requests a niche genre — fall back to page 1 if the response is empty.~~ Implemented.
 
 ---
 

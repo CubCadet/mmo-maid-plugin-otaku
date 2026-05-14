@@ -30,6 +30,8 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/discover <genre> [sort]` | Browse a genre. `sort` is one of `popular` (default), `trending`, or `score`. Replies with a paginated list of 5 results plus `[⬅️ Prev]` / `[Next ➡️]` buttons and a select menu to expand any result into the full anime card. |
 | `/trending` | Top 5 trending anime for the current season (Winter/Spring/Summer/Fall) — same paginated style as `/discover`. |
 | `/similar [anime]` | Top 5 AniList-recommended anime for a given title. If `anime` is omitted, uses your cached last `/anime` lookup (if any); otherwise tells you ephemerally to run `/anime` first. |
+| `/random [genre]` | Roll a single random anime. If `genre` is given, the roll is constrained to that genre. Caches the result as your "last anime." |
+| `/character <query>` | Look up an AniList character by name. Returns a card with image, native + romaji name, description, and the top 5 media they appear in. First match only. |
 
 ### Politeness throttle
 
