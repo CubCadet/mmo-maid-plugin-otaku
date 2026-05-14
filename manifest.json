@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking"],
@@ -166,6 +166,18 @@
           "description": "Whose ratings to show (defaults to you)",
           "type": 6,
           "required": false
+        }
+      ]
+    },
+    {
+      "name": "progress",
+      "description": "Record episodes watched for your last /anime lookup.",
+      "options": [
+        {
+          "name": "episodes",
+          "description": "Episode count (0 or higher)",
+          "type": 4,
+          "required": true
         }
       ]
     },

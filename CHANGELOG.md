@@ -20,6 +20,19 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-15
+
+### Added
+- `/progress <episodes>` — record episodes watched for the user's last
+  `/anime` lookup. Validates against the anime's total episode count
+  (caps over-cap input and warns the user). Auto-promotes status to
+  `completed` when `episodes_watched == total`.
+- Schema: `ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS
+  episodes_watched SMALLINT DEFAULT 0`.
+- `/anime`, `/random`, and the expand-from-list select now show a
+  "Your progress" field on the card when the user has progress > 0.
+- Regression file `tests/regression/test_v2_2_0.py`.
+
 ## [2.1.0] - 2026-05-15
 
 ### Added

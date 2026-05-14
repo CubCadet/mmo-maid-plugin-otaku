@@ -457,15 +457,15 @@ Wired into `_bootstrap_schema`. Idempotent via `ADD COLUMN IF NOT EXISTS`.
 
 ---
 
-### v2.2.0 — Episode progress tracking
+### v2.2.0 — Episode progress tracking ✅ shipped 2026-05-15
 
 **New slash command:**
-- `/progress <episodes>` — Set how many episodes you've watched of the last anime lookup. Validates against the anime's `episodes` count.
-- Display progress on `/anime` cards when the user has watched some episodes.
+- ~~`/progress <episodes>` — Set how many episodes you've watched of the last anime lookup. Validates against the anime's `episodes` count.~~ Over-cap input is capped + warned about; reaching total auto-promotes status to `completed`.
+- ~~Display progress on `/anime` cards when the user has watched some episodes.~~ Wired in /anime, /random, and the expand select.
 
 **Schema change:**
 ```sql
-ALTER TABLE otaku_user_anime ADD COLUMN episodes_watched SMALLINT DEFAULT 0;
+ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0;
 ```
 
 ---

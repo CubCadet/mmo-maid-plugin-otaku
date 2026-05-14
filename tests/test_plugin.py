@@ -696,6 +696,79 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v2.2.0 progress ─────────────────────────────────────────────────────────
+
+
+def test_progress_writes_episodes_watched():
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:prog1", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_progress(ctx, _slash_event("progress", {"episodes": 1}, user_id="prog1"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts
+    # Params: [user_id, media_id, status, episodes_watched]
+    assert inserts[-1]["params"][3] == 1
+    assert "episodes_watched = EXCLUDED.episodes_watched" in inserts[-1]["sql"]
+
+
+def test_progress_at_total_marks_completed():
+    """If episodes == total, the upsert promotes status to 'completed'."""
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:prog2", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    # SAMPLE_MEDIA has episodes=1.
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_progress(ctx, _slash_event("progress", {"episodes": 1}, user_id="prog2"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts[-1]["params"][2] == "completed"
+
+
+def test_progress_caps_at_total_and_warns():
+    """Episodes > total are silently capped; the user sees a warning prefix."""
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:prog3", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})  # episodes=1
+
+    p.cmd_progress(ctx, _slash_event("progress", {"episodes": 99}, user_id="prog3"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts[-1]["params"][3] == 1  # capped
+    follow = ctx.interaction.followups[-1]
+    assert "1 episode" in (follow.get("content") or "") or "capping" in (follow.get("content") or "")
+
+
+def test_progress_rejects_negative():
+    ctx = MockContext()
+    p.cmd_progress(ctx, _slash_event("progress", {"episodes": -5}, user_id="prog-neg"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert not ctx.sql.executed
+
+
+def test_progress_without_cache_prompts_user():
+    ctx = MockContext()
+    p.cmd_progress(ctx, _slash_event("progress", {"episodes": 1}, user_id="prog-new"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "/anime" in (follow.get("content") or "")
+
+
+def test_anime_card_shows_user_progress_when_present():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # Pretend the user has watched 1 episode of media 123.
+    ctx.sql.query_one = lambda sql, params=None: {"episodes_watched": 1}  # type: ignore[assignment]
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "kimi"}, user_id="prog-card"))
+
+    follow = ctx.interaction.followups[-1]
+    fields = follow["embeds"][0]["fields"]
+    assert any(f["name"] == "Your progress" for f in fields)
+
+
 # ── v2.1.0 ratings ──────────────────────────────────────────────────────────
 
 

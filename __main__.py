@@ -57,6 +57,10 @@ _SCHEMA_INDEX_DDL = (
 _SCHEMA_RATING_DDL = (
     "ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT"
 )
+# v2.2.0 — additive column for episode progress.
+_SCHEMA_EPISODES_DDL = (
+    "ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -175,6 +179,20 @@ class _Strings:
     )
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
+
+    # /progress.
+    PROGRESS_NO_CACHE = (
+        "You haven't looked up an anime yet. Try `/anime query: <title>` first."
+    )
+    PROGRESS_NEGATIVE = "Episode count must be 0 or higher."
+    PROGRESS_OVER_TOTAL = (
+        "**{title}** only has {total} episode(s) — capping your progress at that."
+    )
+    PROGRESS_SET = "📺 Marked **{title}** at episode {episodes}{of_total}."
+    PROGRESS_OF_TOTAL = " / {total}"
+    PROGRESS_FIELD_NAME = "Your progress"
+    PROGRESS_FIELD_VALUE_UNBOUNDED = "Episode {episodes}"
+    PROGRESS_FIELD_VALUE_BOUNDED = "Episode {episodes} / {total}"
 
     # /ratings.
     RATINGS_HEADER_OWN = "⭐ Your ratings"
@@ -431,8 +449,12 @@ def _season_field(media: dict) -> str:
     return "—"
 
 
-def _make_anime_embed(media: dict) -> dict:
-    """Full anime card — used by /anime and the expand-from-list select."""
+def _make_anime_embed(media: dict, *, user_progress: int | None = None) -> dict:
+    """Full anime card — used by /anime and the expand-from-list select.
+
+    If `user_progress` is a positive int, a "Your progress" field is appended
+    so users can see where they left off without running /list.
+    """
     title = _format_title(media)
     site_url = media.get("siteUrl") or None
     description = _truncate(_strip_html(media.get("description")), DESC_MAX) or S.ANIME_NO_DESCRIPTION
@@ -455,6 +477,13 @@ def _make_anime_embed(media: dict) -> dict:
     }
     if genres:
         embed["fields"].append({"name": "Genres", "value": ", ".join(genres), "inline": False})
+    if user_progress and user_progress > 0:
+        total = media.get("episodes")
+        if isinstance(total, int) and total > 0:
+            value = S.PROGRESS_FIELD_VALUE_BOUNDED.format(episodes=user_progress, total=total)
+        else:
+            value = S.PROGRESS_FIELD_VALUE_UNBOUNDED.format(episodes=user_progress)
+        embed["fields"].append({"name": S.PROGRESS_FIELD_NAME, "value": value, "inline": False})
     cover = (media.get("coverImage") or {}).get("large")
     if cover:
         embed["thumbnail"] = {"url": cover}
@@ -905,6 +934,8 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_INDEX_DDL)
     # v2.1.0
     ctx.sql.execute(_SCHEMA_RATING_DDL)
+    # v2.2.0
+    ctx.sql.execute(_SCHEMA_EPISODES_DDL)
 
 
 @plugin.on_install
@@ -999,7 +1030,8 @@ def cmd_anime(ctx: Context, event: dict) -> None:
     if media_id is not None and user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
 
-    embed = _make_anime_embed(media)
+    progress = _get_user_progress(ctx, user_id, int(media_id or 0))
+    embed = _make_anime_embed(media, user_progress=progress)
     buttons = [Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁")]
     site_url = media.get("siteUrl")
     if site_url:
@@ -1125,7 +1157,8 @@ def cmd_random(ctx: Context, event: dict) -> None:
     if media_id is not None and user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
 
-    embed = _make_anime_embed(media)
+    progress = _get_user_progress(ctx, user_id, int(media_id or 0))
+    embed = _make_anime_embed(media, user_progress=progress)
     if genre:
         embed["title"] = f"🎲 {embed['title']}"
     buttons = [Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁")]
@@ -1554,6 +1587,81 @@ def cmd_list(ctx: Context, event: dict) -> None:
     )
 
 
+# ── v2.2.0 — episode progress ───────────────────────────────────────────────
+
+def _get_user_progress(ctx: Context, user_id: str, media_id: int) -> int:
+    """Look up the user's recorded episodes_watched for a media id. 0 if no row."""
+    if not user_id or not media_id:
+        return 0
+    row = ctx.sql.query_one(
+        "SELECT episodes_watched FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
+        [user_id, media_id],
+    )
+    if not row:
+        return 0
+    val = row.get("episodes_watched") or 0
+    try:
+        return max(0, int(val))
+    except (TypeError, ValueError):
+        return 0
+
+
+@plugin.on_slash_command("progress")
+def cmd_progress(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    raw = opts.get("episodes")
+    try:
+        episodes = int(raw)
+    except (TypeError, ValueError):
+        ctx.interaction.respond(content=S.PROGRESS_NEGATIVE, ephemeral=True)
+        return
+    if episodes < 0:
+        ctx.interaction.respond(content=S.PROGRESS_NEGATIVE, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    media_id = _resolve_last_anime_id(ctx, user_id)
+    if media_id is None:
+        _reply_error(ctx, S.PROGRESS_NO_CACHE, deferred=True)
+        return
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id})
+    if data is None or not data.get("Media"):
+        _reply_anilist_failure(ctx, deferred=True, fallback=S.SIMILAR_FETCH_FAIL_CACHED)
+        return
+    media = data["Media"]
+    title = _format_title(media)
+    total = media.get("episodes")
+
+    # Cap episodes to the total if known. Surface the cap to the user.
+    capped = episodes
+    capped_msg = None
+    if isinstance(total, int) and total > 0 and episodes > total:
+        capped = total
+        capped_msg = S.PROGRESS_OVER_TOTAL.format(title=title, total=total)
+
+    # If marking complete, also flip status to 'completed' for nicer /list filtering.
+    upsert_status = "completed" if (isinstance(total, int) and total > 0 and capped == total) else "watching"
+
+    ctx.sql.execute(
+        "INSERT INTO otaku_user_anime (user_id, media_id, status, episodes_watched) "
+        "VALUES ($1, $2, $3, $4) "
+        "ON CONFLICT (user_id, media_id) DO UPDATE SET "
+        "  episodes_watched = EXCLUDED.episodes_watched, "
+        "  status = CASE WHEN EXCLUDED.status = 'completed' THEN 'completed' "
+        "               ELSE otaku_user_anime.status END",
+        [user_id, media_id, upsert_status, capped],
+    )
+
+    of_total = S.PROGRESS_OF_TOTAL.format(total=total) if isinstance(total, int) and total > 0 else ""
+    main_msg = S.PROGRESS_SET.format(title=title, episodes=capped, of_total=of_total)
+    if capped_msg:
+        main_msg = f"{capped_msg}\n{main_msg}"
+    ctx.interaction.followup(content=main_msg, ephemeral=True)
+
+
 # ── v2.1.0 — ratings ────────────────────────────────────────────────────────
 
 def _encode_rating(score: float) -> int | None:
@@ -1807,7 +1915,8 @@ def comp_expand(ctx: Context, event: dict) -> None:
     if user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media.get("id"), ttl_seconds=LAST_ANIME_TTL)
 
-    embed = _make_anime_embed(media)
+    progress = _get_user_progress(ctx, user_id, int(media.get("id") or 0))
+    embed = _make_anime_embed(media, user_progress=progress)
     buttons = [Button("Similar", custom_id=f"otaku:similar:{media.get('id')}", style="primary", emoji="🔁")]
     site_url = media.get("siteUrl")
     if site_url:
