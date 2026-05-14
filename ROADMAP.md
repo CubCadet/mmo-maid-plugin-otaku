@@ -711,9 +711,26 @@ already covers the worst case.
 
 ---
 
-### v6.2.0 — Genre-trend recommendations
+### v6.2.0 — Genre-trend recommendations ✅ shipped 2026-05-14
 
-Surface anime that are trending in genres the user already favors — bridges discovery and personalization.
+~~Surface anime that are trending in genres the user already favors — bridges discovery and personalization.~~ Shipped as **`/genre-trends`**:
+samples the caller's 50 most-recent tracked anime, computes the top 3
+genres (count desc, alphabetic tie-break), then runs
+`Page(media: genre_in: <top3>, sort: [TRENDING_DESC])` and filters
+already-tracked media out of the result set. Ephemeral, 5 picks max,
+fetches AniList at `perPage=15` so the post-filter surface still has
+something to show.
+
+**Edge cases handled:**
+- Empty tracker → short-circuits before any AniList call with a
+  pointer to `/favorite` / `/watch`.
+- AniList sampling call fails or returns no genres → distinct
+  "couldn't read your genres" error path.
+- Every trending hit is already tracked → pointer to `/trending`
+  rather than an empty embed.
+
+**Capability:** no new capabilities — reuses `storage:sql` and
+`proxy:http`.
 
 ---
 

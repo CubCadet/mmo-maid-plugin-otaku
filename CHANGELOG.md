@@ -20,6 +20,30 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [6.2.0] - 2026-05-14
+
+### Added
+- `/genre-trends` — bridges discovery and personalization. Picks the
+  caller's top 3 most-tracked genres from a 50-row sample of their
+  recent tracker (same heuristic `/stats` uses), then queries AniList
+  for currently-trending anime in those genres. Anime the caller
+  already tracks (any status) are filtered out so the surface stays
+  "new for me." Ephemeral.
+- `QUERY_GENRE_TRENDS` GraphQL query — `Page(media: genre_in: $genres,
+  sort: [TRENDING_DESC])`, fetched at `perPage=15` so post-filter we
+  still have ≥5 fresh picks for the typical user.
+- Empty-tracker short-circuits before any AniList call to keep
+  newcomers from racking up rate-limited proxy hits.
+- Regression file `tests/regression/test_v6_2_0.py` (10 tests) freezes
+  the constants (TOP_N=3, FETCH=15, RESULT_LIMIT=5), the genre-ranking
+  alpha-tie-break order, the tracked-id exclusion, and the
+  short-circuit ordering.
+
+### Capability surface
+- **No new capabilities.** Reuses `storage:sql` (tracker reads),
+  `proxy:http` (AniList), `interaction:respond` (slash + future
+  expand-select).
+
 ## [6.1.0] - 2026-05-14
 
 ### Added

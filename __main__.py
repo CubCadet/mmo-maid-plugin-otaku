@@ -425,6 +425,22 @@ class _Strings:
         "after a `/anime` lookup."
     )
 
+    # /genre-trends (v6.2.0).
+    GENRE_TRENDS_EMPTY = (
+        "You haven't tracked any anime yet. Try `/favorite` or `/watch` "
+        "after a `/anime` lookup, then come back."
+    )
+    GENRE_TRENDS_NO_GENRES = (
+        "Couldn't read your top tracked genres from AniList right now — "
+        "try again in a moment."
+    )
+    GENRE_TRENDS_NO_FRESH = (
+        "Everything trending in **{genres}** is already on your list! "
+        "Try `/trending` for current-season top picks across all genres."
+    )
+    GENRE_TRENDS_HEADER = "📈 Trending in {genres}"
+    GENRE_TRENDS_FOOTER = "Picked from your top {n} tracked genres"
+
     # /mood (v6.1.0).
     MOOD_UNKNOWN = (
         "Unknown mood **{feeling}**. Pick one of the suggested choices."
@@ -589,6 +605,18 @@ QUERY_RANDOM_PICK = (
 )
 
 QUERY_GENRES = "query { GenreCollection }"
+
+# v6.2.0 — /genre-trends. Trending-by-genre, used to bridge personalization
+# and discovery: filter AniList's trending list to the genres the user
+# already gravitates toward.
+QUERY_GENRE_TRENDS = (
+    "query ($genres: [String], $perPage: Int) {"
+    "  Page(page: 1, perPage: $perPage) {"
+    "    media(type: ANIME, genre_in: $genres, sort: [TRENDING_DESC]) {"
+    + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
 
 # v6.1.0 — /mood. Two query shapes because AniList rejects empty list
 # arguments to its in-filters; when a mood has no tag enrichment we use the
@@ -4241,6 +4269,100 @@ def comp_expand(ctx: Context, event: dict) -> None:
     if site_url:
         buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
     ctx.interaction.followup(embeds=[embed], components=[ActionRow(*buttons)], ephemeral=True)
+
+
+# ── v6.2.0 — /genre-trends (genre-trend recommendations) ────────────────────
+#
+# Bridges discovery and personalization: figure out the user's top tracked
+# genres, then pull AniList's currently-trending anime filtered to those
+# genres. Anime the user already tracks (any status) are filtered out so
+# the surface stays "what's new for me." Uses the same 50-anime sample
+# heuristic as /stats's _top_genre_for_user so we never pay for a full
+# tracker scan.
+
+GENRE_TRENDS_TOP_N = 3       # how many of the user's genres to filter by
+GENRE_TRENDS_FETCH = 15      # AniList page size — fetch extra so post-filter still has ≥5
+GENRE_TRENDS_RESULT_LIMIT = 5
+
+
+def _user_top_genres(ctx: Context, user_id: str, limit: int) -> list[str]:
+    """Top N genres the user has tracked, by occurrence over the most-recent
+    STATS_TOP_GENRE_SAMPLE anime. Empty list if the tracker is empty or
+    AniList can't be reached. Tied counts break alphabetically for stability."""
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_user_anime WHERE user_id = $1 "
+        "ORDER BY added_at DESC LIMIT $2",
+        [user_id, STATS_TOP_GENRE_SAMPLE],
+    ) or []
+    ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+    if not ids:
+        return []
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": sorted(ids)}, cache=True)
+    if data is None:
+        return []
+    media_list = ((data.get("Page") or {}).get("media")) or []
+    counts: dict[str, int] = {}
+    for m in media_list:
+        for g in (m.get("genres") or []):
+            counts[g] = counts.get(g, 0) + 1
+    if not counts:
+        return []
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [g for g, _ in ordered[:limit]]
+
+
+@plugin.on_slash_command("genre-trends")
+def cmd_genre_trends(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    ctx.interaction.defer(ephemeral=True)
+
+    # Empty-tracker short-circuit before touching AniList.
+    tracked_rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_user_anime WHERE user_id = $1",
+        [user_id],
+    ) or [{"n": 0}]
+    if int((tracked_rows[0] or {}).get("n") or 0) == 0:
+        _reply_error(ctx, S.GENRE_TRENDS_EMPTY, deferred=True)
+        return
+
+    top_genres = _user_top_genres(ctx, user_id, GENRE_TRENDS_TOP_N)
+    if not top_genres:
+        _reply_error(ctx, S.GENRE_TRENDS_NO_GENRES, deferred=True)
+        return
+
+    data = _anilist_query(
+        ctx,
+        QUERY_GENRE_TRENDS,
+        {"genres": top_genres, "perPage": GENRE_TRENDS_FETCH},
+        cache=True,
+    )
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    media_list = ((data.get("Page") or {}).get("media")) or []
+
+    tracked = _recommend_tracked_ids(ctx, user_id)
+    fresh = [m for m in media_list if m.get("id") not in tracked][:GENRE_TRENDS_RESULT_LIMIT]
+    if not fresh:
+        _reply_error(
+            ctx,
+            S.GENRE_TRENDS_NO_FRESH.format(genres=", ".join(top_genres)),
+            deferred=True,
+        )
+        return
+
+    header = S.GENRE_TRENDS_HEADER.format(genres=", ".join(top_genres))
+    embed = _make_list_embed(fresh, header, page=1, has_next=False)
+    embed["footer"] = {"text": S.GENRE_TRENDS_FOOTER.format(n=len(top_genres))}
+    components = []
+    select_row = _make_select_row(fresh)
+    if select_row is not None:
+        components.append(select_row)
+    ctx.interaction.followup(
+        embeds=[embed], components=components or None, ephemeral=True
+    )
 
 
 # ── v6.1.0 — /mood (mood-based suggestions) ─────────────────────────────────

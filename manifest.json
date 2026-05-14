@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -438,6 +438,10 @@
     {
       "name": "recommend",
       "description": "Personalized anime recommendations based on what this server's users have rated."
+    },
+    {
+      "name": "genre-trends",
+      "description": "Trending anime right now in your most-tracked genres — discovery meets personalization."
     },
     {
       "name": "mood",

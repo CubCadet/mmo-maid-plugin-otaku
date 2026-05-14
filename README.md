@@ -74,6 +74,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/my-stats` | Richer personal view than `/stats` — top rated, top favorites, recently completed, with completion percentage. |
 | `/recommend` | Personalized recommendations via collaborative filtering over this server's rated rows. Cosine similarity across up to 50 peers; peers must share ≥3 rated titles. Falls back to AniList `/similar` (seeded by your top-rated tracked anime) if you have <3 ratings or no peer overlaps enough. |
 | `/mood <feeling>` | Mood-based picks. Ten curated moods (`uplifting`, `tense`, `cathartic`, `chill`, `epic`, `nostalgic`, `dark`, `funny`, `romantic`, `adventurous`) each map to an AniList genre/tag blend. Paginated like `/discover`. |
+| `/genre-trends` | Trending anime right now in your top 3 most-tracked genres. Bridges discovery and personalization — anime you already track are filtered out. Ephemeral. |
 
 ### Politeness throttle
 
