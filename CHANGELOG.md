@@ -20,6 +20,105 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [8.0.1] - 2026-05-14
+
+### Migration hardening — production-safety patch
+
+A six-lens audit of v8.0.0 found two 🔴 high-severity correctness bugs in
+`_migrate_v7_to_v8`, both reachable on the very first v7→v8 upgrade. This
+PATCH fixes both, adds the regression coverage v8.0.0 was missing, and
+tightens an under-asserting test that v8.0.0 introduced.
+
+### Fixed
+- **Partial-failure non-recovery** in `_migrate_v7_to_v8`. v8.0.0's helper
+  did a single `WHERE table_name = 'otaku_user_anime'` probe and treated
+  its absence as "migration already done." But if a previous run succeeded
+  on the RENAME but errored mid-sequence (lock timeout, OOM, deploy
+  interrupt), the table was renamed yet half-migrated — and the next call's
+  probe found the v7 name absent and triggered the early-return. The
+  half-state never healed. v8.0.1 makes every step independently
+  idempotent: probe is now `WHERE table_name IN ('otaku_user_anime',
+  'otaku_user_media')` and the helper re-decides per landmark (RENAME only
+  if v7 present + v8 absent; ADD COLUMN always with `IF NOT EXISTS`; PK
+  widening only if the wide PK isn't already there, via a new
+  `information_schema.key_column_usage` probe).
+- **Pool-mode RENAME race.** v8.0.0's CHANGELOG claimed "the second
+  worker's probe sees the renamed table absent" — but with snapshot
+  isolation, two workers can both pass the probe simultaneously and Worker
+  B's `ALTER TABLE … RENAME` then fires against a relation that no longer
+  exists at the v7 name. v8.0.1 acquires
+  `pg_advisory_xact_lock(hashtext('otaku_v7_to_v8_migration'))` at the top
+  of the helper so concurrent workers serialize on the migration. The lock
+  is transactional and auto-releases at COMMIT — only the migration block
+  serializes, not the rest of bootstrap.
+
+### Added — tests
+- New regression file `tests/regression/test_v8_0_1.py` (10 tests).
+  Coverage:
+  - `test_migration_executes_full_dance_when_v7_table_exists` — happy-path
+    pinning that all migration DDLs fire when the v7 table is present. v8.0.0
+    only tested the no-op branch; a regression deleting the RENAME, ADD
+    COLUMN, or PK widening would have passed silently. Now caught.
+  - `test_migration_skips_pk_widen_when_wide_pk_already_present` — verifies
+    the new `key_column_usage` probe gates the drop/re-add dance, so the
+    second run after a successful migration doesn't re-execute it.
+  - `test_migration_self_heals_after_partial_failure` — drives the
+    half-migrated scenario (v8 table renamed, column add never finished)
+    and asserts the helper completes the column + PK widening steps.
+  - `test_migration_noop_on_fresh_install` — confirms the helper skips
+    every table DDL when neither v7 nor v8 table exists.
+  - `test_migration_acquires_advisory_lock_first` — pins the lock ordering:
+    `pg_advisory_xact_lock` must come before any `ALTER`.
+  - `test_leaderboard_completed_query_filters_media_type_anime` — tightens
+    the v3.3 leaderboard contract. v8.0.0 added `media_type = 'anime'`
+    filters to all anime aggregates but `test_v3_3_0.py:63` only checked
+    `"status = 'completed'"`. A regression dropping the media_type filter
+    would have passed silently (leaking manga rows into the leaderboard).
+    Now pinned.
+  - Four `..._sql_anchors_<column>` tests — anchor the
+    `is_favorite`/`status`/`rating`/`episodes_watched` DO-UPDATE clauses
+    so a regression that stops touching the target column can't pass on a
+    coincidental `True in params` / `"watching" in params` /
+    `18 in params` / `"completed" in params` match. Pairs with the loose
+    membership checks v8.0.0's `# regression-fix` edits introduced.
+
+### Documented — PG version note
+- `ALTER TABLE … ADD COLUMN … DEFAULT 'anime'` (line ~1601) is metadata-
+  only on **PG ≥ 11** (the column lands in the catalog with a stored
+  "missing value"; existing rows are NOT rewritten — O(1) regardless of
+  table size). On **PG ≤ 10** the same DDL rewrites the entire table,
+  holding `ACCESS EXCLUSIVE` for the duration — minutes of downtime for
+  large tracker tables.
+- The plugin can't enforce a minimum PG version (the runtime decides),
+  but plugin operators should confirm their host runs PG ≥ 11 before
+  upgrading installs with large `otaku_user_media` tables. The MMO Maid
+  platform runtime is on PG 14+ as of 2026-05, so the practical risk
+  for marketplace plugins is low — but worth surfacing for self-hosted
+  plugin operators.
+
+### Capability surface
+- **No new capabilities.** `storage:sql` covers the new
+  `information_schema` probes; `pg_advisory_xact_lock` is a SQL function
+  call requiring no special grant.
+
+### Audit summary recorded for the v8.1+ session
+- All other audit lenses came back clean. **Filter integrity**: 0 leaks
+  across 30 SELECTs. **Manga path correctness**: 0 bugs, 7/7 code paths
+  verified. **Capability gating**: clean. **Test contracts**: 8/9 v8.0.0
+  regression-fix edits honest (the under-asserting `test_v3_3_0.py:63` is
+  fixed here).
+- Net hygiene change vs v7.2.1 baseline: slightly worse (+3 duplication
+  clusters from manga/anime parallel commands and embed builders, -1 from
+  the now-atomic `_upsert_user_media`). Acknowledged in v8.0.0 CHANGELOG
+  "Deferred to v8.x"; the Phase 9.1 canonical-dict refactor will partially
+  absorb these.
+- Phase 9 readiness inventory captured: single HTTP chokepoint at
+  `__main__.py:1320` (good news — one egress point to teach about
+  per-source headers), 45 `_anilist_query` call sites, 12 query constants
+  classified per multi-source strategy (search/discover/season/batch:
+  canonical-dict abstraction; import: parallel constants + `source:` arg;
+  similar/random/genres/mood/airing/character: keep AniList-only).
+
 ## [8.0.0] - 2026-05-14
 
 ### Phase 8 opens — media universe expansion (manga support)

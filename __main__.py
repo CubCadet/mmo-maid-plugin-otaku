@@ -1563,56 +1563,100 @@ def _render_similar(ctx: Context, media: dict, *, deferred: bool, ephemeral_repl
 def _migrate_v7_to_v8(ctx: Context) -> None:
     """Rename otaku_user_anime → otaku_user_media and add the media_type column.
 
-    Idempotent: detects whether the v7 table still exists; if not, the rename
-    has already happened (or this is a fresh v8 install) and we silently
-    return. Pool-mode safe — multiple workers running this concurrently is
-    a no-op for the second one because the v7 table no longer exists.
+    Idempotent at the **step level**: every individual DDL can run repeatedly
+    without raising, and a partial failure mid-sequence self-heals on the
+    next call. Pool-mode safe via pg_advisory_xact_lock so concurrent workers
+    serialize on the migration without serializing every bootstrap pass.
+
+    v8.0.0 shipped this helper without the step-level idempotency or the
+    advisory lock; the v8.0.1 audit found two production-safety bugs:
+      1. Partial failure (e.g. lock timeout during PK widening) left the
+         table half-migrated AND the next call's table-name probe found
+         `otaku_user_anime` already renamed, so the early-return triggered
+         and the half-state never healed.
+      2. Two pool-mode workers could both pass the probe under snapshot
+         isolation; the second worker's RENAME then hit "relation does
+         not exist" because worker A's RENAME had already committed.
+    The v8.0.1 rewrite re-probes for each landmark (v7 table, v7 PK,
+    v8 wide PK) so every step is independently safe.
 
     Per ROADMAP §regression doctrine, this is the first non-additive
     migration in the repo. The companion `# regression-fix (v8.0.0)`
     comments in tests/regression/test_v2_*.py acknowledge the rename.
     """
-    # The information_schema lookup is the cheapest way to ask "does v7's
-    # table still exist?" without depending on a per-runtime introspection.
-    rows = ctx.sql.query(
-        "SELECT 1 AS one FROM information_schema.tables "
-        "WHERE table_name = 'otaku_user_anime' LIMIT 1"
-    ) or []
-    if not rows:
-        return  # already migrated or fresh install
+    # Serialize concurrent pool-mode workers on the migration so the RENAME
+    # below can never lose a race. The lock is transactional and auto-releases
+    # at COMMIT; the rest of _bootstrap_schema can still parallelize.
+    try:
+        ctx.sql.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('otaku_v7_to_v8_migration'))"
+        )
+    except Exception:  # noqa: BLE001 — non-Postgres test backends skip silently
+        pass
 
-    # 1) Rename the table.
-    ctx.sql.execute("ALTER TABLE otaku_user_anime RENAME TO otaku_user_media")
-    # 2) Rename the index to match the new convention. The IF EXISTS guard
-    #    handles the edge case where the index was named differently in
-    #    very early installs.
+    # 1) Rename the v7 table if it still exists AND the v8 name is free.
+    #    `information_schema.tables` is the cheapest portable probe.
+    rows = ctx.sql.query(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name IN ('otaku_user_anime', 'otaku_user_media')"
+    ) or []
+    present = {r["table_name"] for r in rows if r.get("table_name")}
+    if "otaku_user_anime" in present and "otaku_user_media" not in present:
+        ctx.sql.execute(
+            "ALTER TABLE otaku_user_anime RENAME TO otaku_user_media"
+        )
+    elif not present:
+        # Fresh install — neither table exists yet. _SCHEMA_DDL will create
+        # the v8 table with the wide PK declared inline.
+        return
+
+    # 2) Rename the v7 index if it still has the old name. The IF EXISTS
+    #    guards both the source name (already-renamed installs no-op) and
+    #    a manually-dropped index (returns silently — _SCHEMA_INDEX_DDL
+    #    below will recreate it under the v8 name).
     ctx.sql.execute(
         "ALTER INDEX IF EXISTS otaku_user_anime_user_status_added_idx "
         "RENAME TO otaku_user_media_user_status_added_idx"
     )
-    # 3) Add the media_type column with a DEFAULT so existing rows backfill
-    #    to 'anime' atomically. Step 4 (PK extension) is implicit — Postgres
-    #    requires dropping and re-adding the PK to widen it, but new v8
-    #    installs declare the wide PK upfront in _SCHEMA_DDL. Migrated rows
-    #    keep the v7 narrow PK until we explicitly widen it below.
+
+    # 3) Add the media_type column. ADD COLUMN IF NOT EXISTS is idempotent.
+    #    On PG ≥ 11 the DEFAULT is metadata-only (no table rewrite);
+    #    PG ≤ 10 rewrites the table — see CHANGELOG v8.0.1 migration notes
+    #    for the deploy-time implication.
     ctx.sql.execute(
         "ALTER TABLE otaku_user_media "
         "ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'anime'"
     )
-    # 4) Widen the primary key. Postgres requires drop-then-add; both wrapped
-    #    in IF EXISTS / IF NOT EXISTS where the dialect supports it. Older
-    #    Postgres needs catalog lookup of the PK constraint name, which the
-    #    runner abstracts behind ALTER TABLE … DROP CONSTRAINT IF EXISTS.
-    ctx.sql.execute(
-        "ALTER TABLE otaku_user_media DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
-    )
-    ctx.sql.execute(
-        "ALTER TABLE otaku_user_media DROP CONSTRAINT IF EXISTS otaku_user_media_pkey"
-    )
-    ctx.sql.execute(
-        "ALTER TABLE otaku_user_media "
-        "ADD CONSTRAINT otaku_user_media_pkey PRIMARY KEY (user_id, media_id, media_type)"
-    )
+
+    # 4) Widen the primary key. Postgres can't widen a PK in place. We
+    #    probe pg_constraint via information_schema to make the dance
+    #    idempotent: only re-do the drop/re-add if the wide PK isn't
+    #    already there. The implicit PK constraint name follows the
+    #    original CREATE TABLE — `otaku_user_anime_pkey` on migrated
+    #    installs, `otaku_user_media_pkey` on fresh v8 installs.
+    has_wide_pk_rows = ctx.sql.query(
+        "SELECT 1 AS one FROM information_schema.key_column_usage "
+        "WHERE table_name = 'otaku_user_media' "
+        "AND constraint_name LIKE '%_pkey' "
+        "AND column_name = 'media_type'"
+    ) or []
+    if not has_wide_pk_rows:
+        # Drop both candidate constraint names — only the live one will
+        # match; the IF EXISTS on the other is a no-op. Then add the wider
+        # constraint with the canonical v8 name.
+        ctx.sql.execute(
+            "ALTER TABLE otaku_user_media "
+            "DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
+        )
+        ctx.sql.execute(
+            "ALTER TABLE otaku_user_media "
+            "DROP CONSTRAINT IF EXISTS otaku_user_media_pkey"
+        )
+        ctx.sql.execute(
+            "ALTER TABLE otaku_user_media "
+            "ADD CONSTRAINT otaku_user_media_pkey "
+            "PRIMARY KEY (user_id, media_id, media_type)"
+        )
 
 
 def _bootstrap_schema(ctx: Context) -> None:
