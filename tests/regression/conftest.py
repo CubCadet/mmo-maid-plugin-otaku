@@ -19,8 +19,8 @@ if "plugin_main" not in sys.modules:
     sys.modules["plugin_main"] = _module
     _spec.loader.exec_module(_module)
 
-import pytest
-from plugin_main import _cache_clear as _plugin_cache_clear
+import pytest  # noqa: E402 — comes after the module-spec setup above
+from plugin_main import _cache_clear as _plugin_cache_clear  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

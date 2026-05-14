@@ -12,7 +12,6 @@ import plugin_main as p
 from mmo_maid_sdk import RateLimitError, RpcTimeoutError
 from mmo_maid_sdk.testing import MockContext, make_event
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 SAMPLE_MEDIA = {

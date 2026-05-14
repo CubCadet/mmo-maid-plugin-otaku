@@ -1,0 +1,15 @@
+[tool.ruff]
+# Existing code uses up to ~110 chars; bumping line-length avoids a flood of
+# format diffs that would collapse intentionally-multi-line GraphQL query strings.
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Default rule set is fine. The codebase already adds explicit `# noqa: BLE001`
+# at the call sites where broad except is deliberate.
+extend-select = ["E", "F", "I", "W"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Test files keep narrow re-imports near the assertions they use.
+"tests/**" = ["E402"]

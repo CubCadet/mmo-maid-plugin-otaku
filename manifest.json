@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Discover, search, and learn about anime from Discord — search by title, browse by genre, see what's trending this season, and find shows similar to ones you've looked up. Powered by AniList.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search"],

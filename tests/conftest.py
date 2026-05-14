@@ -23,7 +23,7 @@ _module = importlib.util.module_from_spec(_spec)
 sys.modules["plugin_main"] = _module
 _spec.loader.exec_module(_module)
 
-import pytest
+import pytest  # noqa: E402 — must come after the module-spec import above
 
 
 @pytest.fixture(autouse=True)

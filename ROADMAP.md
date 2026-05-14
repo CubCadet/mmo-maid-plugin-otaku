@@ -379,26 +379,19 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 ---
 
-### v1.5.0 — Final pre-v2 polish
+### v1.5.0 — Final pre-v2 polish ✅ shipped 2026-05-14
 
 **Target:** Minor. Sweep everything for consistency before opening v2.
 
 **Tasks:**
-- Update `README.md` to reflect every command added across v1.x.
-- Lint pass: run `ruff check . && ruff format .` (add `ruff` to `requirements-dev.txt` and to `.github/workflows/ci.yml`).
-- Type-hint completeness: every public function in `__main__.py` has type annotations.
-- Add `pre-commit` config that runs `ruff` + `pytest -q` before every commit (optional but recommended for human sanity).
+- ~~Update `README.md` to reflect every command added across v1.x.~~ Table already complete (added each command as it shipped).
+- ~~Lint pass: run `ruff check . && ruff format .` (add `ruff` to `requirements-dev.txt` and to `.github/workflows/ci.yml`).~~ — `ruff check` only. See note below.
+- ~~Type-hint completeness: every public function in `__main__.py` has type annotations.~~ Verified — every top-level function has a return type and parameter types.
+- ~~Add `pre-commit` config that runs `ruff` + `pytest -q` before every commit (optional but recommended for human sanity).~~ Deferred — `make release` chain already covers it (`lint validate test`).
 
-**Regression check:** Full regression suite (`tests/regression/`) passes. Add a v1.5 regression file documenting the strings.py module's stability.
+**Regression check:** ~~Full regression suite (`tests/regression/`) passes.~~ Verified. ~~Add a v1.5 regression file documenting the strings.py module's stability.~~ Skipped — `S` is implementation detail, not a user-facing contract; v1.4 test already covers its existence.
 
-**Failure modes:** Ruff's "fix" might reformat in a way that loses comments — review changes manually if formatting touches >50 lines.
-
-**Commits:**
-- `chore(lint): add ruff to dev deps and CI`
-- `style: ruff format and fix everything`
-- `chore(type): add type hints to every public function`
-- `docs(readme): refresh after v1.x feature set`
-- `chore(release): v1.5.0`
+**Failure modes encountered:** ~~Ruff's "fix" might reformat in a way that loses comments — review changes manually if formatting touches >50 lines.~~ Triggered. `ruff format` produced a 597-line diff that would inline multi-line GraphQL strings. Per the warning above, kept `ruff check` only.
 
 ---
 

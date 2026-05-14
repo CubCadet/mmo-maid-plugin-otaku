@@ -76,7 +76,10 @@ mmo dev --watch
 # 3. Tests
 python -m pytest -q
 
-# 4. Pre-flight validation (also runs in CI)
+# 4. Lint (ruff — also runs in CI)
+make lint
+
+# 5. Pre-flight validation (also runs in CI)
 python scripts/validate_plugin.py .
 ```
 

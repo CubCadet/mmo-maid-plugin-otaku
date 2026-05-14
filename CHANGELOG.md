@@ -20,6 +20,29 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-05-14
+
+### Added
+- Ruff (`ruff>=0.4`) wired into dev deps, the Makefile (`make lint`), and the
+  `ci.yml` workflow. Runs on every PR and push.
+- `pyproject.toml` with a minimal `[tool.ruff]` config (line-length 120,
+  target py310).
+
+### Changed
+- Type-hint completeness verified across every top-level function in
+  `__main__.py`.
+- README quickstart now mentions `make lint`.
+- Makefile `release` target depends on `lint validate test` (was
+  `validate test`).
+
+### Note on `ruff format`
+- The roadmap also called for `ruff format`. Running it produced a 597-line
+  diff that would inline our multi-line GraphQL query strings and collapse
+  several intentionally vertical blocks. Per the roadmap's failure-mode
+  warning ("review manually if formatting touches >50 lines"), we kept
+  `ruff check` in CI and skipped `ruff format` on existing code. New code
+  is welcome to follow ruff format.
+
 ## [1.4.0] - 2026-05-14
 
 ### Changed

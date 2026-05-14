@@ -26,7 +26,6 @@ from pathlib import Path
 import plugin_main as p
 from mmo_maid_sdk.testing import MockContext, make_event
 
-
 SAMPLE_MEDIA = {
     "id": 123,
     "title": {"romaji": "Kimi no Na wa.", "english": "Your Name"},

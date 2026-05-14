@@ -12,6 +12,7 @@ The plugin is interaction-only — no message events, no schedules, no SQL.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
@@ -1222,7 +1223,5 @@ def comp_expand(ctx: Context, event: dict) -> None:
 # Non-negotiable per the mmo-maid-plugins skill: plugin.run() is the last line.
 # Tests import __main__ via a renamed module spec; they set OTAKU_SKIP_RUN=1 in
 # tests/conftest.py so the import doesn't block on the RPC loop.
-import os as _os
-
-if not _os.environ.get("OTAKU_SKIP_RUN"):
+if not os.environ.get("OTAKU_SKIP_RUN"):
     plugin.run()
