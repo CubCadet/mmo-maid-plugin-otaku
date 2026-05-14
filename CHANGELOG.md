@@ -20,6 +20,18 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+### Note — Phase 5 closure
+- Phase 5 closes at v5.1.0. The originally-planned v5.2 (iframe upgrade)
+  and v5.3.x (charts & trends) are **deferred to a future MAJOR bump**:
+  the SDK requires picking ONE dashboard mode, and switching from
+  manifest to iframe breaks the v5.0 regression contract. Per the
+  regression doctrine that's a MAJOR-version change, not a MINOR.
+- The manifest-mode dashboard from v5.0 + the `/my-stats` slash command
+  from v5.1 cover the user-visible value of Phase 5 in the v0.5.x SDK
+  shape. Iframe-only features (sortable tables, time-series charts) will
+  land alongside the dashboard mode switch in v6.0.0 or later, when
+  those features become user-visible priorities.
+
 ## [5.1.0] - 2026-05-15
 
 ### Added

@@ -628,17 +628,25 @@ Originally "server announcement channel." Shipped as part of v4.0.0 above.
 
 ---
 
-### v5.2.0 — Iframe-mode dashboard
+### v5.2.0 — Iframe-mode dashboard ⏸ deferred to a future MAJOR
 
-**Upgrade to iframe mode** for richer rendering. Add `dashboard/index.html`, `dashboard/main.js`, `dashboard/styles.css`. Use `MaidSDK` JS bridge to fetch data.
+**Original plan:** upgrade to iframe mode, add `dashboard/` files, use the MaidSDK JS bridge.
 
-**This is a significant addition** — read the skill's `dashboards.md` reference end-to-end before starting.
+**Why deferred:** the SDK makes manifest mode and iframe mode mutually exclusive — picking iframe requires deleting `dashboard_manifest.json`, which breaks the v5.0.0 regression contract that asserts the file's contents. Per the regression doctrine, "if a regression test would have to change, that's a sign of a breaking change — bump MAJOR." So an iframe switch can only ship as a MAJOR version.
+
+**Decided** (with the user, 2026-05-15): skip v5.2.0 as a tag. The iframe switch is rolled forward to a future MAJOR bump that also lands the v5.3 chart features. The current manifest-mode dashboard from v5.0 + v5.1 stays in place until then.
 
 ---
 
-### v5.3.x — Charts & trends
+### v5.3.x — Charts & trends ⏸ deferred to a future MAJOR
 
-Plotly or Chart.js embedded in the iframe dashboard. Time-series views of genre popularity within the server, score distributions, watch-completion rates.
+**Original plan:** Plotly or Chart.js embedded in the iframe dashboard. Time-series views of genre popularity, score distributions, watch-completion rates.
+
+**Why deferred:** depends on v5.2's iframe-mode switch (see above) — JS chart libraries need a full HTML page to live in. Rolled forward to the same future MAJOR.
+
+---
+
+**Phase 5 status (2026-05-15):** closed at v5.1.0. The manifest-mode dashboard (`dashboard_manifest.json` + 8 `@plugin.on_dashboard` handlers) plus `/my-stats` cover the value of Phase 5 in v0.5.x SDK shape. v5.2 and v5.3.x land as v6.0.0 or later when iframe-only features (charts & trends, sortable tables, time-series, etc.) become user-visible priorities.
 
 ---
 
