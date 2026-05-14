@@ -495,9 +495,16 @@ ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT 
 Polishing pass:
 - ~~better UX on `/list` pagination~~ — pagination already polished in v2.0.0 (status emoji, prev/next, expand-select).
 - ~~status emoji in embeds~~ — already in v2.0.0.
-- ~~server-admin command `/otaku-admin reset-user @user` for moderation~~ — **deferred**. The SDK doesn't pass caller permissions through `interaction_create`, so gating to admins would require `discord:read` + a Discord API call — meaningful capability bump mid-phase. Shipped the GDPR-friendly half as **self-service** `/otaku-reset` instead; admin moderation comes back in Phase 4+ when other Discord caps land.
+- ~~server-admin command `/otaku-admin reset-user @user` for moderation~~ — initially deferred, then **un-deferred in v2.6.0** (see below). The original "this would need `discord:read`" cost was real but I overstated it: `discord:read` is Safe tier so it doesn't shift the plugin's tier, and Phase 3 needs the same gating anyway.
 - Added "Your rating" field to `/anime` / `/random` / expand-select cards.
 - New `_get_user_tracking` helper combines progress + rating into a single SELECT.
+
+### v2.6.0 — Admin gating (closes Phase 2) ✅ shipped 2026-05-15
+
+Targeted patch to finish the work that v2.5 punted. Adds `discord:read`,
+implements `_caller_is_admin` (guild-owner or role with ADMINISTRATOR /
+MANAGE_GUILD bits), and ships `/otaku-admin reset-user <user>`. The helper
+is reused by Phase 3's admin-only commands.
 
 ---
 

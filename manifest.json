@@ -1,11 +1,12 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking"],
   "capabilities_required": [
+    "discord:read",
     "interaction:respond",
     "proxy:http",
     "storage:kv",
@@ -196,6 +197,25 @@
     {
       "name": "otaku-reset",
       "description": "Wipe ALL of your tracked anime data (favorites, ratings, progress, list). Asks for confirmation."
+    },
+    {
+      "name": "otaku-admin",
+      "description": "Server-admin tools for the otaku plugin.",
+      "options": [
+        {
+          "name": "reset-user",
+          "description": "Delete every tracked row for a specific user on this server.",
+          "type": 1,
+          "options": [
+            {
+              "name": "user",
+              "description": "Whose data to wipe",
+              "type": 6,
+              "required": true
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "stats",

@@ -32,6 +32,17 @@ def _clear_anilist_cache():
 
 
 @pytest.fixture(autouse=True)
+def _clear_role_cache():
+    """The admin-check role cache is module-level; reset per test."""
+    import plugin_main
+    if hasattr(plugin_main, "_clear_role_cache"):
+        plugin_main._clear_role_cache()
+    yield
+    if hasattr(plugin_main, "_clear_role_cache"):
+        plugin_main._clear_role_cache()
+
+
+@pytest.fixture(autouse=True)
 def _no_retry_sleep(monkeypatch):
     """Stub out retry backoff sleeps for fast regression runs."""
     import plugin_main

@@ -20,6 +20,33 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-05-15
+
+### Added
+- **New capability:** `discord:read` (Safe tier — no plugin-tier change,
+  but existing installs will see a one-time permission prompt before
+  `/otaku-admin` works).
+- `_caller_is_admin(ctx, user_id)` helper — checks the guild owner via
+  `ctx.discord.get_guild()`, then the caller's roles via
+  `ctx.discord.get_member()` against `ctx.discord.list_roles()` for the
+  ADMINISTRATOR (0x8) or MANAGE_GUILD (0x20) permission bits.
+- 5-minute per-server in-process cache for `list_roles()` so admin
+  checks don't hammer the Discord API.
+- `/otaku-admin reset-user <user>` — server-admin-only moderation
+  command. Deletes every tracked row for the target user.
+- Regression file `tests/regression/test_v2_6_0.py`.
+
+### Changed
+- v2.5.0's note that admin moderation was deferred no longer applies —
+  this version closes it. The helper here is the same one Phase 3's
+  `/server-watchlist add/remove` will reuse.
+
+### Migration
+- Existing v2.x installations will be re-prompted to grant `discord:read`
+  on next interaction (the runner blocks the new API calls until
+  granted). `/otaku-admin` won't function until that grant lands; the
+  rest of the plugin keeps working.
+
 ## [2.5.0] - 2026-05-15
 
 ### Added

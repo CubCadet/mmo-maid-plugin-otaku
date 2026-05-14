@@ -18,6 +18,7 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 | `proxy:http` | Safe | Call AniList's GraphQL endpoint (`graphql.anilist.co`) — the only outbound host. |
 | `storage:kv` | Safe | Cache each user's last-viewed anime ID for 7 days so `/similar` can default to it. Also caches AniList's genre list for 24h. |
 | `storage:sql` | Risky | Per-user anime tracking (`/favorite`, `/watch`, `/list`, `/favorites`). Single table `otaku_user_anime`, auto-scoped per server. |
+| `discord:read` | Safe | Read the caller's guild membership and roles to gate `/otaku-admin` to server admins (anyone with `Administrator` or `Manage Server`). Used purely for permission checks. |
 
 No Discord-side write capabilities are requested — the plugin never sends, edits, or deletes channel content directly; everything is an interaction reply.
 
@@ -45,6 +46,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/stats [user]` | Aggregate per-user view: counts by status, episodes, est. hours (24min/ep heuristic), mean score, top genre. |
 | `/import anilist <username>` | Bulk-import an AniList user's list into your tracker. Streams 50 entries per page. Idempotent — re-imports update, don't duplicate. |
 | `/otaku-reset` | Self-service deletion of every tracked row for the caller on this server. Asks to confirm. |
+| `/otaku-admin reset-user <user>` | Server-admin-only moderation. Deletes every tracked row for a specific user. Gated to anyone with `Administrator` or `Manage Server`. |
 
 ### Politeness throttle
 

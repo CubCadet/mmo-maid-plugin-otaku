@@ -180,6 +180,16 @@ class _Strings:
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
 
+    # /otaku-admin.
+    ADMIN_DENIED = (
+        "This command is server-admin only. Ask someone with `Manage Server` or "
+        "`Administrator` to run it."
+    )
+    ADMIN_USER_REQUIRED = "Pass a user with `user:` — e.g. `/otaku-admin reset-user user:@them`."
+    ADMIN_RESET_DONE = "🗑 Deleted **{rows}** tracked row(s) for <@{user}>."
+    ADMIN_RESET_NOTHING = "<@{user}> has no tracked anime on this server. Nothing to delete."
+    ADMIN_LOOKUP_FAILED = "Couldn't look up your roles to verify admin access — try again in a moment."
+
     # /otaku-reset.
     RESET_CONFIRM_PROMPT = (
         "⚠️ This will delete **all** of your otaku data on this server: favorites, "
@@ -1689,6 +1699,125 @@ def _handle_reset_confirm(ctx: Context, event: dict) -> None:
 
 def _handle_reset_cancel(ctx: Context, event: dict) -> None:
     ctx.interaction.respond(content=S.RESET_CANCELLED, ephemeral=True)
+
+
+# ── v2.6.0 — admin gating + /otaku-admin reset-user ─────────────────────────
+# Discord permission bitfield constants. Either bit qualifies a user as an admin
+# for otaku's purposes — both are server-managing roles in Discord's model.
+PERMISSION_ADMINISTRATOR = 0x8       # 1 << 3
+PERMISSION_MANAGE_GUILD  = 0x20      # 1 << 5
+ADMIN_PERMISSION_MASK = PERMISSION_ADMINISTRATOR | PERMISSION_MANAGE_GUILD
+
+# In-process cache for `list_roles()` — server admin changes are rare.
+_ROLE_LIST_CACHE: dict[str, tuple[float, list[dict]]] = {}
+ROLE_LIST_CACHE_TTL = 5 * 60  # 5 minutes
+
+
+def _cached_list_roles(ctx: Context) -> list[dict]:
+    """Return ctx.discord.list_roles() with a 5-minute per-server cache."""
+    key = str(getattr(ctx, "server_id", "") or "")
+    entry = _ROLE_LIST_CACHE.get(key)
+    if entry is not None and entry[0] > time.monotonic():
+        return entry[1]
+    roles = ctx.discord.list_roles() or []
+    _ROLE_LIST_CACHE[key] = (time.monotonic() + ROLE_LIST_CACHE_TTL, roles)
+    return roles
+
+
+def _clear_role_cache() -> None:
+    """Test hook — empties the role cache so per-test scenarios don't bleed."""
+    _ROLE_LIST_CACHE.clear()
+
+
+def _role_has_admin_bits(role: dict) -> bool:
+    """True if the role's permissions bitfield has ADMINISTRATOR or MANAGE_GUILD."""
+    raw = role.get("permissions")
+    if raw is None:
+        return False
+    try:
+        bits = int(raw)
+    except (TypeError, ValueError):
+        return False
+    return bool(bits & ADMIN_PERMISSION_MASK)
+
+
+def _caller_is_admin(ctx: Context, user_id: str) -> bool:
+    """Check whether the caller has server-admin powers.
+
+    The guild owner is always admin. Otherwise we look up the caller's roles
+    and check each one's permission bitfield for ADMINISTRATOR or MANAGE_GUILD.
+    A failed lookup returns False (callers should then surface ADMIN_LOOKUP_FAILED).
+    """
+    if not user_id:
+        return False
+    try:
+        guild = ctx.discord.get_guild() or {}
+    except Exception:  # noqa: BLE001 — admin check must never crash
+        return False
+    if guild.get("owner_id") == user_id:
+        return True
+    try:
+        member = ctx.discord.get_member(user_id=user_id) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    caller_role_ids = set(member.get("roles") or [])
+    if not caller_role_ids:
+        return False
+    try:
+        all_roles = _cached_list_roles(ctx)
+    except Exception:  # noqa: BLE001
+        return False
+    for role in all_roles:
+        if str(role.get("id")) in {str(r) for r in caller_role_ids} and _role_has_admin_bits(role):
+            return True
+    return False
+
+
+@plugin.on_slash_command("otaku-admin")
+def cmd_otaku_admin(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+
+    # Slash sub-commands arrive as a nested options list.
+    raw_options = event.get("options") or []
+    if not raw_options:
+        ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
+        return
+    first = raw_options[0] if isinstance(raw_options, list) else {}
+    subcommand = (first.get("name") or "").strip()
+    sub_options = first.get("options") or []
+    sub_opts = {o["name"]: o["value"] for o in sub_options if isinstance(o, dict) and "name" in o}
+
+    if subcommand != "reset-user":
+        ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
+        return
+
+    target_user = str(sub_opts.get("user") or "").strip()
+    if not target_user:
+        ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.followup(content=S.ADMIN_DENIED, ephemeral=True)
+        return
+
+    rows_affected = ctx.sql.execute(
+        "DELETE FROM otaku_user_anime WHERE user_id = $1",
+        [target_user],
+    )
+    if rows_affected and isinstance(rows_affected, int) and rows_affected > 0:
+        ctx.interaction.followup(
+            content=S.ADMIN_RESET_DONE.format(rows=rows_affected, user=target_user),
+            ephemeral=True,
+        )
+    else:
+        ctx.interaction.followup(
+            content=S.ADMIN_RESET_NOTHING.format(user=target_user),
+            ephemeral=True,
+        )
 
 
 # ── v2.4.0 — /import anilist ────────────────────────────────────────────────

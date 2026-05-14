@@ -696,6 +696,128 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v2.6.0 /otaku-admin (real admin gating) ─────────────────────────────────
+
+
+def _admin_slash_event(user_id: str, target_user_id: str) -> dict:
+    """Build a slash event matching the real /otaku-admin reset-user payload shape."""
+    return make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="otaku-admin",
+        options=[{
+            "name": "reset-user",
+            "type": 1,
+            "options": [{"name": "user", "value": target_user_id, "type": 6}],
+        }],
+        user_id=user_id,
+    )
+
+
+def _grant_admin(ctx: MockContext, *, owner_id: str | None = None, admin_user: str | None = None,
+                 admin_role: str = "moderator", admin_perms: int = 0x8) -> None:
+    """Configure MockDiscord so a specific user counts as a server admin."""
+    if owner_id is not None:
+        ctx.discord.get_guild = lambda: {"id": "999", "owner_id": owner_id}  # type: ignore[assignment]
+    if admin_user is not None:
+        ctx.discord.get_member = lambda *, user_id: (  # type: ignore[assignment]
+            {"user_id": user_id, "roles": [admin_role]} if user_id == admin_user
+            else {"user_id": user_id, "roles": []}
+        )
+        ctx.discord.list_roles = lambda: [  # type: ignore[assignment]
+            {"id": admin_role, "name": "Moderator", "permissions": str(admin_perms)},
+            {"id": "everyone", "name": "@everyone", "permissions": "0"},
+        ]
+
+
+def test_caller_is_admin_when_guild_owner():
+    ctx = MockContext()
+    _grant_admin(ctx, owner_id="owner-1")
+    assert p._caller_is_admin(ctx, "owner-1") is True
+    assert p._caller_is_admin(ctx, "rando") is False
+
+
+def test_caller_is_admin_when_role_has_administrator_bit():
+    ctx = MockContext()
+    _grant_admin(ctx, admin_user="mod-1", admin_role="r-mod", admin_perms=0x8)
+    assert p._caller_is_admin(ctx, "mod-1") is True
+    assert p._caller_is_admin(ctx, "regular") is False
+
+
+def test_caller_is_admin_when_role_has_manage_guild_bit():
+    ctx = MockContext()
+    _grant_admin(ctx, admin_user="mod-2", admin_role="r-mg", admin_perms=0x20)
+    assert p._caller_is_admin(ctx, "mod-2") is True
+
+
+def test_caller_is_admin_false_when_role_has_no_admin_bits():
+    ctx = MockContext()
+    _grant_admin(ctx, admin_user="not-mod", admin_role="r-other", admin_perms=0x400)  # SEND_MESSAGES
+    assert p._caller_is_admin(ctx, "not-mod") is False
+
+
+def test_otaku_admin_reset_user_denied_for_non_admin():
+    ctx = MockContext()
+    # Default mock: empty roles, owner "1" (which doesn't match)
+    p.cmd_otaku_admin(ctx, _admin_slash_event(user_id="rando", target_user_id="victim"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "server-admin only" in (follow.get("content") or "")
+    # No DELETE was issued.
+    assert not any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_otaku_admin_reset_user_runs_delete_for_admin():
+    ctx = MockContext()
+    _grant_admin(ctx, owner_id="boss")
+    real_execute = ctx.sql.execute
+
+    def _exec(sql, params=None):  # noqa: ANN001
+        real_execute(sql, params)
+        return 7
+
+    ctx.sql.execute = _exec  # type: ignore[assignment]
+
+    p.cmd_otaku_admin(ctx, _admin_slash_event(user_id="boss", target_user_id="user-99"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "7" in (follow.get("content") or "")
+    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_user_anime" in c["sql"]]
+    assert deletes and deletes[-1]["params"] == ["user-99"]
+
+
+def test_otaku_admin_missing_user_option_replies_immediately():
+    ctx = MockContext()
+    # Slash command invoked with no sub-option at all.
+    event = make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="otaku-admin",
+        options=[{"name": "reset-user", "type": 1, "options": []}],
+        user_id="any",
+    )
+    p.cmd_otaku_admin(ctx, event)
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "user:" in (resp.get("content") or "")
+
+
+def test_role_list_cache_hit_skips_second_lookup():
+    ctx = MockContext()
+    call_count = {"n": 0}
+
+    def _list_roles():
+        call_count["n"] += 1
+        return [{"id": "1", "name": "@everyone", "permissions": "0"}]
+
+    ctx.discord.list_roles = _list_roles  # type: ignore[assignment]
+    # First call populates the cache.
+    p._cached_list_roles(ctx)
+    p._cached_list_roles(ctx)
+    p._cached_list_roles(ctx)
+    assert call_count["n"] == 1
+
+
 # ── v2.5.0 /otaku-reset + rating-on-card ────────────────────────────────────
 
 
