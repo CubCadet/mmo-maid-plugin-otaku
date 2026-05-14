@@ -1,9 +1,67 @@
 {
   "id": "otaku",
-  "name": "My Plugin",
-  "version": "0.1.0",
-  "description": "A new MMO Maid plugin.",
+  "name": "Otaku",
+  "version": "1.0.0",
+  "description": "Discover, search, and learn about anime from Discord — search by title, browse by genre, see what's trending this season, and find shows similar to ones you've looked up. Powered by AniList.",
+  "author": "CubCadetXT1",
+  "tags": ["anime", "anilist", "discovery", "search"],
   "capabilities_required": [
-    "discord:send_message"
+    "interaction:respond",
+    "proxy:http",
+    "storage:kv"
+  ],
+  "proxy_domains_requested": ["graphql.anilist.co"],
+  "slash_commands": [
+    {
+      "name": "anime",
+      "description": "Search AniList for an anime by name.",
+      "options": [
+        {
+          "name": "query",
+          "description": "Anime title to search for",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discover",
+      "description": "Browse anime by genre.",
+      "options": [
+        {
+          "name": "genre",
+          "description": "Genre to browse (e.g. Action, Romance, Sci-Fi)",
+          "type": 3,
+          "required": true
+        },
+        {
+          "name": "sort",
+          "description": "How to sort results",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "Popular", "value": "popular"},
+            {"name": "Trending", "value": "trending"},
+            {"name": "Score", "value": "score"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "trending",
+      "description": "Show the top trending anime this season."
+    },
+    {
+      "name": "similar",
+      "description": "Show anime similar to one you've looked up.",
+      "options": [
+        {
+          "name": "anime",
+          "description": "Anime to find recommendations for (defaults to your last /anime lookup)",
+          "type": 3,
+          "required": false
+        }
+      ]
+    }
   ]
 }
