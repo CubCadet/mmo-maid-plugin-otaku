@@ -285,25 +285,20 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 ---
 
-### v1.0.2 — Response caching for AniList
+### v1.0.2 — Response caching for AniList ✅ shipped 2026-05-14
 
 **Target:** Patch. Polite to AniList, faster for users.
 
 **Tasks:**
-- Add a tiny in-process cache (5-minute TTL) keyed on the GraphQL query + variables hash. Use `ctx.ephemeral.set` with TTL.
-- Cache `/anime` lookups by normalized query string.
-- Cache `/discover` page 1 results by `(genre, sort)`.
-- Cache `/trending` page 1 by `(season, year)`.
-- Do **not** cache `/similar` for cached-anime-id flow (the cache key would have to include the user, leaking other users' caches).
+- ~~Add a tiny in-process cache (5-minute TTL) keyed on the GraphQL query + variables hash.~~ ~~Use `ctx.ephemeral.set` with TTL.~~ — `ctx.ephemeral` has no `set/get` for arbitrary values; landed as a pure-Python module-level dict cache instead. This actually matches "in-process" more faithfully than the Redis-backed ephemeral would have.
+- ~~Cache `/anime` lookups by normalized query string.~~ (lowercased before hashing)
+- ~~Cache `/discover` page 1 results by `(genre, sort)`.~~
+- ~~Cache `/trending` page 1 by `(season, year)`.~~
+- ~~Do **not** cache `/similar` for cached-anime-id flow.~~
 
-**Regression check:** All existing `/anime`, `/discover`, `/trending` tests still pass (cache is transparent).
+**Regression check:** ~~All existing `/anime`, `/discover`, `/trending` tests still pass (cache is transparent).~~ Verified — module-level cache reset via autouse fixtures in both conftests.
 
-**Failure modes:** ephemeral storage has a 24-hour max TTL; 5 minutes is fine. If `ctx.ephemeral.set` raises `KvQuotaError`, the cache silently noops — never raise from the cache path.
-
-**Commits:**
-- `feat(cache): 5-min AniList response cache via ephemeral`
-- `test(cache): cache hit short-circuits the http call`
-- `chore(release): v1.0.2`
+**Failure modes encountered:** SDK mismatch — `ctx.ephemeral` doesn't expose `set/get`. Per the self-healing protocol's recoverable list, switched to an in-memory dict, which has no quota or TTL ceiling concerns. Cache writes are wrapped in `try/except` so a future bug there can never raise into the handler.
 
 ---
 

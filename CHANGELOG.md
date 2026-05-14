@@ -20,6 +20,20 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-05-14
+
+### Added
+- In-process AniList response cache (5-minute TTL, bounded to 128 entries).
+  Cuts repeat HTTP traffic for popular queries.
+- `/anime` lookups (normalized to lowercase) cache by query string.
+- `/discover` page 1 results cache by `(genre, sort)`.
+- `/trending` page 1 results cache by `(season, year)`.
+
+### Changed
+- `/similar` is deliberately left uncached.
+- Cache writes are wrapped so a failure in the cache path never raises into
+  the request handler.
+
 ## [1.0.1] - 2026-05-14
 
 ### Changed
