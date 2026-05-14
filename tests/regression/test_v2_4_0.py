@@ -84,7 +84,8 @@ def test_import_writes_upsert_preserving_is_favorite():
 
     p.cmd_import(ctx, _slash("import", {"anilist": "reg-user"}, user_id="reg-imp"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media.
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts
     # Importantly, the UPDATE clause must NOT touch is_favorite.
     assert "is_favorite" not in inserts[0]["sql"].split("DO UPDATE SET")[1]

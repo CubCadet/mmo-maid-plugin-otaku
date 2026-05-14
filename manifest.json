@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "7.2.1",
+  "version": "8.0.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -24,6 +24,59 @@
           "description": "Anime title to search for",
           "type": 3,
           "required": true
+        }
+      ]
+    },
+    {
+      "name": "manga",
+      "description": "Search AniList for a manga by name.",
+      "options": [
+        {
+          "name": "query",
+          "description": "Manga title to search for",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "manga-discover",
+      "description": "Browse manga by genre.",
+      "options": [
+        {
+          "name": "genre",
+          "description": "Genre to browse (e.g. Action, Romance, Drama)",
+          "type": 3,
+          "required": true
+        },
+        {
+          "name": "sort",
+          "description": "How to sort results",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "Popular", "value": "popular"},
+            {"name": "Trending", "value": "trending"},
+            {"name": "Score", "value": "score"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "manga-favorites",
+      "description": "Manage and browse your manga favorites.",
+      "options": [
+        {
+          "name": "manga",
+          "description": "Manga to favorite (defaults to your last /manga lookup)",
+          "type": 3,
+          "required": false
+        },
+        {
+          "name": "remove",
+          "description": "Unfavorite instead of favoriting",
+          "type": 5,
+          "required": false
         }
       ]
     },

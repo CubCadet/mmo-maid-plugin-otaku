@@ -828,11 +828,36 @@ UPDATEs the existing row.
 
 **Goal:** Anime is the start, not the end. Add manga, characters, voice actors, studios.
 
-### v8.0.0 — Manga support
+### v8.0.0 — Manga support ✅ shipped 2026-05-14
 
-`/manga`, `/manga-discover`, `/manga-favorites` mirroring the anime commands. Most code reuses `_make_*_embed` helpers with type-aware paths.
+~~`/manga`, `/manga-discover`, `/manga-favorites` mirroring the anime commands.~~ All three shipped. ~~Most code reuses `_make_*_embed` helpers
+with type-aware paths.~~ — Deviation: v8.0 ships a parallel
+`_make_manga_embed` rather than unifying `_make_anime_embed` to handle both
+types. The fields differ enough (episodes/season vs. chapters/volumes/year)
+that the per-type helper is clearer than a type-branched union. A future
+MAJOR can consolidate if a third media_type makes the duplication a real
+burden.
 
-**Schema change:** Add `media_type` column to `otaku_user_anime` (now `otaku_user_media`). MAJOR bump.
+~~**Schema change:** Add `media_type` column to `otaku_user_anime` (now `otaku_user_media`). MAJOR bump.~~ Shipped with the rename + column + PK
+extension to `(user_id, media_id, media_type)`. The migration helper
+`_migrate_v7_to_v8(ctx)` is idempotent (probes information_schema first)
+and runs from `_bootstrap_schema` so both fresh installs and in-place
+upgrades work without operator intervention.
+
+**The test_v2_0_0.py literal-DDL gate** — resolved per the user-chosen
+"documented regression-fix edit" path. Nine regression test files got
+`# regression-fix (v8.0.0):` comments where their literal-SQL substring
+assertions referenced `otaku_user_anime`. Per the ROADMAP doctrine, MAJOR
+bumps explicitly carve this out.
+
+**Deferred to v8.x:** `/manga-watch`, `/manga-rate`, `/manga-progress`,
+`/manga-list`, `/manga-import` mirror their anime counterparts and layer
+atop the now-stable schema. Roadmap scope for v8.0 was the three
+search/discover/favorites commands — extras come as patches if demand
+surfaces.
+
+**Capability:** none new. `proxy:http`, `storage:sql`, `storage:kv`,
+`interaction:respond` already covered everything.
 
 ---
 

@@ -472,17 +472,21 @@ def test_schema_bootstrap_is_idempotent():
     p._bootstrap_schema(ctx)
     # Same DDLs run both times → recorder count doubles. Each DDL is one of the
     # idempotent forms (CREATE … IF NOT EXISTS or ADD COLUMN IF NOT EXISTS).
+    # The v8.0 migration probe (SELECT against information_schema) is also
+    # recorded by MockContext but isn't a DDL, so the assertion below scopes
+    # to CREATE/ALTER statements.
     assert len(ctx.sql.executed) == first_count * 2
     assert all(
         "IF NOT EXISTS" in call["sql"]
         for call in ctx.sql.executed
+        if call["sql"].lstrip().startswith(("CREATE", "ALTER"))
     )
 
 
 def test_on_install_bootstraps_schema():
     ctx = MockContext()
     p._on_install(ctx)
-    assert any("CREATE TABLE IF NOT EXISTS otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_user_media" in c["sql"] for c in ctx.sql.executed)
     assert any("CREATE INDEX IF NOT EXISTS" in c["sql"] for c in ctx.sql.executed)
 
 
@@ -490,7 +494,7 @@ def test_on_ready_bootstraps_schema():
     """Pool-mode safety: on_ready also runs the DDL."""
     ctx = MockContext()
     p._on_ready(ctx)
-    assert any("CREATE TABLE IF NOT EXISTS otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_user_media" in c["sql"] for c in ctx.sql.executed)
 
 
 # ── /favorite ───────────────────────────────────────────────────────────────
@@ -506,10 +510,11 @@ def test_favorite_uses_last_anime_cache_when_no_arg():
     follow = ctx.interaction.followups[-1]
     assert follow.get("ephemeral") is True
     assert "favorites" in (follow.get("content") or "").lower()
-    # Upsert should set is_favorite=True.
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    # Upsert should set is_favorite=True. v8.0 added media_type to the INSERT
+    # column list so the positional index shifted; assert on membership.
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts, "expected an INSERT"
-    assert inserts[-1]["params"][3] is True  # is_favorite param
+    assert True in inserts[-1]["params"]  # is_favorite=True
 
 
 def test_favorite_with_no_cache_and_no_arg_prompts_user():
@@ -531,8 +536,9 @@ def test_favorite_remove_path():
 
     follow = ctx.interaction.followups[-1]
     assert "Removed" in (follow.get("content") or "")
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
-    assert inserts and inserts[-1]["params"][3] is False  # is_favorite set False
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
+    # v8.0 added media_type to the column list; assert on membership instead.
+    assert inserts and False in inserts[-1]["params"]  # is_favorite=False
 
 
 def test_favorite_with_explicit_anime_arg_searches_anilist():
@@ -559,8 +565,9 @@ def test_watch_sets_status_for_cached_anime():
 
     follow = ctx.interaction.followups[-1]
     assert "Completed" in (follow.get("content") or "")
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
-    assert inserts and inserts[-1]["params"][2] == "completed"
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
+    # v8.0 added media_type to the column list; assert on membership.
+    assert inserts and "completed" in inserts[-1]["params"]
 
 
 def test_watch_rejects_invalid_status():
@@ -1963,7 +1970,7 @@ def test_otaku_admin_reset_user_denied_for_non_admin():
     assert follow.get("ephemeral") is True
     assert "server-admin only" in (follow.get("content") or "")
     # No DELETE was issued.
-    assert not any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert not any("DELETE FROM otaku_user_media" in c["sql"] for c in ctx.sql.executed)
 
 
 def test_otaku_admin_reset_user_runs_delete_for_admin():
@@ -1981,7 +1988,7 @@ def test_otaku_admin_reset_user_runs_delete_for_admin():
 
     follow = ctx.interaction.followups[-1]
     assert "7" in (follow.get("content") or "")
-    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_user_anime" in c["sql"]]
+    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_user_media" in c["sql"]]
     assert deletes and deletes[-1]["params"] == ["user-99"]
 
 
@@ -2047,7 +2054,7 @@ def test_otaku_reset_confirm_deletes_rows():
     assert resp.get("ephemeral") is True
     assert "3" in (resp.get("content") or "")
     # DELETE was issued.
-    assert any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert any("DELETE FROM otaku_user_media" in c["sql"] for c in ctx.sql.executed)
 
 
 def test_otaku_reset_confirm_only_works_for_original_caller():
@@ -2059,7 +2066,7 @@ def test_otaku_reset_confirm_only_works_for_original_caller():
     resp = ctx.interaction.responses[-1]
     assert "Cancelled" in (resp.get("content") or "")
     # No DELETE was issued.
-    assert not any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert not any("DELETE FROM otaku_user_media" in c["sql"] for c in ctx.sql.executed)
 
 
 def test_otaku_reset_cancel_button():
@@ -2130,7 +2137,7 @@ def test_import_streams_pages_until_no_next_and_summarizes():
     assert "Imported **3** anime" in msg
     assert "3 new, 0 updated" in msg
     # Three INSERTs.
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert len(inserts) == 3
     # First row mapped CURRENT → watching, score 8.5 → 17.
     assert inserts[0]["params"][2] == "watching"
@@ -2161,7 +2168,7 @@ def test_import_skips_malformed_entries_in_a_page():
 
     p.cmd_import(ctx, _slash_event("import", {"anilist": "kace"}, user_id="imp-skip"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     # Only the one valid row.
     assert len(inserts) == 1
     assert inserts[0]["params"][1] == 5
@@ -2251,7 +2258,7 @@ def test_progress_writes_episodes_watched():
 
     p.cmd_progress(ctx, _slash_event("progress", {"episodes": 1}, user_id="prog1"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts
     # Params: [user_id, media_id, status, episodes_watched]
     assert inserts[-1]["params"][3] == 1
@@ -2267,7 +2274,7 @@ def test_progress_at_total_marks_completed():
 
     p.cmd_progress(ctx, _slash_event("progress", {"episodes": 1}, user_id="prog2"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts[-1]["params"][2] == "completed"
 
 
@@ -2279,7 +2286,7 @@ def test_progress_caps_at_total_and_warns():
 
     p.cmd_progress(ctx, _slash_event("progress", {"episodes": 99}, user_id="prog3"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts[-1]["params"][3] == 1  # capped
     follow = ctx.interaction.followups[-1]
     assert "1 episode" in (follow.get("content") or "") or "capping" in (follow.get("content") or "")
@@ -2339,7 +2346,7 @@ def test_rate_command_writes_upsert():
 
     p.cmd_rate(ctx, _slash_event("rate", {"score": 8.5}, user_id="rate1"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts
     # Params: [user_id, media_id, status, rating]
     assert inserts[-1]["params"][0] == "rate1"

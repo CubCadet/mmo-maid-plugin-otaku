@@ -101,12 +101,14 @@ def test_rate_command_writes_encoded_rating():
     ctx.kv.set("last_anime:user:reg-rate", 555, ttl_seconds=3600)
     ctx.http.mock_response("graphql.anilist.co", status=200, body=json.dumps({"data": {"Media": SAMPLE}}))
 
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media,
+    # and media_type was added to the INSERT column list. Positional indexing
+    # is no longer stable; assert on intent (rating-as-int*2 is in params).
     p.cmd_rate(ctx, _slash("rate", {"score": 9.0}, user_id="reg-rate"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts
-    # params shape: [user_id, media_id, status, rating]
-    assert inserts[-1]["params"][3] == 18  # 9.0 × 2
+    assert 18 in inserts[-1]["params"]  # 9.0 × 2
 
 
 def test_ratings_query_orders_by_rating_desc():

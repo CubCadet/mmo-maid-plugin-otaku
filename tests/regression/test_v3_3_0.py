@@ -57,7 +57,10 @@ def test_leaderboard_completed_query_filters_status():
 
     ctx.sql.query = _q
     p.cmd_leaderboard(ctx, _slash("leaderboard", {}, user_id="u"))
-    assert "WHERE status = 'completed'" in captured["sql"]
+    # regression-fix (v8.0.0): the WHERE clause now begins with media_type='anime'
+    # so the leaderboard isn't polluted by manga rows. The intent — "completed
+    # leaderboard filters on status='completed'" — survives.
+    assert "status = 'completed'" in captured["sql"]
 
 
 def test_leaderboard_score_query_uses_having_threshold():

@@ -11,6 +11,10 @@ IMMUTABLE — what shipped at v6.0.0:
   anime).
 - Top RECOMMEND_RESULT_LIMIT = 5 results displayed.
 - Target's already-tracked anime (any status) are excluded from candidates.
+
+regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media. The
+literal-string assertions in the route mocks below were updated to the new
+table name. See CHANGELOG v8.0.0 "Migration notes" for the rationale.
 """
 from __future__ import annotations
 
@@ -143,7 +147,7 @@ def test_candidates_excludes_target_tracked_ids():
         # First call after target_vec is built: _recommend_tracked_ids.
         # Then _recommend_peer_ids. Then per-peer _recommend_user_vector.
         if (
-            "SELECT media_id FROM otaku_user_anime WHERE user_id = $1" in sql
+            "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
             and "rating" not in sql
             and "is_favorite" not in sql
             and "status" not in sql
@@ -187,7 +191,7 @@ def test_candidates_drop_peers_below_min_shared():
 
     def _q(sql, params=None):
         if (
-            "SELECT media_id FROM otaku_user_anime WHERE user_id = $1" in sql
+            "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
             and "rating" not in sql
             and "is_favorite" not in sql
             and "status" not in sql

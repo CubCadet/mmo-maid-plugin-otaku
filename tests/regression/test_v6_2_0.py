@@ -13,6 +13,10 @@ IMMUTABLE — what shipped at v6.2.0:
 - Empty-tracker short-circuit happens BEFORE any AniList call —
   important for the "you haven't tracked anything yet" empty state.
 - _user_top_genres returns alphabetically-stable ties.
+
+regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media. The
+literal-string assertions in the route mocks below were updated to the new
+table name. See CHANGELOG v8.0.0 "Migration notes" for the rationale.
 """
 from __future__ import annotations
 
@@ -125,7 +129,7 @@ def test_filters_out_tracked_media_from_trending(monkeypatch):
         if "ORDER BY added_at DESC" in sql:
             return [{"media_id": 7}]
         # tracked-ids SELECT
-        if "SELECT media_id FROM otaku_user_anime WHERE user_id = $1" in sql:
+        if "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql:
             return [{"media_id": 7}]
         return []
 
@@ -161,7 +165,7 @@ def test_no_fresh_results_after_filter_shows_helpful_pointer(monkeypatch):
             return [{"n": 1}]
         if "ORDER BY added_at DESC" in sql:
             return [{"media_id": 7}]
-        if "SELECT media_id FROM otaku_user_anime WHERE user_id = $1" in sql:
+        if "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql:
             return [{"media_id": 7}, {"media_id": 8}]
         return []
 

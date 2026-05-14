@@ -87,13 +87,15 @@ def test_non_admin_otaku_admin_denied():
                   "options": [{"name": "user", "value": "victim", "type": 6}]}],
         user_id="rando",
     )
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media.
     p.cmd_otaku_admin(ctx, event)
     follow = ctx.interaction.followups[-1]
     assert follow.get("ephemeral") is True
-    assert not any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert not any("DELETE FROM otaku_user_media" in c["sql"] for c in ctx.sql.executed)
 
 
 def test_admin_otaku_admin_deletes_target_user():
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media.
     ctx = MockContext()
     ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}
     event = make_event(
@@ -105,5 +107,5 @@ def test_admin_otaku_admin_deletes_target_user():
         user_id="boss",
     )
     p.cmd_otaku_admin(ctx, event)
-    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_user_anime" in c["sql"]]
+    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_user_media" in c["sql"]]
     assert deletes and deletes[-1]["params"] == ["victim"]

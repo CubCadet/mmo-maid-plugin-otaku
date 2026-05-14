@@ -47,28 +47,35 @@ plugin = Plugin()
 # no server_id column needed. DDL is idempotent (IF NOT EXISTS) and runs from
 # both on_install and on_ready so pool-mode workers and v1.x→v2.0 upgrades
 # both seed cleanly. See ROADMAP.md "Phase 2" for the rationale.
+# v8.0.0 renamed `otaku_user_anime` → `otaku_user_media` and added a
+# `media_type` column (PK extended to include it) so manga, light novels,
+# and future media types can share the table. The `episodes_watched` column
+# stays named — it carries chapter count for manga rows; the column comment
+# documents the dual interpretation. Migration from v7.x is handled by
+# `_migrate_v7_to_v8`, run idempotently from `_bootstrap_schema`.
 _SCHEMA_DDL = (
-    "CREATE TABLE IF NOT EXISTS otaku_user_anime ("
+    "CREATE TABLE IF NOT EXISTS otaku_user_media ("
     "  user_id TEXT NOT NULL,"
     "  media_id INTEGER NOT NULL,"
+    "  media_type TEXT NOT NULL DEFAULT 'anime',"
     "  status TEXT NOT NULL,"
     "  is_favorite BOOLEAN NOT NULL DEFAULT FALSE,"
     "  added_at TIMESTAMP NOT NULL DEFAULT NOW(),"
-    "  PRIMARY KEY (user_id, media_id))"
+    "  PRIMARY KEY (user_id, media_id, media_type))"
 )
 _SCHEMA_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx "
-    "ON otaku_user_anime (user_id, status, added_at DESC)"
+    "CREATE INDEX IF NOT EXISTS otaku_user_media_user_status_added_idx "
+    "ON otaku_user_media (user_id, status, added_at DESC)"
 )
 
 # v2.1.0 — additive column for ratings (1.0–10.0 stored as int*2, range 2..20).
 # IF NOT EXISTS makes this idempotent and safe to run on existing tables.
 _SCHEMA_RATING_DDL = (
-    "ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT"
+    "ALTER TABLE otaku_user_media ADD COLUMN IF NOT EXISTS rating SMALLINT"
 )
-# v2.2.0 — additive column for episode progress.
+# v2.2.0 — additive column for episode progress (chapter count for manga rows).
 _SCHEMA_EPISODES_DDL = (
-    "ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0"
+    "ALTER TABLE otaku_user_media ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0"
 )
 # v3.0.0 — per-server shared watchlist. Auto-scoped to server_id by the runner,
 # so media_id alone is enough for the PK. Curated by admins.
@@ -200,6 +207,32 @@ class _Strings:
     ANIME_USAGE = "Usage: `/anime query: <title>`"
     ANIME_NOT_FOUND = "No anime found matching **{query}**."
     ANIME_NO_DESCRIPTION = "*(no description)*"
+
+    # /manga (v8.0.0).
+    MANGA_USAGE = "Usage: `/manga query: <title>`"
+    MANGA_NOT_FOUND = "No manga found matching **{query}**."
+    MANGA_NO_DESCRIPTION = "*(no description)*"
+    MANGA_DISCOVER_USAGE = "Usage: `/manga-discover genre: <name> [sort: popular|trending|score]`"
+    MANGA_DISCOVER_NO_RESULTS = "No {genre} manga found."
+    MANGA_PROGRESS_BOUNDED = "Chapter {chapters} / {total}"
+    MANGA_PROGRESS_UNBOUNDED = "Chapter {chapters}"
+
+    # /manga-favorites (v8.0.0). Largely mirrors the anime favorite strings;
+    # split so the wording can drift if needed.
+    MANGA_FAVORITE_NO_CACHE = (
+        "You haven't looked up a manga yet. Try `/manga query: <title>` first."
+    )
+    MANGA_FAVORITE_ADDED = "⭐ Added **{title}** to your manga favorites."
+    MANGA_FAVORITE_ALREADY = "**{title}** is already in your manga favorites."
+    MANGA_FAVORITE_REMOVED = "Removed **{title}** from your manga favorites."
+    MANGA_FAVORITE_NOT_PRESENT = "**{title}** wasn't in your manga favorites."
+    MANGA_FAVORITES_HEADER_OWN = "📚 Your manga favorites"
+    MANGA_FAVORITES_HEADER_OTHER = "📚 {who}'s manga favorites"
+    MANGA_FAVORITES_EMPTY_OWN = (
+        "You haven't added any manga favorites yet. Run `/manga-favorites` "
+        "after a `/manga query: <title>` lookup."
+    )
+    MANGA_FAVORITES_EMPTY_OTHER = "{who} hasn't added any manga favorites yet."
 
     # /discover.
     DISCOVER_USAGE = "Usage: `/discover genre: <name> [sort: popular|trending|score]`"
@@ -814,6 +847,57 @@ QUERY_MEDIA_BATCH = (
     "}"
 )
 
+# v8.0.0 — manga query constants. Parallel to the anime constants above; we
+# keep them separate (rather than parameterising on $mediaType) because each
+# query family has type-specific fields (anime has episodes+season, manga has
+# chapters+volumes+startDate). _MEDIA_FIELDS_MANGA replaces the episodes/season
+# trio with chapters/volumes/startDate.year so embed rendering stays clean.
+_MEDIA_FIELDS_MANGA = """
+  id
+  title { romaji english }
+  description(asHtml: false)
+  coverImage { large }
+  bannerImage
+  averageScore
+  popularity
+  format
+  chapters
+  volumes
+  status
+  startDate { year }
+  genres
+  siteUrl
+"""
+
+QUERY_MANGA_SEARCH_ONE = (
+    "query ($q: String) {"
+    "  Media(search: $q, type: MANGA) {" + _MEDIA_FIELDS_MANGA + "}"
+    "}"
+)
+
+QUERY_MANGA_DISCOVER = (
+    "query ($genre: String, $sort: [MediaSort], $page: Int, $perPage: Int) {"
+    "  Page(page: $page, perPage: $perPage) {"
+    "    pageInfo { hasNextPage currentPage }"
+    "    media(type: MANGA, genre: $genre, sort: $sort) {" + _MEDIA_FIELDS_MANGA + "}"
+    "  }"
+    "}"
+)
+
+QUERY_MANGA_BY_ID = (
+    "query ($id: Int) {"
+    "  Media(id: $id, type: MANGA) {" + _MEDIA_FIELDS_MANGA + "}"
+    "}"
+)
+
+QUERY_MANGA_BATCH = (
+    "query ($ids: [Int]) {"
+    "  Page(perPage: 50) {"
+    "    media(id_in: $ids, type: MANGA) {" + _MEDIA_FIELDS_MANGA + "}"
+    "  }"
+    "}"
+)
+
 # v4.0.0 — airing schedule lookup for the notification cron.
 QUERY_AIRING_WINDOW = (
     "query ($at_gte: Int, $at_lte: Int) {"
@@ -971,6 +1055,64 @@ def _make_anime_embed(
             value = S.PROGRESS_FIELD_VALUE_BOUNDED.format(episodes=user_progress, total=total)
         else:
             value = S.PROGRESS_FIELD_VALUE_UNBOUNDED.format(episodes=user_progress)
+        embed["fields"].append({"name": S.PROGRESS_FIELD_NAME, "value": value, "inline": True})
+    if user_rating is not None and user_rating > 0:
+        embed["fields"].append({
+            "name": S.RATING_FIELD_NAME,
+            "value": f"🎯 {_format_rating(user_rating)}/10",
+            "inline": True,
+        })
+    cover = (media.get("coverImage") or {}).get("large")
+    if cover:
+        embed["thumbnail"] = {"url": cover}
+    banner = media.get("bannerImage")
+    if banner:
+        embed["image"] = {"url": banner}
+    return embed
+
+
+def _make_manga_embed(
+    media: dict,
+    *,
+    user_progress: int | None = None,
+    user_rating: int | None = None,
+) -> dict:
+    """Full manga card — used by /manga and (future) /manga-expand select.
+
+    Mirrors _make_anime_embed but swaps episodes/season for chapters/volumes/
+    startDate.year — the dimensions AniList actually populates for manga.
+    `user_progress` is interpreted as chapters watched/read; `user_rating`
+    keeps the SMALLINT×2 scale from the anime path.
+    """
+    title = _format_title(media)
+    site_url = media.get("siteUrl") or None
+    description = _truncate(_strip_html(media.get("description")), DESC_MAX) or S.MANGA_NO_DESCRIPTION
+    genres = (media.get("genres") or [])[:5]
+    start_year = ((media.get("startDate") or {}).get("year")) or "—"
+
+    embed: dict = {
+        "title": title,
+        "url": site_url,
+        "description": description,
+        "color": ANILIST_COLOR,
+        "fields": [
+            {"name": "Score", "value": _score(media), "inline": True},
+            {"name": "Popularity", "value": f"{media.get('popularity') or 0:,}", "inline": True},
+            {"name": "Format", "value": (media.get("format") or "—").replace("_", " ").title(), "inline": True},
+            {"name": "Chapters", "value": str(media.get("chapters") or "—"), "inline": True},
+            {"name": "Volumes", "value": str(media.get("volumes") or "—"), "inline": True},
+            {"name": "Started", "value": str(start_year), "inline": True},
+        ],
+        "footer": {"text": S.FOOTER_ANILIST},
+    }
+    if genres:
+        embed["fields"].append({"name": "Genres", "value": ", ".join(genres), "inline": False})
+    if user_progress and user_progress > 0:
+        total = media.get("chapters")
+        if isinstance(total, int) and total > 0:
+            value = S.MANGA_PROGRESS_BOUNDED.format(chapters=user_progress, total=total)
+        else:
+            value = S.MANGA_PROGRESS_UNBOUNDED.format(chapters=user_progress)
         embed["fields"].append({"name": S.PROGRESS_FIELD_NAME, "value": value, "inline": True})
     if user_rating is not None and user_rating > 0:
         embed["fields"].append({
@@ -1417,13 +1559,73 @@ def _render_similar(ctx: Context, media: dict, *, deferred: bool, ephemeral_repl
 
 # ── Schema bootstrap + lifecycle ─────────────────────────────────────────────
 
+
+def _migrate_v7_to_v8(ctx: Context) -> None:
+    """Rename otaku_user_anime → otaku_user_media and add the media_type column.
+
+    Idempotent: detects whether the v7 table still exists; if not, the rename
+    has already happened (or this is a fresh v8 install) and we silently
+    return. Pool-mode safe — multiple workers running this concurrently is
+    a no-op for the second one because the v7 table no longer exists.
+
+    Per ROADMAP §regression doctrine, this is the first non-additive
+    migration in the repo. The companion `# regression-fix (v8.0.0)`
+    comments in tests/regression/test_v2_*.py acknowledge the rename.
+    """
+    # The information_schema lookup is the cheapest way to ask "does v7's
+    # table still exist?" without depending on a per-runtime introspection.
+    rows = ctx.sql.query(
+        "SELECT 1 AS one FROM information_schema.tables "
+        "WHERE table_name = 'otaku_user_anime' LIMIT 1"
+    ) or []
+    if not rows:
+        return  # already migrated or fresh install
+
+    # 1) Rename the table.
+    ctx.sql.execute("ALTER TABLE otaku_user_anime RENAME TO otaku_user_media")
+    # 2) Rename the index to match the new convention. The IF EXISTS guard
+    #    handles the edge case where the index was named differently in
+    #    very early installs.
+    ctx.sql.execute(
+        "ALTER INDEX IF EXISTS otaku_user_anime_user_status_added_idx "
+        "RENAME TO otaku_user_media_user_status_added_idx"
+    )
+    # 3) Add the media_type column with a DEFAULT so existing rows backfill
+    #    to 'anime' atomically. Step 4 (PK extension) is implicit — Postgres
+    #    requires dropping and re-adding the PK to widen it, but new v8
+    #    installs declare the wide PK upfront in _SCHEMA_DDL. Migrated rows
+    #    keep the v7 narrow PK until we explicitly widen it below.
+    ctx.sql.execute(
+        "ALTER TABLE otaku_user_media "
+        "ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'anime'"
+    )
+    # 4) Widen the primary key. Postgres requires drop-then-add; both wrapped
+    #    in IF EXISTS / IF NOT EXISTS where the dialect supports it. Older
+    #    Postgres needs catalog lookup of the PK constraint name, which the
+    #    runner abstracts behind ALTER TABLE … DROP CONSTRAINT IF EXISTS.
+    ctx.sql.execute(
+        "ALTER TABLE otaku_user_media DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
+    )
+    ctx.sql.execute(
+        "ALTER TABLE otaku_user_media DROP CONSTRAINT IF EXISTS otaku_user_media_pkey"
+    )
+    ctx.sql.execute(
+        "ALTER TABLE otaku_user_media "
+        "ADD CONSTRAINT otaku_user_media_pkey PRIMARY KEY (user_id, media_id, media_type)"
+    )
+
+
 def _bootstrap_schema(ctx: Context) -> None:
-    """Create the otaku_user_anime table, its index, and additive columns. Idempotent.
+    """Create the otaku_user_media table, its index, and additive columns. Idempotent.
 
     DDLs land in version order. New columns added in later versions go here
     with ADD COLUMN IF NOT EXISTS so the bootstrap stays a single source of
-    truth across every upgrade path.
+    truth across every upgrade path. The v7→v8 rename runs first so the
+    `CREATE TABLE IF NOT EXISTS otaku_user_media` below is a no-op on
+    upgraded installs and a real create on fresh installs.
     """
+    # v8.0.0 — must run first; later DDLs assume the new table name.
+    _migrate_v7_to_v8(ctx)
     ctx.sql.execute(_SCHEMA_DDL)
     ctx.sql.execute(_SCHEMA_INDEX_DDL)
     # v2.1.0
@@ -1476,17 +1678,20 @@ def _resolve_last_anime_id(ctx: Context, user_id: str) -> int | None:
         return None
 
 
-def _upsert_user_anime(
+def _upsert_user_media(
     ctx: Context,
     user_id: str,
     media_id: int,
     *,
+    media_type: str = "anime",
     status: str | None = None,
     is_favorite: bool | None = None,
 ) -> None:
-    """Insert or update a row in otaku_user_anime, mutating only the fields passed."""
-    # Defaults for new rows; for existing rows the ON CONFLICT DO UPDATE
-    # branch only touches the columns the caller actually set.
+    """Insert or update a row in otaku_user_media, mutating only the fields passed.
+
+    `media_type` defaults to 'anime' so every v7 caller works unchanged. Manga
+    handlers pass `media_type='manga'` explicitly.
+    """
     insert_status = status if status is not None else "watching"
     insert_favorite = bool(is_favorite) if is_favorite is not None else False
 
@@ -1495,20 +1700,26 @@ def _upsert_user_anime(
         update_clauses.append("status = EXCLUDED.status")
     if is_favorite is not None:
         update_clauses.append("is_favorite = EXCLUDED.is_favorite")
-    update_sql = ", ".join(update_clauses) if update_clauses else "user_id = otaku_user_anime.user_id"
+    update_sql = ", ".join(update_clauses) if update_clauses else "user_id = otaku_user_media.user_id"
 
     sql = (
-        "INSERT INTO otaku_user_anime (user_id, media_id, status, is_favorite) "
-        "VALUES ($1, $2, $3, $4) "
-        f"ON CONFLICT (user_id, media_id) DO UPDATE SET {update_sql}"
+        "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, is_favorite) "
+        "VALUES ($1, $2, $3, $4, $5) "
+        f"ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET {update_sql}"
     )
-    ctx.sql.execute(sql, [user_id, media_id, insert_status, insert_favorite])
+    ctx.sql.execute(sql, [user_id, media_id, media_type, insert_status, insert_favorite])
 
 
-def _is_favorite(ctx: Context, user_id: str, media_id: int) -> bool:
+# Back-compat alias — v7 callers that used the anime-coded name keep working
+# without changes. New code paths should call `_upsert_user_media` directly.
+_upsert_user_anime = _upsert_user_media
+
+
+def _is_favorite(ctx: Context, user_id: str, media_id: int, *, media_type: str = "anime") -> bool:
     row = ctx.sql.query_one(
-        "SELECT is_favorite FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
-        [user_id, media_id],
+        "SELECT is_favorite FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_id = $2 AND media_type = $3",
+        [user_id, media_id, media_type],
     )
     return bool(row and row.get("is_favorite"))
 
@@ -1742,6 +1953,256 @@ def _load_manifest_slash_commands() -> list[dict]:
 _MANIFEST_COMMANDS_CACHE: list[dict] | None = None
 
 
+# ── v8.0.0 — /manga, /manga-discover, /manga-favorites ──────────────────────
+#
+# Manga commands mirror /anime, /discover, /favorite (subset). The schema is
+# the shared otaku_user_media table; manga rows carry media_type='manga' so
+# the v7 anime queries stay anime-only via the AND media_type = 'anime'
+# filters added across __main__.py. /manga-watch, /manga-rate, /manga-progress,
+# /manga-list, /manga-import remain on the roadmap for v8.x patches; v8.0
+# ships just search + discover + favorites per the explicit roadmap scope.
+#
+# KV: last_manga:user:<id> mirrors last_anime:user:<id> (7-day TTL).
+# AniList queries: QUERY_MANGA_* constants in the SQL-schema block above.
+
+LAST_MANGA_KV_PREFIX = "last_manga:user"
+
+
+@plugin.on_slash_command("manga")
+def cmd_manga(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    query = (opts.get("query") or "").strip()
+    if not query:
+        ctx.interaction.respond(content=S.MANGA_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    data = _anilist_query(ctx, QUERY_MANGA_SEARCH_ONE, {"q": query.lower()}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    media = data.get("Media")
+    if not media:
+        _reply_error(ctx, S.MANGA_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
+        return
+
+    media_id = media.get("id")
+    if media_id is not None and user_id:
+        ctx.kv.set(f"{LAST_MANGA_KV_PREFIX}:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
+
+    progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0), media_type="manga")
+    embed = _make_manga_embed(media, user_progress=progress, user_rating=rating)
+    buttons = []
+    site_url = media.get("siteUrl")
+    if site_url:
+        buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
+    components = [ActionRow(*buttons)] if buttons else None
+    ctx.interaction.followup(embeds=[embed], components=components)
+
+
+def _render_manga_discover(
+    ctx: Context, genre: str, sort_key: str, page: int, *, deferred: bool
+) -> None:
+    sort_const = SORT_MAP.get(sort_key, "POPULARITY_DESC")
+    data = _anilist_query(
+        ctx,
+        QUERY_MANGA_DISCOVER,
+        {"genre": genre, "sort": [sort_const], "page": page, "perPage": PER_PAGE},
+        cache=(page == 1),
+    )
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+    page_obj = data.get("Page") or {}
+    media_list = page_obj.get("media") or []
+    has_next = bool((page_obj.get("pageInfo") or {}).get("hasNextPage"))
+
+    if not media_list:
+        _reply_error(
+            ctx, S.MANGA_DISCOVER_NO_RESULTS.format(genre=genre), deferred=deferred
+        )
+        return
+
+    header = f"📚 {genre.title()} manga — {sort_key.title()}"
+    embed = _make_list_embed(media_list, header, page=page, has_next=has_next)
+    prev_id = f"otaku:mpage:{genre}:{sort_key}:{page - 1}" if page > 1 else None
+    next_id = f"otaku:mpage:{genre}:{sort_key}:{page + 1}" if has_next else None
+    components = [_page_buttons(prev_id, next_id)]
+    if deferred:
+        ctx.interaction.followup(embeds=[embed], components=components)
+    else:
+        ctx.interaction.respond(embeds=[embed], components=components)
+
+
+@plugin.on_slash_command("manga-discover")
+def cmd_manga_discover(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    genre = (opts.get("genre") or "").strip()
+    sort_key = (opts.get("sort") or "popular").strip().lower()
+    if sort_key not in SORT_MAP:
+        sort_key = "popular"
+    if not genre:
+        ctx.interaction.respond(content=S.MANGA_DISCOVER_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    _render_manga_discover(ctx, genre, sort_key, page=1, deferred=True)
+
+
+def _resolve_last_manga_id(ctx: Context, user_id: str) -> int | None:
+    if not user_id:
+        return None
+    try:
+        cached = ctx.kv.get(f"{LAST_MANGA_KV_PREFIX}:{user_id}")
+    except Exception:  # noqa: BLE001
+        return None
+    if cached is None:
+        return None
+    try:
+        return int(cached)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_manga_by_arg(
+    ctx: Context, user_id: str, manga_arg: str
+) -> tuple[dict | None, str | None]:
+    """Resolve the `manga:` option (or cached last_manga) to a manga media dict.
+
+    Returns (media, error). Mirrors _resolve_media_by_anime_arg but uses
+    QUERY_MANGA_SEARCH_ONE and the last_manga KV key.
+    """
+    manga_arg = (manga_arg or "").strip()
+    if manga_arg:
+        if manga_arg.isdigit():
+            data = _anilist_query(ctx, QUERY_MANGA_BY_ID, {"id": int(manga_arg)}, cache=True)
+        else:
+            data = _anilist_query(ctx, QUERY_MANGA_SEARCH_ONE, {"q": manga_arg.lower()}, cache=True)
+        if data is None:
+            return None, None
+        media = data.get("Media")
+        if not media:
+            return None, S.MANGA_NOT_FOUND.format(query=_truncate(manga_arg, 80))
+        return media, None
+
+    media_id = _resolve_last_manga_id(ctx, user_id)
+    if media_id is None:
+        return None, S.MANGA_FAVORITE_NO_CACHE
+    data = _anilist_query(ctx, QUERY_MANGA_BY_ID, {"id": media_id}, cache=True)
+    if data is None:
+        return None, None
+    media = data.get("Media")
+    if not media:
+        return None, S.MANGA_FAVORITE_NO_CACHE
+    return media, None
+
+
+@plugin.on_slash_command("manga-favorites")
+def cmd_manga_favorites(ctx: Context, event: dict) -> None:
+    """Toggle a manga as a favorite, OR (with no args + no `remove:`) list favorites.
+
+    Behaviour table:
+    - `manga:<arg>` present → favorite (or unfavorite if `remove: true`)
+    - `manga:` empty, `remove:` false → favorite the user's cached /manga lookup
+    - `manga:` empty, `remove:` true → unfavorite the cached /manga lookup
+    - both empty AND no cache → show the user's manga favorites list
+    """
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    manga_arg = (opts.get("manga") or "").strip()
+    remove = bool(opts.get("remove"))
+
+    # If neither arg nor remove flag set, AND there's no cached /manga lookup
+    # to operate on, fall through to "show this user's manga favorites list".
+    if not manga_arg and not remove and _resolve_last_manga_id(ctx, user_id) is None:
+        ctx.interaction.defer(ephemeral=True)
+        _render_manga_favorites(ctx, target_user_id=user_id, is_self=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    media, err = _resolve_manga_by_arg(ctx, user_id, manga_arg)
+    if media is None:
+        if err is not None:
+            _reply_error(ctx, err, deferred=True)
+        else:
+            _reply_anilist_failure(ctx, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    title = _format_title(media)
+    if not media_id:
+        _reply_error(ctx, S.MANGA_FAVORITE_NO_CACHE, deferred=True)
+        return
+
+    already = _is_favorite(ctx, user_id, media_id, media_type="manga")
+    if remove:
+        if not already:
+            ctx.interaction.followup(
+                content=S.MANGA_FAVORITE_NOT_PRESENT.format(title=title), ephemeral=True
+            )
+            return
+        _upsert_user_media(
+            ctx, user_id, media_id, media_type="manga", is_favorite=False
+        )
+        ctx.interaction.followup(
+            content=S.MANGA_FAVORITE_REMOVED.format(title=title), ephemeral=True
+        )
+        ctx.kv.set(f"{LAST_MANGA_KV_PREFIX}:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
+        return
+
+    if already:
+        ctx.interaction.followup(
+            content=S.MANGA_FAVORITE_ALREADY.format(title=title), ephemeral=True
+        )
+        return
+    _upsert_user_media(ctx, user_id, media_id, media_type="manga", is_favorite=True)
+    ctx.kv.set(f"{LAST_MANGA_KV_PREFIX}:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
+    ctx.interaction.followup(
+        content=S.MANGA_FAVORITE_ADDED.format(title=title), ephemeral=True
+    )
+
+
+def _render_manga_favorites(
+    ctx: Context, *, target_user_id: str, is_self: bool
+) -> None:
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'manga' AND is_favorite = TRUE "
+        "ORDER BY added_at DESC LIMIT $2",
+        [target_user_id, PER_PAGE],
+    ) or []
+    if not rows:
+        msg = S.MANGA_FAVORITES_EMPTY_OWN if is_self else S.MANGA_FAVORITES_EMPTY_OTHER.format(
+            who=f"<@{target_user_id}>"
+        )
+        _reply_error(ctx, msg, deferred=True)
+        return
+
+    ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+    data = _anilist_query(ctx, QUERY_MANGA_BATCH, {"ids": sorted(ids)}, cache=True) if ids else None
+    media_by_id: dict[int, dict] = {}
+    if data:
+        for m in ((data.get("Page") or {}).get("media") or []):
+            mid = m.get("id")
+            if isinstance(mid, int):
+                media_by_id[mid] = m
+
+    header = S.MANGA_FAVORITES_HEADER_OWN if is_self else S.MANGA_FAVORITES_HEADER_OTHER.format(
+        who=f"<@{target_user_id}>"
+    )
+    media_list = [media_by_id[i] for i in ids if i in media_by_id]
+    embed = _make_list_embed(media_list, header, page=1, has_next=False)
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
+
+
 @plugin.on_slash_command("help")
 def cmd_help(ctx: Context, event: dict) -> None:
     """List every otaku command, one per line. Reads from manifest.json so it auto-updates."""
@@ -1938,27 +2399,31 @@ def _select_user_anime(
     *,
     page: int,
 ) -> tuple[list[dict], bool]:
-    """Read PER_PAGE+1 rows for the given user/scope/page. Returns (rows, has_next)."""
+    """Read PER_PAGE+1 rows for the given user/scope/page. Returns (rows, has_next).
+
+    v8.0+ filters on media_type='anime'. /manga-favorites uses its own
+    cmd_manga_favorites handler that scopes the same way to 'manga'.
+    """
     offset = max(0, (page - 1) * PER_PAGE)
     limit = PER_PAGE + 1
     if scope == "favorites":
         sql = (
-            "SELECT media_id, status, is_favorite FROM otaku_user_anime "
-            "WHERE user_id = $1 AND is_favorite = TRUE "
+            "SELECT media_id, status, is_favorite FROM otaku_user_media "
+            "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE "
             "ORDER BY added_at DESC LIMIT $2 OFFSET $3"
         )
         params = [target_user_id, limit, offset]
     elif scope == "all":
         sql = (
-            "SELECT media_id, status, is_favorite FROM otaku_user_anime "
-            "WHERE user_id = $1 "
+            "SELECT media_id, status, is_favorite FROM otaku_user_media "
+            "WHERE user_id = $1 AND media_type = 'anime' "
             "ORDER BY added_at DESC LIMIT $2 OFFSET $3"
         )
         params = [target_user_id, limit, offset]
     else:
         sql = (
-            "SELECT media_id, status, is_favorite FROM otaku_user_anime "
-            "WHERE user_id = $1 AND status = $2 "
+            "SELECT media_id, status, is_favorite FROM otaku_user_media "
+            "WHERE user_id = $1 AND media_type = 'anime' AND status = $2 "
             "ORDER BY added_at DESC LIMIT $3 OFFSET $4"
         )
         params = [target_user_id, scope, limit, offset]
@@ -2122,7 +2587,7 @@ def _handle_reset_confirm(ctx: Context, event: dict) -> None:
         ctx.interaction.respond(content=S.RESET_CANCELLED, ephemeral=True)
         return
     rows_affected = ctx.sql.execute(
-        "DELETE FROM otaku_user_anime WHERE user_id = $1",
+        "DELETE FROM otaku_user_media WHERE user_id = $1",
         [caller_id],
     )
     if rows_affected and isinstance(rows_affected, int) and rows_affected > 0:
@@ -2222,7 +2687,7 @@ def _otaku_admin_reset_user(ctx: Context, user_id: str, sub_opts: dict) -> None:
         return
 
     rows_affected = ctx.sql.execute(
-        "DELETE FROM otaku_user_anime WHERE user_id = $1",
+        "DELETE FROM otaku_user_media WHERE user_id = $1",
         [target_user],
     )
     if rows_affected and isinstance(rows_affected, int) and rows_affected > 0:
@@ -2750,15 +3215,17 @@ DASHBOARD_TOP_TRACKED_LIMIT = 5
 
 @plugin.on_dashboard("get_total_tracked")
 def dash_total_tracked(ctx: Context, params: dict) -> dict:
-    val = ctx.sql.scalar("SELECT COUNT(*) FROM otaku_user_anime")
+    # v5.0 contract was "total tracked anime rows"; v8.0 filters explicitly
+    # so manga rows from /manga-favorites don't inflate the anime widget.
+    val = ctx.sql.scalar("SELECT COUNT(*) FROM otaku_user_media WHERE media_type = 'anime'")
     return {"value": int(val or 0), "change": ""}
 
 
 @plugin.on_dashboard("get_active_users_30d")
 def dash_active_users_30d(ctx: Context, params: dict) -> dict:
     val = ctx.sql.scalar(
-        "SELECT COUNT(DISTINCT user_id) FROM otaku_user_anime "
-        "WHERE added_at > NOW() - INTERVAL '30 days'"
+        "SELECT COUNT(DISTINCT user_id) FROM otaku_user_media "
+        "WHERE media_type = 'anime' AND added_at > NOW() - INTERVAL '30 days'"
     )
     return {"value": int(val or 0), "change": ""}
 
@@ -2766,7 +3233,8 @@ def dash_active_users_30d(ctx: Context, params: dict) -> dict:
 @plugin.on_dashboard("get_total_episodes")
 def dash_total_episodes(ctx: Context, params: dict) -> dict:
     val = ctx.sql.scalar(
-        "SELECT COALESCE(SUM(episodes_watched), 0) FROM otaku_user_anime"
+        "SELECT COALESCE(SUM(episodes_watched), 0) FROM otaku_user_media "
+        "WHERE media_type = 'anime'"
     )
     return {"value": int(val or 0), "change": ""}
 
@@ -2780,8 +3248,8 @@ def dash_total_subscriptions(ctx: Context, params: dict) -> dict:
 @plugin.on_dashboard("get_status_distribution")
 def dash_status_distribution(ctx: Context, params: dict) -> dict:
     rows = ctx.sql.query(
-        "SELECT status, COUNT(*) AS n FROM otaku_user_anime "
-        "GROUP BY status"
+        "SELECT status, COUNT(*) AS n FROM otaku_user_media "
+        "WHERE media_type = 'anime' GROUP BY status"
     ) or []
     counts = {s: 0 for s in VALID_STATUSES}
     for r in rows:
@@ -2804,7 +3272,8 @@ def dash_top_tracked(ctx: Context, params: dict) -> dict:
         "SELECT media_id, "
         "       COUNT(*) AS trackers, "
         "       COALESCE(SUM(CASE WHEN is_favorite THEN 1 ELSE 0 END), 0) AS favorites "
-        "FROM otaku_user_anime "
+        "FROM otaku_user_media "
+        "WHERE media_type = 'anime' "
         "GROUP BY media_id "
         "ORDER BY trackers DESC, favorites DESC "
         "LIMIT $1",
@@ -2865,20 +3334,20 @@ LEADERBOARD_SCORE_MIN_RATED = 3  # require at least N rated rows to qualify for 
 
 
 def _leaderboard_completed(ctx: Context) -> list[dict]:
-    """Top users by COUNT(*) where status='completed'."""
+    """Top users by COUNT(*) where status='completed'. Anime-only per the v3.3 contract."""
     return ctx.sql.query(
-        "SELECT user_id, COUNT(*) AS n FROM otaku_user_anime "
-        "WHERE status = 'completed' "
+        "SELECT user_id, COUNT(*) AS n FROM otaku_user_media "
+        "WHERE media_type = 'anime' AND status = 'completed' "
         "GROUP BY user_id ORDER BY n DESC LIMIT $1",
         [LEADERBOARD_TOP_N],
     ) or []
 
 
 def _leaderboard_score(ctx: Context) -> list[dict]:
-    """Top users by mean rating, gated to those with ≥ N rated rows."""
+    """Top users by mean rating, gated to those with ≥ N rated rows. Anime-only."""
     return ctx.sql.query(
         "SELECT user_id, AVG(rating) AS avg_rating, COUNT(*) AS rated "
-        "FROM otaku_user_anime WHERE rating IS NOT NULL "
+        "FROM otaku_user_media WHERE media_type = 'anime' AND rating IS NOT NULL "
         "GROUP BY user_id HAVING COUNT(*) >= $1 "
         "ORDER BY avg_rating DESC, rated DESC LIMIT $2",
         [LEADERBOARD_SCORE_MIN_RATED, LEADERBOARD_TOP_N],
@@ -2886,10 +3355,11 @@ def _leaderboard_score(ctx: Context) -> list[dict]:
 
 
 def _leaderboard_hours(ctx: Context) -> list[dict]:
-    """Top users by total episodes (presented as hours via the 24min/ep heuristic)."""
+    """Top users by total episodes (presented as hours via the 24min/ep heuristic). Anime-only."""
     return ctx.sql.query(
         "SELECT user_id, COALESCE(SUM(episodes_watched), 0) AS episodes "
-        "FROM otaku_user_anime "
+        "FROM otaku_user_media "
+        "WHERE media_type = 'anime' "
         "GROUP BY user_id HAVING COALESCE(SUM(episodes_watched), 0) > 0 "
         "ORDER BY episodes DESC LIMIT $1",
         [LEADERBOARD_TOP_N],
@@ -3253,10 +3723,10 @@ COMPARE_LIST_LIMIT = 5  # cap each field's bullet list at five entries
 
 
 def _user_rows_keyed_by_media(ctx: Context, user_id: str) -> dict[int, dict]:
-    """Return {media_id: {status, is_favorite, rating}} for every row a user has."""
+    """Return {media_id: {status, is_favorite, rating}} for every anime row a user has."""
     rows = ctx.sql.query(
-        "SELECT media_id, status, is_favorite, rating FROM otaku_user_anime "
-        "WHERE user_id = $1",
+        "SELECT media_id, status, is_favorite, rating FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime'",
         [user_id],
     ) or []
     return {
@@ -3704,19 +4174,22 @@ def cmd_import(ctx: Context, event: dict) -> None:
             media_id, status, episodes, rating = row
 
             # Check whether the row already exists so we can report new vs updated.
+            # `/import anilist` only touches anime rows; v8.x can layer a
+            # parallel manga importer if AniList ever exposes manga lists.
             existing = ctx.sql.query_one(
-                "SELECT 1 FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
+                "SELECT 1 FROM otaku_user_media "
+                "WHERE user_id = $1 AND media_id = $2 AND media_type = 'anime'",
                 [user_id, media_id],
             )
 
             # We only touch the columns the import provides. is_favorite is left alone.
             ctx.sql.execute(
-                "INSERT INTO otaku_user_anime (user_id, media_id, status, episodes_watched, rating) "
-                "VALUES ($1, $2, $3, $4, $5) "
-                "ON CONFLICT (user_id, media_id) DO UPDATE SET "
+                "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, episodes_watched, rating) "
+                "VALUES ($1, $2, 'anime', $3, $4, $5) "
+                "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET "
                 "  status = EXCLUDED.status, "
                 "  episodes_watched = EXCLUDED.episodes_watched, "
-                "  rating = COALESCE(EXCLUDED.rating, otaku_user_anime.rating)",
+                "  rating = COALESCE(EXCLUDED.rating, otaku_user_media.rating)",
                 [user_id, media_id, status, episodes, rating],
             )
             total += 1
@@ -3756,8 +4229,8 @@ MY_STATS_RECENT_COMPLETED_LIMIT = 5
 
 def _my_stats_top_rated(ctx: Context, user_id: str) -> list[dict]:
     return ctx.sql.query(
-        "SELECT media_id, rating FROM otaku_user_anime "
-        "WHERE user_id = $1 AND rating IS NOT NULL "
+        "SELECT media_id, rating FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
         "ORDER BY rating DESC, added_at DESC LIMIT $2",
         [user_id, MY_STATS_TOP_RATED_LIMIT],
     ) or []
@@ -3765,8 +4238,8 @@ def _my_stats_top_rated(ctx: Context, user_id: str) -> list[dict]:
 
 def _my_stats_top_favorites(ctx: Context, user_id: str) -> list[dict]:
     return ctx.sql.query(
-        "SELECT media_id FROM otaku_user_anime "
-        "WHERE user_id = $1 AND is_favorite = TRUE "
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE "
         "ORDER BY added_at DESC LIMIT $2",
         [user_id, MY_STATS_TOP_FAVORITES_LIMIT],
     ) or []
@@ -3774,8 +4247,8 @@ def _my_stats_top_favorites(ctx: Context, user_id: str) -> list[dict]:
 
 def _my_stats_recently_completed(ctx: Context, user_id: str) -> list[dict]:
     return ctx.sql.query(
-        "SELECT media_id FROM otaku_user_anime "
-        "WHERE user_id = $1 AND status = 'completed' "
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND status = 'completed' "
         "ORDER BY added_at DESC LIMIT $2",
         [user_id, MY_STATS_RECENT_COMPLETED_LIMIT],
     ) or []
@@ -3889,13 +4362,15 @@ STATS_TOP_GENRE_SAMPLE = 50  # Most-recent N anime sampled to pick the top genre
 
 
 def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
-    """Return a dict of SQL-only aggregate stats. Empty dict if the user has no rows."""
+    """Return a dict of SQL-only aggregate stats for a user's anime rows. Empty
+    dict if the user has no anime rows."""
     # by_status: list of {status, count, episodes, mean_rating}
     rows = ctx.sql.query(
         "SELECT status, COUNT(*) AS count, "
         "       COALESCE(SUM(episodes_watched), 0) AS episodes, "
         "       AVG(rating) AS mean_rating "
-        "FROM otaku_user_anime WHERE user_id = $1 GROUP BY status",
+        "FROM otaku_user_media WHERE user_id = $1 AND media_type = 'anime' "
+        "GROUP BY status",
         [user_id],
     ) or []
     if not rows:
@@ -3931,7 +4406,8 @@ def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
 def _top_genre_for_user(ctx: Context, user_id: str) -> str | None:
     """Look up the user's most-recent N anime on AniList and return their top genre."""
     rows = ctx.sql.query(
-        "SELECT media_id FROM otaku_user_anime WHERE user_id = $1 "
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' "
         "ORDER BY added_at DESC LIMIT $2",
         [user_id, STATS_TOP_GENRE_SAMPLE],
     ) or []
@@ -4004,17 +4480,21 @@ def cmd_stats(ctx: Context, event: dict) -> None:
 
 # ── v2.2.0 — episode progress ───────────────────────────────────────────────
 
-def _get_user_tracking(ctx: Context, user_id: str, media_id: int) -> tuple[int, int | None]:
+def _get_user_tracking(
+    ctx: Context, user_id: str, media_id: int, *, media_type: str = "anime"
+) -> tuple[int, int | None]:
     """Look up the user's recorded (episodes_watched, rating) for a media id.
 
     Returns (0, None) when there's no row. `rating` is the SMALLINT (2..20)
-    that v2.1 stored, or None if unrated.
+    that v2.1 stored, or None if unrated. v8.0 added the media_type filter
+    so anime and manga rows with the same media_id don't shadow each other.
     """
     if not user_id or not media_id:
         return 0, None
     row = ctx.sql.query_one(
-        "SELECT episodes_watched, rating FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
-        [user_id, media_id],
+        "SELECT episodes_watched, rating FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_id = $2 AND media_type = $3",
+        [user_id, media_id, media_type],
     )
     if not row:
         return 0, None
@@ -4070,13 +4550,15 @@ def cmd_progress(ctx: Context, event: dict) -> None:
     # If marking complete, also flip status to 'completed' for nicer /list filtering.
     upsert_status = "completed" if (isinstance(total, int) and total > 0 and capped == total) else "watching"
 
+    # /progress is anime-only in v8.0; a v8.x patch could mirror this for
+    # manga chapters (the column is generic enough).
     ctx.sql.execute(
-        "INSERT INTO otaku_user_anime (user_id, media_id, status, episodes_watched) "
-        "VALUES ($1, $2, $3, $4) "
-        "ON CONFLICT (user_id, media_id) DO UPDATE SET "
+        "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, episodes_watched) "
+        "VALUES ($1, $2, 'anime', $3, $4) "
+        "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET "
         "  episodes_watched = EXCLUDED.episodes_watched, "
         "  status = CASE WHEN EXCLUDED.status = 'completed' THEN 'completed' "
-        "               ELSE otaku_user_anime.status END",
+        "               ELSE otaku_user_media.status END",
         [user_id, media_id, upsert_status, capped],
     )
 
@@ -4130,10 +4612,11 @@ def cmd_rate(ctx: Context, event: dict) -> None:
     title = _format_title(data["Media"])
 
     # Upsert the row, setting rating only (status default for new rows is 'watching').
+    # /rate is anime-only in v8.0; v8.x patches can layer a manga variant.
     ctx.sql.execute(
-        "INSERT INTO otaku_user_anime (user_id, media_id, status, rating) "
-        "VALUES ($1, $2, $3, $4) "
-        "ON CONFLICT (user_id, media_id) DO UPDATE SET rating = EXCLUDED.rating",
+        "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, rating) "
+        "VALUES ($1, $2, 'anime', $3, $4) "
+        "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET rating = EXCLUDED.rating",
         [user_id, media_id, "watching", encoded],
     )
     ctx.interaction.followup(
@@ -4152,8 +4635,8 @@ def cmd_ratings(ctx: Context, event: dict) -> None:
     ctx.interaction.defer(ephemeral=True)
 
     rows = ctx.sql.query(
-        "SELECT media_id, rating, status, is_favorite FROM otaku_user_anime "
-        "WHERE user_id = $1 AND rating IS NOT NULL "
+        "SELECT media_id, rating, status, is_favorite FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
         "ORDER BY rating DESC, added_at DESC LIMIT 25",
         [target_id],
     ) or []
@@ -4221,6 +4704,24 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
             return
         ctx.interaction.defer(ephemeral=True)
         _render_discover(ctx, genre, sort_key, page=page, deferred=True, ephemeral_reply=True)
+        return
+
+    if cid.startswith("otaku:mpage:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        # otaku:mpage:<genre>:<sort>:<page> — v8.0 /manga-discover pagination.
+        parts = cid.split(":", 4)
+        if len(parts) < 5:
+            ctx.interaction.respond(content=S.PAGE_MALFORMED, ephemeral=True)
+            return
+        _, _, genre, sort_key, page_s = parts
+        try:
+            page = max(1, int(page_s))
+        except ValueError:
+            ctx.interaction.respond(content=S.PAGE_MALFORMED, ephemeral=True)
+            return
+        ctx.interaction.defer()
+        _render_manga_discover(ctx, genre, sort_key, page=page, deferred=True)
         return
 
     if cid.startswith("otaku:trend:"):
@@ -4410,6 +4911,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         return  # handled by @plugin.on_component above
     if (
         cid.startswith("otaku:page:")
+        or cid.startswith("otaku:mpage:")
         or cid.startswith("otaku:trend:")
         or cid.startswith("otaku:similar:")
         or cid.startswith("otaku:list:")
@@ -5355,7 +5857,8 @@ def _user_top_genres(ctx: Context, user_id: str, limit: int) -> list[str]:
     STATS_TOP_GENRE_SAMPLE anime. Empty list if the tracker is empty or
     AniList can't be reached. Tied counts break alphabetically for stability."""
     rows = ctx.sql.query(
-        "SELECT media_id FROM otaku_user_anime WHERE user_id = $1 "
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' "
         "ORDER BY added_at DESC LIMIT $2",
         [user_id, STATS_TOP_GENRE_SAMPLE],
     ) or []
@@ -5385,7 +5888,8 @@ def cmd_genre_trends(ctx: Context, event: dict) -> None:
 
     # Empty-tracker short-circuit before touching AniList.
     tracked_rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_user_anime WHERE user_id = $1",
+        "SELECT COUNT(*) AS n FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime'",
         [user_id],
     ) or [{"n": 0}]
     if int((tracked_rows[0] or {}).get("n") or 0) == 0:
@@ -5572,10 +6076,10 @@ RECOMMEND_RESULT_LIMIT = 5
 
 
 def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
-    """media_id → user's rating on a 0.5..10.0 scale. Unrated rows are omitted."""
+    """media_id → user's rating on a 0.5..10.0 scale. Anime-only; unrated rows omitted."""
     rows = ctx.sql.query(
-        "SELECT media_id, rating FROM otaku_user_anime "
-        "WHERE user_id = $1 AND rating IS NOT NULL",
+        "SELECT media_id, rating FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL",
         [user_id],
     ) or []
     vec: dict[int, float] = {}
@@ -5589,19 +6093,20 @@ def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
 
 
 def _recommend_tracked_ids(ctx: Context, user_id: str) -> set[int]:
-    """All media_ids the user has tracked in any status — excluded from candidates."""
+    """All anime media_ids the user has tracked in any status — excluded from candidates."""
     rows = ctx.sql.query(
-        "SELECT media_id FROM otaku_user_anime WHERE user_id = $1",
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime'",
         [user_id],
     ) or []
     return {int(r["media_id"]) for r in rows if r.get("media_id") is not None}
 
 
 def _recommend_peer_ids(ctx: Context, target_id: str) -> list[str]:
-    """Other users on this server with at least one rating."""
+    """Other users on this server with at least one anime rating."""
     rows = ctx.sql.query(
-        "SELECT DISTINCT user_id FROM otaku_user_anime "
-        "WHERE rating IS NOT NULL AND user_id != $1",
+        "SELECT DISTINCT user_id FROM otaku_user_media "
+        "WHERE media_type = 'anime' AND rating IS NOT NULL AND user_id != $1",
         [target_id],
     ) or []
     return [str(r["user_id"]) for r in rows if r.get("user_id") is not None]
@@ -5659,16 +6164,21 @@ def _recommend_candidates(
 
 
 def _recommend_fallback_seed_id(ctx: Context, user_id: str) -> int | None:
-    """Pick what to seed AniList /similar with: top-rated → newest favorite → newest tracked."""
+    """Pick what to seed AniList /similar with: top-rated → newest favorite → newest tracked.
+
+    Anime-only; v8.0 added the media_type filter so a favorite manga doesn't
+    leak into the anime-recommendation seed path.
+    """
     for sql in (
-        "SELECT media_id FROM otaku_user_anime "
-        "WHERE user_id = $1 AND rating IS NOT NULL "
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
         "ORDER BY rating DESC, added_at DESC LIMIT 1",
-        "SELECT media_id FROM otaku_user_anime "
-        "WHERE user_id = $1 AND is_favorite = TRUE "
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE "
         "ORDER BY added_at DESC LIMIT 1",
-        "SELECT media_id FROM otaku_user_anime "
-        "WHERE user_id = $1 ORDER BY added_at DESC LIMIT 1",
+        "SELECT media_id FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' "
+        "ORDER BY added_at DESC LIMIT 1",
     ):
         rows = ctx.sql.query(sql, [user_id]) or []
         if rows and rows[0].get("media_id") is not None:

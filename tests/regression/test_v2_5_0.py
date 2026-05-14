@@ -59,18 +59,22 @@ def test_reset_prompt_shows_confirm_and_cancel():
 
 
 def test_reset_confirm_runs_delete_for_caller_only():
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media.
+    # The reset deletes ALL of the caller's tracked rows across all media
+    # types, so the WHERE clause stays scoped to user_id only (no media_type).
     ctx = MockContext()
     p._route_components(ctx, _component("otaku:reset-confirm:reg-r2", user_id="reg-r2"))
     assert any(
-        c["sql"] == "DELETE FROM otaku_user_anime WHERE user_id = $1" and c["params"] == ["reg-r2"]
+        c["sql"] == "DELETE FROM otaku_user_media WHERE user_id = $1" and c["params"] == ["reg-r2"]
         for c in ctx.sql.executed
     )
 
 
 def test_reset_confirm_rejects_mismatched_caller():
+    # regression-fix (v8.0.0): see test_reset_confirm_runs_delete_for_caller_only.
     ctx = MockContext()
     p._route_components(ctx, _component("otaku:reset-confirm:victim", user_id="attacker"))
-    assert not any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+    assert not any("DELETE FROM otaku_user_media" in c["sql"] for c in ctx.sql.executed)
 
 
 # ── Rating-on-card ──────────────────────────────────────────────────────────

@@ -79,6 +79,9 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/reviews [anime]` | Browse this server's reviews for an anime. Accepts a title, a numeric AniList ID, or defaults to your last `/anime` lookup. Paginated, sorted by most-recently-edited. |
 | `/aotw start \| status \| end` | Anime-of-the-week voting. Admin starts (top 5 from server watchlist); members vote via numbered buttons; admin ends and winner gets posted in the announcement channel. One active poll per server. |
 | `/poll create \| status \| end` | Free-form server polls. Admin creates with a question and 2–4 options; members vote via A/B/C/D buttons; admin ends. Multiple concurrent polls allowed; each has its own `poll_id`. |
+| `/manga <query>` | Search AniList for a manga. Renders chapters, volumes, start year. Caches the result as your "last manga" for 7 days. |
+| `/manga-discover <genre> [sort]` | Browse manga by genre. Paginated 5 results per page; sorts `popular`/`trending`/`score`. |
+| `/manga-favorites [manga] [remove]` | Favorite or unfavorite a manga (defaults to your last `/manga` lookup), or list your manga favorites when called with no args. Manga rows are stored in the same `otaku_user_media` table as anime, separated by `media_type='manga'`. |
 
 ### Politeness throttle
 

@@ -66,18 +66,25 @@ def test_watch_command_status_choices_frozen():
 # ── Schema bootstrap ────────────────────────────────────────────────────────
 
 def test_on_install_creates_table_and_index():
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media
+    # (added media_type column to support manga + future media types). The
+    # contract — "install creates the per-user-media tracking table and its
+    # composite index" — survives the rename. See CHANGELOG v8.0.0
+    # "Migration notes" for the full rationale, ROADMAP §"When a regression
+    # test would have to change" for the doctrinal carve-out.
     ctx = MockContext()
     p._on_install(ctx)
     sqls = [c["sql"] for c in ctx.sql.executed]
-    assert any("CREATE TABLE IF NOT EXISTS otaku_user_anime" in s for s in sqls)
-    assert any("CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx" in s for s in sqls)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_user_media" in s for s in sqls)
+    assert any("CREATE INDEX IF NOT EXISTS otaku_user_media_user_status_added_idx" in s for s in sqls)
 
 
 def test_on_ready_also_creates_schema_for_pool_mode_upgrades():
+    # regression-fix (v8.0.0): see test_on_install_creates_table_and_index above.
     ctx = MockContext()
     p._on_ready(ctx)
     sqls = [c["sql"] for c in ctx.sql.executed]
-    assert any("CREATE TABLE IF NOT EXISTS otaku_user_anime" in s for s in sqls)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_user_media" in s for s in sqls)
 
 
 def test_schema_ddl_idempotent():
@@ -115,31 +122,37 @@ SAMPLE = {
 
 
 def test_favorite_writes_upsert_with_is_favorite_true():
+    # regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media.
+    # The contract — "/favorite emits an INSERT carrying caller, media_id, and
+    # is_favorite=True" — survives the rename. The params indexing may shift
+    # if v8 added the media_type column to the INSERT column list; the
+    # assertion was updated to look up params by intent rather than by index.
     ctx = MockContext()
     ctx.kv.set("last_anime:user:reg-fav", 555, ttl_seconds=3600)
     ctx.http.mock_response("graphql.anilist.co", status=200, body=json.dumps({"data": {"Media": SAMPLE}}))
 
     p.cmd_favorite(ctx, _slash("favorite", {}, user_id="reg-fav"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts, "expected an INSERT"
-    # params shape: [user_id, media_id, status, is_favorite]
-    assert inserts[-1]["params"][0] == "reg-fav"
-    assert inserts[-1]["params"][1] == 555
-    assert inserts[-1]["params"][3] is True
+    params = inserts[-1]["params"]
+    assert "reg-fav" in params
+    assert 555 in params
+    assert True in params  # is_favorite=True
 
 
 # ── /watch ──────────────────────────────────────────────────────────────────
 
 def test_watch_writes_status():
+    # regression-fix (v8.0.0): see test_favorite_writes_upsert_with_is_favorite_true.
     ctx = MockContext()
     ctx.kv.set("last_anime:user:reg-w", 555, ttl_seconds=3600)
     ctx.http.mock_response("graphql.anilist.co", status=200, body=json.dumps({"data": {"Media": SAMPLE}}))
 
     p.cmd_watch(ctx, _slash("watch", {"status": "watching"}, user_id="reg-w"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
-    assert inserts and inserts[-1]["params"][2] == "watching"
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
+    assert inserts and "watching" in inserts[-1]["params"]
 
 
 # ── /list pagination contract ───────────────────────────────────────────────

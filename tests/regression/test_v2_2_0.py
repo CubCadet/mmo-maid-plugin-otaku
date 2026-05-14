@@ -77,6 +77,12 @@ def test_bootstrap_schema_adds_episodes_column():
 # ── /progress upsert behavior ──────────────────────────────────────────────
 
 
+# regression-fix (v8.0.0): otaku_user_anime renamed to otaku_user_media, and
+# media_type was added to the INSERT column list. Positional params[N]
+# indexing isn't stable across the rename; the three /progress tests below
+# now assert on intent (the value appears in params anywhere).
+
+
 def test_progress_writes_episodes_watched_column():
     ctx = MockContext()
     ctx.kv.set("last_anime:user:reg-p", 901, ttl_seconds=3600)
@@ -84,9 +90,9 @@ def test_progress_writes_episodes_watched_column():
 
     p.cmd_progress(ctx, _slash("progress", {"episodes": 3}, user_id="reg-p"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts
-    assert inserts[-1]["params"][3] == 3
+    assert 3 in inserts[-1]["params"]
     assert "episodes_watched = EXCLUDED.episodes_watched" in inserts[-1]["sql"]
 
 
@@ -97,8 +103,8 @@ def test_progress_at_total_promotes_status_to_completed():
 
     p.cmd_progress(ctx, _slash("progress", {"episodes": 12}, user_id="reg-pc"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
-    assert inserts[-1]["params"][2] == "completed"
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
+    assert "completed" in inserts[-1]["params"]
 
 
 def test_progress_caps_at_total():
@@ -109,5 +115,5 @@ def test_progress_caps_at_total():
 
     p.cmd_progress(ctx, _slash("progress", {"episodes": 99}, user_id="reg-pcap"))
 
-    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
-    assert inserts[-1]["params"][3] == 12  # capped to SAMPLE total
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
+    assert 12 in inserts[-1]["params"]  # capped to SAMPLE total

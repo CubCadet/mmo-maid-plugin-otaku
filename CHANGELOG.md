@@ -20,6 +20,123 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [8.0.0] - 2026-05-14
+
+### Phase 8 opens — media universe expansion (manga support)
+
+This is the first non-additive schema migration in the repo. `otaku_user_anime`
+is renamed to `otaku_user_media` and gains a `media_type` column (default
+`'anime'`) so manga, light novels, and future media types can share the
+table without a parallel-schema proliferation.
+
+### Added
+- `/manga query:<title>` — AniList search filtered to `type: MANGA`. Caches
+  the resolved media_id in `last_manga:user:<id>` (7-day TTL, mirrors the
+  v1.0 anime cache shape).
+- `/manga-discover genre:<name> [sort:<…>]` — paginated genre browse with
+  the same `popular`/`trending`/`score` sort choices as `/discover`. Prev/
+  next buttons use the new `otaku:mpage:<genre>:<sort>:<page>` custom_id
+  prefix; pagination routes through `_render_manga_discover`.
+- `/manga-favorites [manga:<…>] [remove:<…>]` — toggle a manga as a favorite,
+  OR (with no args + no cached lookup) list the caller's manga favorites.
+  Resolves `manga:` against either a numeric AniList ID or a title query;
+  defaults to cached `last_manga:user:<id>`.
+- `QUERY_MANGA_SEARCH_ONE`, `QUERY_MANGA_DISCOVER`, `QUERY_MANGA_BY_ID`,
+  `QUERY_MANGA_BATCH` — parallel to the anime query constants. Each forces
+  `type: MANGA` and uses `_MEDIA_FIELDS_MANGA` (chapters/volumes/startDate.year
+  instead of episodes/season/seasonYear).
+- `_make_manga_embed` — mirrors `_make_anime_embed` but renders chapters,
+  volumes, and start year. The `MANGA_PROGRESS_*` strings say "Chapter X / Y"
+  instead of "Episode X / Y".
+- Regression file `tests/regression/test_v8_0_0.py` (20 tests) freezes the
+  manifest contract, schema migration ordering, upsert media_type behavior,
+  anime/manga query routing, embed field shape, and the `otaku:mpage:`
+  pagination prefix.
+
+### Changed — schema (MAJOR)
+- `otaku_user_anime` table renamed to `otaku_user_media`.
+- Added `media_type TEXT NOT NULL DEFAULT 'anime'` column. Migration
+  backfills existing v7 rows to `'anime'` atomically via the DEFAULT.
+- Primary key extended from `(user_id, media_id)` to
+  `(user_id, media_id, media_type)`. The AniList ID space is shared across
+  anime and manga, so the same numeric ID can legitimately exist as both;
+  the wider PK keeps them as separate rows.
+- Index renamed to `otaku_user_media_user_status_added_idx`.
+- The `episodes_watched` column stays named — it serves as chapter count
+  for manga rows. The column comment documents the dual interpretation.
+  Future v8.x work can choose between rename, alias, or per-type accessor.
+- New helper `_migrate_v7_to_v8(ctx)` runs from `_bootstrap_schema` before
+  the v8 CREATE TABLE. It probes `information_schema.tables` for the v7
+  table name before issuing `ALTER TABLE … RENAME TO`, so the migration
+  is fully idempotent — re-runs on already-migrated installs are no-ops.
+  Includes the constraint dance to widen the PK (Postgres can't widen a
+  PK in place; the helper drops the old constraint and re-adds the wider
+  one).
+
+### Changed — helpers
+- `_upsert_user_anime` → `_upsert_user_media`; the v7 name remains as a
+  back-compat alias.
+- `_upsert_user_media` accepts a `media_type='anime'` kwarg. INSERT carries
+  it explicitly; ON CONFLICT uses the wider PK clause.
+- `_is_favorite`, `_get_user_tracking` extended with `media_type='anime'`
+  kwargs (same back-compat default).
+- Every v7 anime-path SELECT gained `AND media_type = 'anime'` so manga
+  rows from `/manga-favorites` don't leak into anime aggregates
+  (`/stats`, `/my-stats`, `/leaderboard`, `/compare`, dashboards,
+  `/recommend`, `/genre-trends`, `/ratings`, `/favorites`, `/list`).
+- Three anime-only INSERT call sites (`/import anilist`, `/progress`,
+  `/rate`) now write `'anime'` literally into the `media_type` column.
+
+### Changed — regression test contracts (documented per ROADMAP doctrine)
+- `tests/regression/test_v2_0_0.py`, `test_v2_1_0.py`, `test_v2_2_0.py`,
+  `test_v2_4_0.py`, `test_v2_5_0.py`, `test_v2_6_0.py`, `test_v3_3_0.py`,
+  `test_v6_0_0.py`, `test_v6_2_0.py` got `# regression-fix (v8.0.0):`
+  comments where their literal-SQL substring assertions referenced
+  `otaku_user_anime`. The intent each test asserted is preserved; only
+  the table-name literal moved. This is the exact carve-out ROADMAP
+  §"When a regression test would have to change" allows for MAJOR bumps.
+- `tests/regression/test_v2_1_0.py:106`, `test_v2_2_0.py:88/100/112`,
+  `test_v2_0_0.py:131/146` had positional `params[N]` assertions that
+  broke because v8 added `media_type` to the INSERT column list. Switched
+  to `in params` membership checks that survive shifts in column order.
+- `tests/test_plugin.py` (dev tests, not in the immutable suite) also
+  rewritten to assert by intent rather than by positional index.
+
+### Migration notes
+- **In-place v7→v8 upgrade** runs automatically the next time
+  `_bootstrap_schema` fires (on_install OR on_ready, whichever the runner
+  invokes first). The probe-then-rename pattern means concurrent pool-mode
+  workers racing the migration is safe: the second worker's probe sees
+  the renamed table absent from its v7 name and returns early.
+- **Fresh v8 installs** skip the migration entirely — the v7 table never
+  existed, so the probe returns empty and `_migrate_v7_to_v8` no-ops.
+- **`episodes_watched` is dual-purpose** for v8.0 — anime rows store
+  episode count, manga rows store chapter count. Embeds disambiguate via
+  the type-aware `_make_anime_embed` / `_make_manga_embed` split.
+- **`is_favorite` and `rating` are also dual-purpose** — same column, per-
+  row meaning. Fine for v8.0; future v8.x might add separate scaling for
+  manga ratings if AniList changes its score model.
+
+### Capability surface
+- **No new capabilities.** Phase 6, 7, and 8.0 each added zero capabilities;
+  the v8.0 manga support runs on `proxy:http` (AniList queries),
+  `storage:sql` (the shared `otaku_user_media` table), `storage:kv`
+  (`last_manga:user:<id>`), and `interaction:respond` — all already
+  declared since v2.0.
+
+### Deferred to v8.x
+- `/manga-watch`, `/manga-rate`, `/manga-progress`, `/manga-list`,
+  `/manga-import` — these mirror v2.x anime commands but for manga and
+  are layered atop the now-stable schema. Per the roadmap, v8.0 explicitly
+  scoped to "search + discover + favorites," matching the listed minimum.
+- The /recommend N+1 SQL fan-out, four read-then-write upsert tightenings,
+  three dup-clusters, and custom_id dash-prefix normalization that v7.2.1
+  CHANGELOG flagged remain deferred.
+- `_make_anime_embed` → `_make_media_embed` consolidation is deferred —
+  v8.0 ships the parallel `_make_manga_embed` instead. A future MAJOR can
+  unify them if a third media_type (light novels?) makes the per-type
+  helper a real burden.
+
 ## [7.2.1] - 2026-05-14
 
 ### Hygiene pass — clean baseline before Phase 8
