@@ -560,9 +560,9 @@ CREATE TABLE otaku_watch_party_members (
 
 ---
 
-### v3.3.x — Patch refinements + leaderboards
+### v3.3.0 — Server leaderboard ✅ shipped 2026-05-15
 
-`/leaderboard` — Server-wide leaderboard by completed count, mean score, total hours.
+~~`/leaderboard` — Server-wide leaderboard by completed count, mean score, total hours.~~ One slash with a `metric:` option (defaults to `completed`). Top 10 per board. Score board has a min-rated-rows threshold (3) to keep "one perfect rating" from sweeping the leaderboard. Hours uses the same 24min/episode heuristic as `/stats`.
 
 ---
 

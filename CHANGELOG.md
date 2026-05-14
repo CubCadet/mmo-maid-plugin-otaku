@@ -20,6 +20,16 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-05-15
+
+### Added
+- `/leaderboard [metric]` — server-wide top-10 board across three metrics:
+  - `completed` (default) — most rows with `status='completed'`
+  - `score` — highest mean rating (gated to users with ≥ 3 rated rows)
+  - `hours` — most episodes (rendered as hours via the 24min/ep heuristic)
+- Medals 🥇🥈🥉 on the top three rows.
+- Regression file `tests/regression/test_v3_3_0.py`.
+
 ## [3.2.0] - 2026-05-15
 
 ### Added

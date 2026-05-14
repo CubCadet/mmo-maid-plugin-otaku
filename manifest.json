@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking"],
@@ -250,6 +250,23 @@
           "description": "User to compare against",
           "type": 6,
           "required": true
+        }
+      ]
+    },
+    {
+      "name": "leaderboard",
+      "description": "Server-wide leaderboard for the otaku tracker.",
+      "options": [
+        {
+          "name": "metric",
+          "description": "What to rank by (defaults to completed count)",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "Completed count", "value": "completed"},
+            {"name": "Mean score", "value": "score"},
+            {"name": "Total hours", "value": "hours"}
+          ]
         }
       ]
     },

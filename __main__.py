@@ -208,6 +208,18 @@ class _Strings:
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
 
+    # /leaderboard.
+    LEADERBOARD_HEADER_COMPLETED = "🏆 Server leaderboard — most completed"
+    LEADERBOARD_HEADER_SCORE = "🏆 Server leaderboard — highest mean score"
+    LEADERBOARD_HEADER_HOURS = "🏆 Server leaderboard — most hours watched"
+    LEADERBOARD_EMPTY = (
+        "Nobody on this server has tracked enough anime for a leaderboard yet. "
+        "Try `/favorite`, `/watch`, or `/progress` to start the standings."
+    )
+    LEADERBOARD_FOOTER_COMPLETED = "Top {n} by completed count · Data from AniList"
+    LEADERBOARD_FOOTER_SCORE = "Top {n} by mean score (≥ {min_rated} rated to qualify) · Data from AniList"
+    LEADERBOARD_FOOTER_HOURS = "Top {n} by hours · 24min/episode heuristic · Data from AniList"
+
     # /wp — watch parties.
     WP_CREATE_USAGE = "Pass an anime with `anime:` — e.g. `/wp create anime: Frieren`."
     WP_ID_USAGE = "Pass a party id with `id:` — see `/wp status` or the create embed."
@@ -1909,6 +1921,106 @@ def cmd_otaku_admin(ctx: Context, event: dict) -> None:
             content=S.ADMIN_RESET_NOTHING.format(user=target_user),
             ephemeral=True,
         )
+
+
+# ── v3.3.0 — /leaderboard ───────────────────────────────────────────────────
+
+LEADERBOARD_TOP_N = 10
+LEADERBOARD_SCORE_MIN_RATED = 3  # require at least N rated rows to qualify for the score board
+
+
+def _leaderboard_completed(ctx: Context) -> list[dict]:
+    """Top users by COUNT(*) where status='completed'."""
+    return ctx.sql.query(
+        "SELECT user_id, COUNT(*) AS n FROM otaku_user_anime "
+        "WHERE status = 'completed' "
+        "GROUP BY user_id ORDER BY n DESC LIMIT $1",
+        [LEADERBOARD_TOP_N],
+    ) or []
+
+
+def _leaderboard_score(ctx: Context) -> list[dict]:
+    """Top users by mean rating, gated to those with ≥ N rated rows."""
+    return ctx.sql.query(
+        "SELECT user_id, AVG(rating) AS avg_rating, COUNT(*) AS rated "
+        "FROM otaku_user_anime WHERE rating IS NOT NULL "
+        "GROUP BY user_id HAVING COUNT(*) >= $1 "
+        "ORDER BY avg_rating DESC, rated DESC LIMIT $2",
+        [LEADERBOARD_SCORE_MIN_RATED, LEADERBOARD_TOP_N],
+    ) or []
+
+
+def _leaderboard_hours(ctx: Context) -> list[dict]:
+    """Top users by total episodes (presented as hours via the 24min/ep heuristic)."""
+    return ctx.sql.query(
+        "SELECT user_id, COALESCE(SUM(episodes_watched), 0) AS episodes "
+        "FROM otaku_user_anime "
+        "GROUP BY user_id HAVING COALESCE(SUM(episodes_watched), 0) > 0 "
+        "ORDER BY episodes DESC LIMIT $1",
+        [LEADERBOARD_TOP_N],
+    ) or []
+
+
+def _format_leaderboard_lines(rows: list[dict], metric: str) -> str:
+    if not rows:
+        return S.LIST_NO_RESULTS
+    medals = ("🥇", "🥈", "🥉")
+    lines = []
+    for i, r in enumerate(rows, start=1):
+        prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
+        uid = r.get("user_id") or "?"
+        if metric == "completed":
+            value = f"{int(r.get('n') or 0)} completed"
+        elif metric == "score":
+            avg = float(r.get("avg_rating") or 0)
+            rated = int(r.get("rated") or 0)
+            value = f"{avg / 2:.1f}/10 ({rated} rated)"
+        else:  # hours
+            eps = int(r.get("episodes") or 0)
+            hours = (eps * STATS_MINUTES_PER_EPISODE) / 60
+            value = f"{hours:.1f} hours ({eps} eps)"
+        lines.append(f"{prefix} <@{uid}> — {value}")
+    return "\n".join(lines)
+
+
+@plugin.on_slash_command("leaderboard")
+def cmd_leaderboard(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    metric = (opts.get("metric") or "completed").strip().lower()
+    if metric not in ("completed", "score", "hours"):
+        metric = "completed"
+
+    ctx.interaction.defer()
+
+    if metric == "completed":
+        rows = _leaderboard_completed(ctx)
+        header = S.LEADERBOARD_HEADER_COMPLETED
+        footer = S.LEADERBOARD_FOOTER_COMPLETED.format(n=len(rows))
+    elif metric == "score":
+        rows = _leaderboard_score(ctx)
+        header = S.LEADERBOARD_HEADER_SCORE
+        footer = S.LEADERBOARD_FOOTER_SCORE.format(
+            n=len(rows), min_rated=LEADERBOARD_SCORE_MIN_RATED
+        )
+    else:  # hours
+        rows = _leaderboard_hours(ctx)
+        header = S.LEADERBOARD_HEADER_HOURS
+        footer = S.LEADERBOARD_FOOTER_HOURS.format(n=len(rows))
+
+    if not rows:
+        _reply_error(ctx, S.LEADERBOARD_EMPTY, deferred=True)
+        return
+
+    embed = {
+        "title": header,
+        "description": _format_leaderboard_lines(rows, metric),
+        "color": ANILIST_COLOR,
+        "footer": {"text": footer},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=False)
 
 
 # ── v3.2.0 — /wp (watch parties) ────────────────────────────────────────────

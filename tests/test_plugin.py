@@ -696,6 +696,80 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v3.3.0 /leaderboard ─────────────────────────────────────────────────────
+
+
+def test_leaderboard_default_metric_is_completed():
+    ctx = MockContext()
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"user_id": "a", "n": 5}]
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {}, user_id="anyone"))
+
+    assert "status = 'completed'" in captured["sql"]
+    follow = ctx.interaction.followups[-1]
+    assert "most completed" in follow["embeds"][0]["title"]
+    assert "<@a>" in follow["embeds"][0]["description"]
+    assert "5 completed" in follow["embeds"][0]["description"]
+
+
+def test_leaderboard_score_metric_has_min_rated_filter():
+    ctx = MockContext()
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        return [{"user_id": "a", "avg_rating": 18.0, "rated": 5}]
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "score"}, user_id="anyone"))
+
+    assert "HAVING COUNT(*) >= $1" in captured["sql"]
+    assert "AVG(rating)" in captured["sql"]
+    follow = ctx.interaction.followups[-1]
+    assert "9.0/10" in follow["embeds"][0]["description"]
+
+
+def test_leaderboard_hours_metric_uses_episode_sum():
+    ctx = MockContext()
+
+    def _q(sql, params=None):  # noqa: ANN001
+        return [{"user_id": "a", "episodes": 100}]
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "hours"}, user_id="anyone"))
+
+    follow = ctx.interaction.followups[-1]
+    # 100 eps × 24 min ÷ 60 = 40.0 hours
+    assert "40.0 hours" in follow["embeds"][0]["description"]
+
+
+def test_leaderboard_empty_state():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {}, user_id="anyone"))
+    follow = ctx.interaction.followups[-1]
+    assert "Nobody" in (follow.get("content") or "")
+
+
+def test_leaderboard_unknown_metric_falls_back_to_completed():
+    ctx = MockContext()
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        return [{"user_id": "a", "n": 1}]
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "garbage"}, user_id="anyone"))
+    assert "status = 'completed'" in captured["sql"]
+
+
 # ── v3.2.0 /wp (watch parties) ──────────────────────────────────────────────
 
 

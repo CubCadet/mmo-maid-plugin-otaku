@@ -55,6 +55,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/wp join <id>` | Manually join a watch party by id. |
 | `/wp status <id>` | Show the party's members and their progress, plus status (active/completed/abandoned). |
 | `/wp progress <id> <episode>` | Update your episode count. If everyone in the party is at the same episode, a public sync announcement fires. |
+| `/leaderboard [metric]` | Server-wide top-10 board. Metric: `completed` (default), `score` (≥3 rated), or `hours`. |
 
 ### Politeness throttle
 
