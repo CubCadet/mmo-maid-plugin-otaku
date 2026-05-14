@@ -512,24 +512,15 @@ is reused by Phase 3's admin-only commands.
 
 **Goal:** Move from "my journey" to "our journey." Per-server shared lists, watch parties, comparing stats with friends.
 
-### v3.0.0 — Server watchlists
+### v3.0.0 — Server watchlists ✅ shipped 2026-05-15
 
 **New slash commands:**
-- `/server-watchlist add` / `/server-watchlist remove` (admin-only) — Curate a per-server list of anime everyone can see.
-- `/server-watchlist` — Browse the current server's watchlist.
+- ~~`/server-watchlist add` / `/server-watchlist remove` (admin-only) — Curate a per-server list of anime everyone can see.~~ Shipped as Discord sub-commands (`view`, `add`, `remove`) under a single `/server-watchlist` root since Discord doesn't allow a slash command to have both options and bare-invocation behavior. Both `add` and `remove` accept either a title (AniList search) or a numeric AniList media ID. `add` takes an optional `note:` field.
+- ~~`/server-watchlist` — Browse the current server's watchlist.~~ Implemented as `/server-watchlist view`. Public (non-ephemeral); paginated via `otaku:swl:<page>` buttons.
 
-**Schema:**
-```sql
-CREATE TABLE otaku_server_watchlist (
-  media_id   INTEGER NOT NULL,
-  added_by   TEXT NOT NULL,
-  added_at   TIMESTAMP NOT NULL DEFAULT now(),
-  note       TEXT,
-  PRIMARY KEY (media_id)
-);
-```
+**Schema:** ~~landed as written~~ — `CREATE TABLE IF NOT EXISTS otaku_server_watchlist` wired into `_bootstrap_schema`.
 
-**Capability:** Existing `storage:sql` covers this — schemas are per-server already.
+**Capability:** ~~Existing `storage:sql` covers this — schemas are per-server already.~~ Confirmed. Admin gating reuses `_caller_is_admin` (added in v2.6.0).
 
 ---
 

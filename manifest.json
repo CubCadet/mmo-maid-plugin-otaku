@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "2.6.0",
+  "version": "3.0.0",
   "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking"],
@@ -197,6 +197,49 @@
     {
       "name": "otaku-reset",
       "description": "Wipe ALL of your tracked anime data (favorites, ratings, progress, list). Asks for confirmation."
+    },
+    {
+      "name": "server-watchlist",
+      "description": "Curate and browse this server's shared anime watchlist.",
+      "options": [
+        {
+          "name": "view",
+          "description": "Browse this server's watchlist.",
+          "type": 1
+        },
+        {
+          "name": "add",
+          "description": "Add an anime to this server's watchlist (admin only).",
+          "type": 1,
+          "options": [
+            {
+              "name": "anime",
+              "description": "Anime title to add (searched on AniList)",
+              "type": 3,
+              "required": true
+            },
+            {
+              "name": "note",
+              "description": "Optional note shown alongside the entry",
+              "type": 3,
+              "required": false
+            }
+          ]
+        },
+        {
+          "name": "remove",
+          "description": "Remove an anime from this server's watchlist (admin only).",
+          "type": 1,
+          "options": [
+            {
+              "name": "anime",
+              "description": "Anime title or AniList media ID to remove",
+              "type": 3,
+              "required": true
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "otaku-admin",

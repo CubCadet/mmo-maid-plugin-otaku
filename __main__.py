@@ -61,6 +61,16 @@ _SCHEMA_RATING_DDL = (
 _SCHEMA_EPISODES_DDL = (
     "ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0"
 )
+# v3.0.0 — per-server shared watchlist. Auto-scoped to server_id by the runner,
+# so media_id alone is enough for the PK. Curated by admins.
+_SCHEMA_SERVER_WATCHLIST_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_server_watchlist ("
+    "  media_id INTEGER NOT NULL,"
+    "  added_by TEXT NOT NULL,"
+    "  added_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  note TEXT,"
+    "  PRIMARY KEY (media_id))"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -179,6 +189,21 @@ class _Strings:
     )
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
+
+    # /server-watchlist.
+    SWL_ADD_USAGE = "Pass an anime with `anime:` — e.g. `/server-watchlist add anime: Frieren`."
+    SWL_REMOVE_USAGE = "Pass an anime title or AniList media ID with `anime:`."
+    SWL_ADDED = "📥 Added **{title}** to the server watchlist."
+    SWL_ALREADY = "**{title}** is already on the server watchlist."
+    SWL_REMOVED = "Removed **{title}** from the server watchlist."
+    SWL_NOT_PRESENT = "**{title}** isn't on the server watchlist."
+    SWL_EMPTY = (
+        "This server hasn't added anything to its watchlist yet. "
+        "Admins can add with `/server-watchlist add anime: <title>`."
+    )
+    SWL_HEADER = "📚 Server watchlist"
+    SWL_PAGE_MALFORMED = "Watchlist button malformed."
+    SWL_ADMIN_DENIED = "Adding to the server watchlist is admin-only. Ask someone with `Manage Server`."
 
     # /otaku-admin.
     ADMIN_DENIED = (
@@ -1011,6 +1036,8 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_RATING_DDL)
     # v2.2.0
     ctx.sql.execute(_SCHEMA_EPISODES_DDL)
+    # v3.0.0
+    ctx.sql.execute(_SCHEMA_SERVER_WATCHLIST_DDL)
 
 
 @plugin.on_install
@@ -1820,6 +1847,201 @@ def cmd_otaku_admin(ctx: Context, event: dict) -> None:
         )
 
 
+# ── v3.0.0 — /server-watchlist ──────────────────────────────────────────────
+
+SWL_PAGE_SIZE = PER_PAGE  # 5; consistent with /list and /discover
+
+
+def _swl_subcommand(event: dict) -> tuple[str, dict]:
+    """Pull (subcommand_name, options_dict) out of a /server-watchlist event."""
+    raw = event.get("options") or []
+    if not isinstance(raw, list) or not raw:
+        return "", {}
+    first = raw[0]
+    if not isinstance(first, dict):
+        return "", {}
+    name = (first.get("name") or "").strip()
+    sub_opts = {
+        o["name"]: o["value"]
+        for o in (first.get("options") or [])
+        if isinstance(o, dict) and "name" in o
+    }
+    return name, sub_opts
+
+
+def _resolve_anime_arg_for_swl(
+    ctx: Context, anime_arg: str
+) -> tuple[dict | None, str | None]:
+    """Resolve an `anime:` option to a media dict.
+
+    Returns (media, error). On AniList failure media is None and error is None
+    (the caller should surface the standard AniList failure). On a clean
+    no-match, error contains the user-facing message.
+    """
+    anime_arg = (anime_arg or "").strip()
+    if not anime_arg:
+        return None, S.SWL_ADD_USAGE
+    # Accept either a numeric AniList media ID or a search string.
+    try:
+        media_id = int(anime_arg)
+    except ValueError:
+        media_id = None
+    if media_id is not None:
+        data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id})
+    else:
+        data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": anime_arg.lower()}, cache=True)
+    if data is None:
+        return None, None
+    media = data.get("Media")
+    if not media:
+        return None, S.ANIME_NOT_FOUND.format(query=_truncate(anime_arg, 80))
+    return media, None
+
+
+def _swl_add(ctx: Context, event: dict, opts: dict) -> None:
+    user_id = event.get("user_id") or ""
+    ctx.interaction.defer(ephemeral=True)
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.followup(content=S.SWL_ADMIN_DENIED, ephemeral=True)
+        return
+
+    media, err = _resolve_anime_arg_for_swl(ctx, str(opts.get("anime") or ""))
+    if media is None:
+        if err is None:
+            _reply_anilist_failure(ctx, deferred=True)
+        else:
+            _reply_error(ctx, err, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    title = _format_title(media)
+    note = (opts.get("note") or "").strip() or None
+
+    # Check existence so we can give a clean "already on the watchlist" message.
+    existing = ctx.sql.query_one(
+        "SELECT 1 FROM otaku_server_watchlist WHERE media_id = $1",
+        [media_id],
+    )
+    if existing:
+        ctx.interaction.followup(content=S.SWL_ALREADY.format(title=title), ephemeral=True)
+        return
+
+    ctx.sql.execute(
+        "INSERT INTO otaku_server_watchlist (media_id, added_by, note) "
+        "VALUES ($1, $2, $3) "
+        "ON CONFLICT (media_id) DO NOTHING",
+        [media_id, user_id, note],
+    )
+    ctx.interaction.followup(content=S.SWL_ADDED.format(title=title), ephemeral=True)
+
+
+def _swl_remove(ctx: Context, event: dict, opts: dict) -> None:
+    user_id = event.get("user_id") or ""
+    ctx.interaction.defer(ephemeral=True)
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.followup(content=S.SWL_ADMIN_DENIED, ephemeral=True)
+        return
+
+    media, err = _resolve_anime_arg_for_swl(ctx, str(opts.get("anime") or ""))
+    if media is None:
+        if err is None:
+            _reply_anilist_failure(ctx, deferred=True)
+        else:
+            _reply_error(ctx, err, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    title = _format_title(media)
+
+    existing = ctx.sql.query_one(
+        "SELECT 1 FROM otaku_server_watchlist WHERE media_id = $1",
+        [media_id],
+    )
+    if not existing:
+        ctx.interaction.followup(content=S.SWL_NOT_PRESENT.format(title=title), ephemeral=True)
+        return
+
+    ctx.sql.execute(
+        "DELETE FROM otaku_server_watchlist WHERE media_id = $1",
+        [media_id],
+    )
+    ctx.interaction.followup(content=S.SWL_REMOVED.format(title=title), ephemeral=True)
+
+
+def _render_server_watchlist(ctx: Context, *, page: int, deferred: bool) -> None:
+    """Shared renderer for /server-watchlist view + pagination clicks."""
+    offset = max(0, (page - 1) * SWL_PAGE_SIZE)
+    limit = SWL_PAGE_SIZE + 1
+    rows = ctx.sql.query(
+        "SELECT media_id, added_by, note FROM otaku_server_watchlist "
+        "ORDER BY added_at DESC LIMIT $1 OFFSET $2",
+        [limit, offset],
+    ) or []
+    has_next = len(rows) > SWL_PAGE_SIZE
+    rows = rows[:SWL_PAGE_SIZE]
+
+    if not rows:
+        _reply_error(ctx, S.SWL_EMPTY, deferred=deferred)
+        return
+
+    rows_by_id = {int(r["media_id"]): r for r in rows}
+    ids = list(rows_by_id.keys())
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": ids}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+    media_list = ((data.get("Page") or {}).get("media")) or []
+
+    def _sort_key(m: dict) -> int:
+        mid = int(m.get("id") or -1)
+        return ids.index(mid) if mid in ids else 9999
+
+    ordered = sorted(media_list, key=_sort_key)
+
+    lines = []
+    for i, m in enumerate(ordered, start=1):
+        title = _format_title(m)
+        url = m.get("siteUrl") or ""
+        row = rows_by_id.get(int(m.get("id") or 0)) or {}
+        note = (row.get("note") or "").strip()
+        added_by = row.get("added_by") or ""
+        suffix = f" — *{note}*" if note else ""
+        lines.append(f"**{i}. [{title}]({url})**{suffix}\n  · added by <@{added_by}>")
+
+    embed = _make_list_embed(ordered, S.SWL_HEADER, page=page, has_next=has_next)
+    embed["description"] = "\n\n".join(lines)
+
+    prev_id = f"otaku:swl:{page - 1}" if page > 1 else None
+    next_id = f"otaku:swl:{page + 1}" if has_next else None
+    components = [_page_buttons(prev_id, next_id)]
+    select_row = _make_select_row(ordered)
+    if select_row is not None:
+        components.append(select_row)
+
+    if deferred:
+        ctx.interaction.followup(embeds=[embed], components=components, ephemeral=False)
+    else:
+        ctx.interaction.respond(embeds=[embed], components=components, ephemeral=False)
+
+
+@plugin.on_slash_command("server-watchlist")
+def cmd_server_watchlist(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+
+    subcommand, sub_opts = _swl_subcommand(event)
+    if subcommand == "add":
+        _swl_add(ctx, event, sub_opts)
+        return
+    if subcommand == "remove":
+        _swl_remove(ctx, event, sub_opts)
+        return
+    # Default (subcommand == "view" or empty) — public, non-ephemeral browse.
+    ctx.interaction.defer()
+    _render_server_watchlist(ctx, page=1, deferred=True)
+
+
 # ── v2.4.0 — /import anilist ────────────────────────────────────────────────
 
 # AniList MediaList.status → our status column.
@@ -2376,6 +2598,18 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _handle_reset_cancel(ctx, event)
         return
 
+    if cid.startswith("otaku:swl:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        try:
+            page = max(1, int(cid.split(":", 2)[2]))
+        except (ValueError, IndexError):
+            ctx.interaction.respond(content=S.SWL_PAGE_MALFORMED, ephemeral=True)
+            return
+        ctx.interaction.defer()
+        _render_server_watchlist(ctx, page=page, deferred=True)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -2393,6 +2627,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:list:")
         or cid.startswith("otaku:reset-confirm:")
         or cid.startswith("otaku:reset-cancel:")
+        or cid.startswith("otaku:swl:")
     ):
         _component_dispatch(ctx, event)
 

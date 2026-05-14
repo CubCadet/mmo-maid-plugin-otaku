@@ -696,6 +696,199 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v3.0.0 /server-watchlist ────────────────────────────────────────────────
+
+
+def _swl_event(subname: str, sub_opts: dict | None = None, **extra) -> dict:
+    """Build a /server-watchlist event with the given sub-command + options."""
+    sub_options = [
+        {"name": k, "value": v, "type": 3}
+        for k, v in (sub_opts or {}).items()
+    ]
+    return make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="server-watchlist",
+        options=[{"name": subname, "type": 1, "options": sub_options}],
+        **extra,
+    )
+
+
+def test_swl_schema_in_bootstrap():
+    ctx = MockContext()
+    p._bootstrap_schema(ctx)
+    assert any(
+        "CREATE TABLE IF NOT EXISTS otaku_server_watchlist" in c["sql"]
+        for c in ctx.sql.executed
+    )
+
+
+def test_swl_add_requires_admin():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # Default MockDiscord: no admin roles, owner_id="1".
+    p.cmd_server_watchlist(ctx, _swl_event("add", {"anime": "your name"}, user_id="rando"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "admin-only" in (follow.get("content") or "")
+    # No SQL INSERT issued.
+    assert not any("INSERT INTO otaku_server_watchlist" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_swl_add_admin_inserts_row():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # First query_one — "does this row already exist?" — returns None.
+    ctx.sql.query_one = lambda sql, params=None: None  # type: ignore[assignment]
+
+    p.cmd_server_watchlist(ctx, _swl_event("add", {"anime": "kimi"}, user_id="boss"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "Added" in (follow.get("content") or "")
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_server_watchlist" in c["sql"]]
+    assert inserts
+    # params: [media_id, added_by, note]
+    assert inserts[-1]["params"][0] == SAMPLE_MEDIA["id"]
+    assert inserts[-1]["params"][1] == "boss"
+    assert inserts[-1]["params"][2] is None  # no note was passed
+
+
+def test_swl_add_with_note_persists_it():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: None  # type: ignore[assignment]
+
+    p.cmd_server_watchlist(
+        ctx,
+        _swl_event("add", {"anime": "kimi", "note": "movie night pick"}, user_id="boss"),
+    )
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_server_watchlist" in c["sql"]]
+    assert inserts[-1]["params"][2] == "movie night pick"
+
+
+def test_swl_add_already_present_says_so():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # query_one returns truthy → already on the watchlist.
+    ctx.sql.query_one = lambda sql, params=None: {"1": 1}  # type: ignore[assignment]
+
+    p.cmd_server_watchlist(ctx, _swl_event("add", {"anime": "kimi"}, user_id="boss"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "already" in (follow.get("content") or "").lower()
+    assert not any("INSERT INTO otaku_server_watchlist" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_swl_remove_requires_admin():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    p.cmd_server_watchlist(ctx, _swl_event("remove", {"anime": "kimi"}, user_id="rando"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "admin-only" in (follow.get("content") or "")
+
+
+def test_swl_remove_admin_deletes_row():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # Row exists.
+    ctx.sql.query_one = lambda sql, params=None: {"1": 1}  # type: ignore[assignment]
+
+    p.cmd_server_watchlist(ctx, _swl_event("remove", {"anime": "kimi"}, user_id="boss"))
+
+    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_server_watchlist" in c["sql"]]
+    assert deletes and deletes[-1]["params"] == [SAMPLE_MEDIA["id"]]
+
+
+def test_swl_remove_accepts_numeric_media_id():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    # Numeric arg → QUERY_MEDIA_BY_ID path. _mock_anilist registers one
+    # response for any AniList URL, so both Search and ById share the same body.
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: {"1": 1}  # type: ignore[assignment]
+
+    p.cmd_server_watchlist(ctx, _swl_event("remove", {"anime": "123"}, user_id="boss"))
+
+    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_server_watchlist" in c["sql"]]
+    assert deletes
+
+
+def test_swl_remove_not_present_says_so():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: None  # type: ignore[assignment]
+
+    p.cmd_server_watchlist(ctx, _swl_event("remove", {"anime": "kimi"}, user_id="boss"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "isn't on" in (follow.get("content") or "")
+    assert not any("DELETE FROM otaku_server_watchlist" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_swl_view_with_rows_returns_public_embed():
+    ctx = MockContext()
+    rows = [
+        {"media_id": 1, "added_by": "boss", "note": "movie night"},
+        {"media_id": 2, "added_by": "boss", "note": None},
+    ]
+    ctx.sql.query = lambda sql, params=None: rows  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [
+        _make_other(1, "First"),
+        _make_other(2, "Second"),
+    ]}})
+
+    p.cmd_server_watchlist(ctx, _swl_event("view", {}, user_id="anyone"))
+
+    follow = ctx.interaction.followups[-1]
+    # View is public (non-ephemeral).
+    assert follow.get("ephemeral") is False or follow.get("ephemeral") is None
+    body = follow["embeds"][0]["description"]
+    assert "First" in body
+    assert "movie night" in body
+    # Added-by line links the curator.
+    assert "<@boss>" in body
+
+
+def test_swl_view_empty_state():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    p.cmd_server_watchlist(ctx, _swl_event("view", {}, user_id="anyone"))
+    follow = ctx.interaction.followups[-1]
+    assert "watchlist" in (follow.get("content") or "").lower()
+
+
+def test_swl_pagination_button_dispatches():
+    ctx = MockContext()
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["params"] = params
+        return [{"media_id": 6, "added_by": "boss", "note": None}]
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [_make_other(6, "Page 2 item")]}})
+
+    p._route_components(ctx, _component_event("otaku:swl:2", user_id="anyone"))
+
+    # Offset = (page-1) * PER_PAGE = 5 for page 2; limit = 6.
+    assert captured["params"] == [p.PER_PAGE + 1, p.PER_PAGE]
+
+
+def test_swl_pagination_malformed_replies_ephemerally():
+    ctx = MockContext()
+    p._route_components(ctx, _component_event("otaku:swl:abc", user_id="anyone"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "malformed" in (resp.get("content") or "").lower()
+
+
 # ── v2.6.0 /otaku-admin (real admin gating) ─────────────────────────────────
 
 

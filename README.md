@@ -47,6 +47,9 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/import anilist <username>` | Bulk-import an AniList user's list into your tracker. Streams 50 entries per page. Idempotent — re-imports update, don't duplicate. |
 | `/otaku-reset` | Self-service deletion of every tracked row for the caller on this server. Asks to confirm. |
 | `/otaku-admin reset-user <user>` | Server-admin-only moderation. Deletes every tracked row for a specific user. Gated to anyone with `Administrator` or `Manage Server`. |
+| `/server-watchlist view` | Public, paginated browse of the server's curated anime watchlist. |
+| `/server-watchlist add <anime> [note]` | Admin-only. Adds an anime to the server watchlist. Optional note shown alongside the entry. |
+| `/server-watchlist remove <anime>` | Admin-only. Removes an anime from the server watchlist. Accepts title or numeric AniList ID. |
 
 ### Politeness throttle
 
@@ -82,6 +85,15 @@ CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx
 ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT;  -- score × 2 (2..20)
 -- v2.2.0 (additive):
 ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0;
+
+-- v3.0.0:
+CREATE TABLE IF NOT EXISTS otaku_server_watchlist (
+  media_id   INTEGER NOT NULL,
+  added_by   TEXT NOT NULL,
+  added_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+  note       TEXT,
+  PRIMARY KEY (media_id)
+);
 ```
 
 The DDL is idempotent (`IF NOT EXISTS`) and runs from both `@plugin.on_install` and `@plugin.on_ready`. The `on_ready` path covers pool-mode workers picking up a tenant that upgraded from v1.x (where `on_install` does not re-fire).
@@ -97,6 +109,7 @@ All component custom_ids are prefixed with `otaku:`:
 | `otaku:trend:<page>` | `/trending` prev/next buttons | Re-queries the current season. |
 | `otaku:expand` | List-view select menu | The selected option's `value` is the media ID. |
 | `otaku:list:<user>:<scope>:<page>` | `/list` and `/favorites` prev/next buttons | scope is `all`, `favorites`, or one of the watch statuses. |
+| `otaku:swl:<page>` | `/server-watchlist view` prev/next | Server watchlist is shared, no user_id in the id. |
 
 ## Quick start (development)
 

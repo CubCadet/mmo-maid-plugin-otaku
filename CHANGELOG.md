@@ -20,6 +20,27 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-05-15
+
+### Added
+- `/server-watchlist view` — public, paginated browse of the server's
+  curated anime watchlist.
+- `/server-watchlist add anime:<title> [note:<text>]` — admin-only.
+  Accepts a title (AniList search) or a numeric AniList media ID.
+- `/server-watchlist remove anime:<title|id>` — admin-only.
+- New SQL table `otaku_server_watchlist (media_id PK, added_by, added_at,
+  note)`. Idempotent CREATE in `_bootstrap_schema`.
+- Pagination buttons use `otaku:swl:<page>` custom_ids.
+- Regression file `tests/regression/test_v3_0_0.py`.
+
+### Changed
+- Admin gating reuses the `_caller_is_admin` helper that landed in
+  v2.6.0; no new capability needed.
+
+### Migration
+- None. `otaku_server_watchlist` is created on the next event after
+  upgrade (via the existing `on_ready` bootstrap).
+
 ## [2.6.0] - 2026-05-15
 
 ### Added
