@@ -688,6 +688,24 @@ class _Strings:
     FIND_FOOTER = "Decoded as: {blend}"
     FIND_PAGE_MALFORMED = "/find pagination button malformed."
 
+    # /preferences (v9.3.0).
+    PREFERENCES_HEADER = "⚙️ Your preferences"
+    PREFERENCES_NO_CHANGES = (
+        "No preferences passed. Showing current values — pass `language:` "
+        "and/or `spoilers:` to update."
+    )
+    PREFERENCES_UPDATED = "Updated preferences."
+    PREFERENCES_LANG_NOT_SET = "*(not set)*"
+    PREFERENCES_LANG_LINE = "🌐 **Language**: `{lang}`"
+    PREFERENCES_SPOILERS_LINE = (
+        "🙈 **Spoilers**: `{state}` *(hide = wrap detected spoiler "
+        "markers; show = render plain text)*"
+    )
+    PREFERENCES_LANG_NOTE = (
+        "Language preference is stored but doesn't translate yet — v9.3 set "
+        "the foundation; a future SDK with a translation proxy will activate it."
+    )
+
 
 S = _Strings
 
@@ -1116,6 +1134,88 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+# v9.3.0 — spoiler redaction. Explicit-marker based to keep false positives
+# low. Wraps `SPOILER: …` / `[SPOILER] …` / `(spoiler) …` style lines in
+# Discord's `||spoiler||` syntax so the spoiler renders as a click-to-reveal.
+# Already-wrapped content is left alone (idempotent). The opt-out is per-
+# user via `pref:spoilers:user:<id>` in KV (default "hide"; "show" disables).
+_SPOILER_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*(?:spoiler|spoilers|\[spoiler\]|\(spoiler\)|#\s*spoiler)\s*[:\-]?\s*)"
+    r"(?P<body>.*)",
+    re.IGNORECASE,
+)
+
+
+def _redact_spoilers(text: str, *, show_unhidden: bool = False) -> str:
+    """Wrap detected spoiler markers in Discord ||...|| syntax.
+
+    If show_unhidden=True (caller has opted out via /preferences), returns
+    text unchanged. Detection is explicit-marker based: a line beginning
+    with SPOILER:, [SPOILER], (spoiler), or # spoiler (case-insensitive)
+    has its body wrapped. Already-wrapped lines are left alone — this
+    function is idempotent.
+
+    We deliberately DON'T try content-based heuristics ("dies", "twist",
+    "secretly") to keep false positives low. Users who want to mark
+    arbitrary content as spoilers can use Discord's `||…||` syntax
+    themselves; this function preserves that and never double-wraps.
+    """
+    if show_unhidden or not text:
+        return text
+    out: list[str] = []
+    for line in text.splitlines():
+        m = _SPOILER_LINE_RE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        body = m.group("body").strip()
+        if not body:
+            # Bare "SPOILER:" with no content — keep as-is.
+            out.append(line)
+            continue
+        if "||" in body:
+            # User already wrapped something; don't double-wrap.
+            out.append(line)
+            continue
+        out.append(f"{m.group('prefix')}||{body}||")
+    return "\n".join(out)
+
+
+# v9.3.0 — per-user preferences in KV. The scope-locked v9.3 set is just
+# language (placeholder for future translation proxy) and spoilers.
+PREF_LANGUAGE_KV = "pref:lang:user"      # f"{PREF_LANGUAGE_KV}:{user_id}"
+PREF_SPOILERS_KV = "pref:spoilers:user"  # f"{PREF_SPOILERS_KV}:{user_id}"
+PREF_LANGUAGE_CHOICES = ("en", "ja", "ko", "zh", "es", "de", "fr")
+PREF_SPOILERS_CHOICES = ("hide", "show")
+PREF_SPOILERS_DEFAULT = "hide"
+
+
+def _get_pref_spoilers(ctx: Context, user_id: str) -> str:
+    """Return the user's spoiler-hiding preference. Default 'hide'."""
+    if not user_id:
+        return PREF_SPOILERS_DEFAULT
+    try:
+        val = ctx.kv.get(f"{PREF_SPOILERS_KV}:{user_id}")
+    except Exception:  # noqa: BLE001
+        return PREF_SPOILERS_DEFAULT
+    if isinstance(val, str) and val in PREF_SPOILERS_CHOICES:
+        return val
+    return PREF_SPOILERS_DEFAULT
+
+
+def _get_pref_language(ctx: Context, user_id: str) -> str | None:
+    """Return the user's language code, or None if unset."""
+    if not user_id:
+        return None
+    try:
+        val = ctx.kv.get(f"{PREF_LANGUAGE_KV}:{user_id}")
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(val, str) and val in PREF_LANGUAGE_CHOICES:
+        return val
+    return None
 
 
 def _option_map(event: dict) -> dict:
@@ -2896,6 +2996,7 @@ _HELP_EXAMPLES = {
     "studio":        "`/studio query: Trigger`",
     "character-popular": "`/character-popular`",
     "find":          "`/find description: slow romance set in school with supernatural twist`",
+    "preferences":   "`/preferences spoilers: hide` or `/preferences language: ja`",
     "help":      "`/help`",
     "genres":    "`/genres`",
 }
@@ -5869,7 +5970,7 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
             ctx.interaction.respond(content=S.REVIEWS_PAGE_MALFORMED, ephemeral=True)
             return
         ctx.interaction.defer()
-        _render_reviews(ctx, media_id, page=page, deferred=True)
+        _render_reviews(ctx, media_id, page=page, deferred=True, viewer_id=user_id)
         return
 
     if cid.startswith("otaku:aotw-vote:"):
@@ -6113,7 +6214,13 @@ def _select_reviews_page(
 
 
 def _render_reviews(
-    ctx: Context, media_id: int, page: int, *, deferred: bool, ephemeral_reply: bool = False
+    ctx: Context,
+    media_id: int,
+    page: int,
+    *,
+    deferred: bool,
+    ephemeral_reply: bool = False,
+    viewer_id: str = "",
 ) -> None:
     data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id}, cache=True)
     if data is None:
@@ -6132,11 +6239,22 @@ def _render_reviews(
     total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
     page = max(1, min(page, total_pages))
 
+    # v9.3.0: per-viewer spoiler preference. Default "hide" wraps detected
+    # spoiler markers in ||...||; "show" renders raw text. The author's
+    # submitted text stays intact in the DB — only the render layer changes.
+    show_unhidden = (_get_pref_spoilers(ctx, viewer_id) == "show") if viewer_id else False
+
     fields = []
     for r in rows:
         author = r.get("user_id") or "?"
-        rev_title = _truncate(r.get("title") or "", REVIEW_TITLE_MAX)
-        rev_body = _truncate(r.get("body") or "", 1024)  # embed-field cap
+        rev_title = _redact_spoilers(
+            _truncate(r.get("title") or "", REVIEW_TITLE_MAX),
+            show_unhidden=show_unhidden,
+        )
+        rev_body = _redact_spoilers(
+            _truncate(r.get("body") or "", 1024),  # embed-field cap
+            show_unhidden=show_unhidden,
+        )
         fields.append({
             "name": f"<@{author}> · {rev_title}",
             "value": rev_body,
@@ -6206,7 +6324,7 @@ def cmd_reviews(ctx: Context, event: dict) -> None:
             return
         media_id = cached
 
-    _render_reviews(ctx, media_id, page=1, deferred=True)
+    _render_reviews(ctx, media_id, page=1, deferred=True, viewer_id=user_id)
 
 
 # ── v7.2.0 — /poll (generic server polls) ───────────────────────────────────
@@ -7183,6 +7301,52 @@ def cmd_find(ctx: Context, event: dict) -> None:
 
     ctx.interaction.defer()
     _render_find(ctx, query, genres, tags, page=1, deferred=True)
+
+
+# ── v9.3.0 — /preferences ───────────────────────────────────────────────────
+
+
+@plugin.on_slash_command("preferences")
+def cmd_preferences(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    new_lang = (opts.get("language") or "").strip().lower() or None
+    new_spoilers = (opts.get("spoilers") or "").strip().lower() or None
+
+    changed = False
+    if new_lang and new_lang in PREF_LANGUAGE_CHOICES and user_id:
+        ctx.kv.set(f"{PREF_LANGUAGE_KV}:{user_id}", new_lang)
+        changed = True
+    if new_spoilers and new_spoilers in PREF_SPOILERS_CHOICES and user_id:
+        ctx.kv.set(f"{PREF_SPOILERS_KV}:{user_id}", new_spoilers)
+        changed = True
+
+    # Read back the (possibly just-updated) current state.
+    cur_lang = _get_pref_language(ctx, user_id)
+    cur_spoilers = _get_pref_spoilers(ctx, user_id)
+
+    lang_display = cur_lang or S.PREFERENCES_LANG_NOT_SET
+    description_lines = [
+        S.PREFERENCES_LANG_LINE.format(lang=lang_display),
+        S.PREFERENCES_SPOILERS_LINE.format(state=cur_spoilers),
+    ]
+    if not changed:
+        description_lines.insert(0, S.PREFERENCES_NO_CHANGES + "\n")
+    else:
+        description_lines.insert(0, S.PREFERENCES_UPDATED + "\n")
+
+    # If language is set, show the placeholder note (translation not active yet).
+    if cur_lang:
+        description_lines.append("\n" + S.PREFERENCES_LANG_NOTE)
+
+    embed = {
+        "title": S.PREFERENCES_HEADER,
+        "description": "\n".join(description_lines),
+        "color": ANILIST_COLOR,
+    }
+    ctx.interaction.respond(embeds=[embed], ephemeral=True)
 
 
 def _render_mood(

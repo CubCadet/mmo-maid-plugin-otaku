@@ -988,17 +988,45 @@ ROADMAP working principle #6 — plan accordingly.
 
 ---
 
-### v9.2.0 — AI-powered summaries
+### v9.2.0 — AI-powered summaries ⏸ slipped (no LLM proxy in SDK v0.5.2)
 
-Optional — only if the platform exposes an LLM proxy by then. Per-anime "personality-tailored" summaries.
+~~Optional — only if the platform exposes an LLM proxy by then.
+Per-anime "personality-tailored" summaries.~~
 
-If the LLM proxy is unavailable, this version slips and we go straight to v9.3.
+**Slipped.** Confirmed against the installed SDK (`pip show
+mmo-maid-sdk` → `0.5.2`): no `ctx.llm`, no `ctx.ai`, no `llm:*`
+capability. Per the roadmap fallback, we went straight to v9.3.
+
+If a future SDK exposes a proxy, v9.2 reopens with a clean scope:
+per-anime/per-genre summaries shown alongside `/anime` / `/manga`
+cards as an opt-in extra field, gated by `/preferences ai: <on|off>`.
 
 ---
 
-### v9.3.x — Translation & spoiler control
+### v9.3.0 — Translation & spoiler control ✅ shipped 2026-05-14 (closes Phase 9)
 
-Auto-translate descriptions to the user's preferred language. Detect spoilers in user-submitted reviews via a small heuristic + blur them by default.
+~~Auto-translate descriptions to the user's preferred language.~~ — Deferred
+to v9.x/v10 when the SDK exposes a translation proxy. Same blocker as v9.2.
+
+~~Detect spoilers in user-submitted reviews via a small heuristic + blur
+them by default.~~ — **Shipped.** `_redact_spoilers(text)` wraps lines
+beginning with `SPOILER:` / `[SPOILER]` / `(spoiler)` / `# spoiler`
+(case-insensitive) in Discord's `||...||` syntax. Idempotent: never
+double-wraps. Per-viewer opt-out via `/preferences spoilers: show`.
+
+**Also shipped:** `/preferences` slash command — single command with two
+optional choice options (`language`, `spoilers`). Calling with no args
+shows current values; passing either or both updates them. Per-user
+state stored in KV (`pref:lang:user:<id>`, `pref:spoilers:user:<id>`).
+The language preference is intentionally a scaffold; the embed
+explicitly notes that translation isn't active yet.
+
+**Phase 9 closes at v9.3.0.** Two new slash commands across the phase
+(`/find`, `/preferences`) + the v9.1 transport-layer architectural
+shift to multi-source. v9.2 (AI summaries) slipped per the documented
+fallback — no LLM proxy in the SDK.
+
+**Capability:** no new capabilities — `storage:kv` already declared.
 
 ---
 

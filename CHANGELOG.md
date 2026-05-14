@@ -20,6 +20,99 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [9.3.0] - 2026-05-14
+
+### Phase 9 closes with what shipped today
+
+**v9.2 was skipped** per the roadmap fallback. The MMO Maid SDK v0.5.2
+exposes `ctx.discord`, `ctx.http`, `ctx.kv`, `ctx.sql`, `ctx.ephemeral`,
+`ctx.metrics`, `ctx.interaction`, `ctx.log` — **no `ctx.llm` or any
+AI/LLM proxy capability**. Per `ROADMAP.md` Phase 9: *"If the LLM proxy
+is unavailable, this version slips and we go straight to v9.3."* That's
+what we did. AI-powered summaries land if/when the SDK adds a proxy.
+
+### Added — spoiler control
+- `_redact_spoilers(text, *, show_unhidden=False)` — explicit-marker
+  heuristic that wraps lines starting with `SPOILER:` / `[SPOILER]` /
+  `(spoiler)` / `# spoiler` (case-insensitive) in Discord's `||…||`
+  syntax. Idempotent: pre-wrapped content (`||x||`) is never re-wrapped.
+  Empty input + bare markers (no body after the prefix) pass through.
+- `_render_reviews` now accepts `viewer_id=...` and reads the viewer's
+  `pref:spoilers:user:<id>` KV setting. Default `"hide"` applies the
+  wrap; `"show"` returns plain text. Authors' submitted text is never
+  modified in storage — only the render layer changes per viewer.
+- We deliberately do NOT do content-based heuristic detection ("dies",
+  "twist", "secretly", etc.). False-positive cost is too high; users
+  who want to hide arbitrary content can use Discord's `||...||`
+  themselves and the helper preserves their explicit choice.
+
+### Added — /preferences
+- `/preferences [language: <choice>] [spoilers: <choice>]` — single
+  command with two optional options. With no options passed, displays
+  current preferences. Either option updates that preference; both
+  can be updated in one call. Per-user, persisted via KV
+  (`pref:lang:user:<id>`, `pref:spoilers:user:<id>`).
+- Language choices: `en`, `ja`, `ko`, `zh`, `es`, `de`, `fr` (7
+  entries). The pref is stored but **doesn't translate anything yet** —
+  v9.3 set up the scaffolding so v9.x or v10 can activate it when an
+  SDK translation proxy lands. The embed surfaces this expectation
+  via `S.PREFERENCES_LANG_NOTE`.
+- Spoilers choices: `hide` (default, wraps in `||...||`) and `show`
+  (renders raw text).
+- Helpers `_get_pref_spoilers(ctx, user_id)` and
+  `_get_pref_language(ctx, user_id)` — both defend against
+  tampered/corrupted KV values by checking against the choice
+  constants and falling back to default/None.
+
+### Changed — wiring
+- `_render_reviews` signature: added `viewer_id: str = ""` keyword-only
+  parameter. Both callers updated (`cmd_reviews` slash handler at
+  ~line 6307 and the `otaku:reviews:<media_id>:<page>` pagination
+  dispatcher at ~line 5970) to pass the event's user_id through. An
+  empty `viewer_id` (legacy call sites without a viewer context)
+  defaults to no redaction opt-out lookup — `_get_pref_spoilers`
+  with empty user returns the default `"hide"`, which keeps the
+  safe-by-default behavior.
+
+### Tests
+- New regression file `tests/regression/test_v9_3_0.py` (31 tests).
+  Coverage:
+  - Manifest /preferences shape + choice-list parity with code constants
+  - KV prefix constants frozen (`pref:lang:user`, `pref:spoilers:user`)
+  - `_redact_spoilers` four marker forms + case-insensitivity + opt-out
+    + idempotency on pre-wrapped + empty input + bare marker + multi-
+    line mix
+  - `_get_pref_*` defaults + stored values + garbage-value defense
+  - `/preferences` view defaults, set spoilers, set language, set both,
+    rejects bogus values, translation-pending note surface
+  - `/reviews` integration: default-viewer wraps spoilers; show-pref
+    viewer sees plain; redaction applies to title AND body
+
+### What we *didn't* ship in v9.3 (deferred)
+- Auto-translate AniList descriptions to the user's preferred
+  language. Needs the same translation-proxy infrastructure as v9.2.
+- Content-based spoiler detection (e.g. last-3-paragraph wrap,
+  ML-classification). False-positive cost too high without per-user
+  feedback loops.
+
+### Capability surface
+- **No new capabilities.** `storage:kv` covers preference storage;
+  `interaction:respond` covers /preferences responses. No new
+  `proxy_domains_requested` (no outbound calls for redaction or
+  preferences).
+
+### Phase 9 summary
+Three tags shipped this phase: v9.0.0 (natural-language /find), v9.1.0
+(multi-source AniList → MAL → Kitsu aggregation), v9.3.0 (spoiler
+control + /preferences scaffold). v9.2 skipped per the documented
+LLM-proxy fallback. Phase 9 closes at v9.3.0.
+
+Two new slash commands (`/find`, `/preferences`). 546 tests total,
+up from 489 at the start of the phase. Manifest grew to 46 commands
+total. No new capability tiers; one `proxy_domains_requested`
+expansion (Jikan + Kitsu in v9.1) that triggers marketplace re-review
+on next upload.
+
 ## [9.1.0] - 2026-05-14
 
 ### Multi-source aggregation — Phase 9 architectural shift

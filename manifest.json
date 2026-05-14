@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "9.1.0",
+  "version": "9.3.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -192,6 +192,37 @@
           "description": "Free-form English description (e.g. \"slow romance set in school with supernatural twist\")",
           "type": 3,
           "required": true
+        }
+      ]
+    },
+    {
+      "name": "preferences",
+      "description": "View or update your personal preferences (language, spoiler handling).",
+      "options": [
+        {
+          "name": "language",
+          "description": "Set your preferred language code",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "English", "value": "en"},
+            {"name": "Japanese", "value": "ja"},
+            {"name": "Korean", "value": "ko"},
+            {"name": "Chinese", "value": "zh"},
+            {"name": "Spanish", "value": "es"},
+            {"name": "German", "value": "de"},
+            {"name": "French", "value": "fr"}
+          ]
+        },
+        {
+          "name": "spoilers",
+          "description": "How to render reviews with spoiler markers",
+          "type": 3,
+          "required": false,
+          "choices": [
+            {"name": "Hide (wrap as ||spoiler||)", "value": "hide"},
+            {"name": "Show (render plain text)", "value": "show"}
+          ]
         }
       ]
     },
