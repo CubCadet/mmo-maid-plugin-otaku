@@ -1,0 +1,17 @@
+"""Regression-suite scaffolding.
+
+Mirrors tests/conftest.py — loads __main__.py as `plugin_main`. Kept separate
+so the regression suite can be run in isolation: `pytest tests/regression -q`.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+_MAIN_PY = Path(__file__).resolve().parents[2] / "__main__.py"
+if "plugin_main" not in sys.modules:
+    _spec = importlib.util.spec_from_file_location("plugin_main", _MAIN_PY)
+    _module = importlib.util.module_from_spec(_spec)
+    sys.modules["plugin_main"] = _module
+    _spec.loader.exec_module(_module)
