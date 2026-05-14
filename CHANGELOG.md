@@ -20,6 +20,24 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-05-15
+
+### Added
+- `/wp create anime:<title>` — start a watch party. Returns a public embed
+  with a `[🎬 Join party]` button so anyone in the channel can join with
+  one click.
+- `/wp join id:<n>` — manually join by party id.
+- `/wp status id:<n>` — public embed listing members and their progress.
+- `/wp progress id:<n> episode:<n>` — update your episode count. If every
+  member is at the same episode, a public "everyone reached episode N"
+  announcement fires. If everyone is at the total, the party is
+  auto-promoted to `status='completed'`.
+- Two new SQL tables: `otaku_watch_parties (party_id SERIAL PK, media_id,
+  created_by, created_at, status)` and `otaku_watch_party_members (party_id,
+  user_id, episodes_watched, joined_at; composite PK)`.
+- `otaku:wp-join:<party_id>` button dispatch.
+- Regression file `tests/regression/test_v3_2_0.py`.
+
 ## [3.1.0] - 2026-05-15
 
 ### Added

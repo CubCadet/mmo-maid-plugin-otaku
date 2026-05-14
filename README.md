@@ -51,6 +51,10 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/server-watchlist add <anime> [note]` | Admin-only. Adds an anime to the server watchlist. Optional note shown alongside the entry. |
 | `/server-watchlist remove <anime>` | Admin-only. Removes an anime from the server watchlist. Accepts title or numeric AniList ID. |
 | `/compare <user>` | Side-by-side comparison vs another user: totals, shared favorites, divergent ratings, completion recs. |
+| `/wp create <anime>` | Start a watch party. Returns a public embed with a `[🎬 Join party]` button. |
+| `/wp join <id>` | Manually join a watch party by id. |
+| `/wp status <id>` | Show the party's members and their progress, plus status (active/completed/abandoned). |
+| `/wp progress <id> <episode>` | Update your episode count. If everyone in the party is at the same episode, a public sync announcement fires. |
 
 ### Politeness throttle
 
@@ -95,6 +99,22 @@ CREATE TABLE IF NOT EXISTS otaku_server_watchlist (
   note       TEXT,
   PRIMARY KEY (media_id)
 );
+
+-- v3.2.0:
+CREATE TABLE IF NOT EXISTS otaku_watch_parties (
+  party_id   SERIAL PRIMARY KEY,
+  media_id   INTEGER NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  status     TEXT NOT NULL DEFAULT 'active'  -- active | completed | abandoned
+);
+CREATE TABLE IF NOT EXISTS otaku_watch_party_members (
+  party_id          INTEGER NOT NULL,
+  user_id           TEXT NOT NULL,
+  episodes_watched  SMALLINT NOT NULL DEFAULT 0,
+  joined_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (party_id, user_id)
+);
 ```
 
 The DDL is idempotent (`IF NOT EXISTS`) and runs from both `@plugin.on_install` and `@plugin.on_ready`. The `on_ready` path covers pool-mode workers picking up a tenant that upgraded from v1.x (where `on_install` does not re-fire).
@@ -111,6 +131,7 @@ All component custom_ids are prefixed with `otaku:`:
 | `otaku:expand` | List-view select menu | The selected option's `value` is the media ID. |
 | `otaku:list:<user>:<scope>:<page>` | `/list` and `/favorites` prev/next buttons | scope is `all`, `favorites`, or one of the watch statuses. |
 | `otaku:swl:<page>` | `/server-watchlist view` prev/next | Server watchlist is shared, no user_id in the id. |
+| `otaku:wp-join:<party_id>` | `[🎬 Join party]` button on `/wp create` and `/wp status` embeds | One-click join for a watch party. |
 
 ## Quick start (development)
 

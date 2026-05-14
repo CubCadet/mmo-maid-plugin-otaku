@@ -531,13 +531,13 @@ is reused by Phase 3's admin-only commands.
 
 ---
 
-### v3.2.0 — Watch parties
+### v3.2.0 — Watch parties ✅ shipped 2026-05-15
 
 **New slash commands:**
-- `/wp create <anime>` — Start a watch party for an anime. Returns an embed with a `[Join]` button.
-- `/wp join <id>` — Manually join (in case the button is missed).
-- `/wp status <id>` — See who's joined, current progress per member, target episode.
-- `/wp progress <id> <episode>` — Update your progress in the party. When everyone hits the same episode, fire an announcement.
+- ~~`/wp create <anime>` — Start a watch party for an anime. Returns an embed with a `[Join]` button.~~ Public embed, button uses `otaku:wp-join:<party_id>`.
+- ~~`/wp join <id>` — Manually join (in case the button is missed).~~
+- ~~`/wp status <id>` — See who's joined, current progress per member, target episode.~~
+- ~~`/wp progress <id> <episode>` — Update your progress in the party. When everyone hits the same episode, fire an announcement.~~ Also auto-promotes party `status` to `completed` when everyone hits total episodes.
 
 **Schema:**
 ```sql

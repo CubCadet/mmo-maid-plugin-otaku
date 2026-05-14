@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking"],
@@ -250,6 +250,70 @@
           "description": "User to compare against",
           "type": 6,
           "required": true
+        }
+      ]
+    },
+    {
+      "name": "wp",
+      "description": "Watch parties — coordinate progress through an anime with friends.",
+      "options": [
+        {
+          "name": "create",
+          "description": "Start a new watch party for an anime.",
+          "type": 1,
+          "options": [
+            {
+              "name": "anime",
+              "description": "Anime title (searched on AniList) or numeric AniList ID",
+              "type": 3,
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "join",
+          "description": "Join an existing watch party by its id.",
+          "type": 1,
+          "options": [
+            {
+              "name": "id",
+              "description": "Party id (shown in the /wp create / /wp status embeds)",
+              "type": 4,
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "status",
+          "description": "Show members and progress for a watch party.",
+          "type": 1,
+          "options": [
+            {
+              "name": "id",
+              "description": "Party id",
+              "type": 4,
+              "required": true
+            }
+          ]
+        },
+        {
+          "name": "progress",
+          "description": "Update your episode count in a watch party.",
+          "type": 1,
+          "options": [
+            {
+              "name": "id",
+              "description": "Party id",
+              "type": 4,
+              "required": true
+            },
+            {
+              "name": "episode",
+              "description": "Latest episode you've watched (0 or higher)",
+              "type": 4,
+              "required": true
+            }
+          ]
         }
       ]
     },

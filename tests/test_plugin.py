@@ -696,6 +696,247 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v3.2.0 /wp (watch parties) ──────────────────────────────────────────────
+
+
+def _wp_event(subname: str, sub_opts: dict | None = None, **extra) -> dict:
+    """Build a /wp event. Sub-options use a mix of int + string types in real Discord,
+    so we don't bother annotating each option's type — handlers coerce via int()."""
+    sub_options = [{"name": k, "value": v} for k, v in (sub_opts or {}).items()]
+    return make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="wp",
+        options=[{"name": subname, "type": 1, "options": sub_options}],
+        **extra,
+    )
+
+
+def test_wp_schema_in_bootstrap():
+    ctx = MockContext()
+    p._bootstrap_schema(ctx)
+    sqls = [c["sql"] for c in ctx.sql.executed]
+    assert any("CREATE TABLE IF NOT EXISTS otaku_watch_parties" in s for s in sqls)
+    assert any("CREATE TABLE IF NOT EXISTS otaku_watch_party_members" in s for s in sqls)
+
+
+def test_wp_create_inserts_party_and_creator_as_member():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # INSERT ... RETURNING uses query_one — pretend it returned party_id=42.
+    # Monkeypatch must still record into executed, otherwise the assertions miss
+    # the SQL the handler ran.
+    def _qo(sql, params=None):  # noqa: ANN001
+        ctx.sql.executed.append({"sql": sql, "params": params})
+        return {"party_id": 42}
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+
+    p.cmd_wp(ctx, _wp_event("create", {"anime": "your name"}, user_id="creator"))
+
+    # One INSERT for the party row, one INSERT for the members row.
+    assert any("INSERT INTO otaku_watch_parties" in c["sql"] for c in ctx.sql.executed)
+    assert any("INSERT INTO otaku_watch_party_members" in c["sql"] for c in ctx.sql.executed)
+    # Members insert receives the party_id and creator user_id.
+    member_insert = next(
+        c for c in ctx.sql.executed if "INSERT INTO otaku_watch_party_members" in c["sql"]
+    )
+    assert member_insert["params"][0] == 42
+    assert member_insert["params"][1] == "creator"
+
+    follow = ctx.interaction.followups[-1]
+    # The create embed is public (non-ephemeral) and carries a Join button.
+    assert follow.get("ephemeral") in (False, None)
+    components = follow.get("components") or []
+    assert components
+    # ActionRow → children (Buttons). Check the Join button's custom_id.
+    btn = components[0].children[0]
+    assert btn.to_dict()["custom_id"] == "otaku:wp-join:42"
+
+
+def test_wp_join_command_inserts_member():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # First query_one for party lookup, second for member existence (None → not joined).
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 99, "media_id": SAMPLE_MEDIA["id"], "created_by": "creator", "status": "active"}
+        return None  # member doesn't exist yet
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+
+    p.cmd_wp(ctx, _wp_event("join", {"id": 99}, user_id="joiner"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_watch_party_members" in c["sql"]]
+    assert inserts and inserts[-1]["params"][0] == 99
+    assert inserts[-1]["params"][1] == "joiner"
+
+
+def test_wp_join_button_dispatches_to_join_logic():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 7, "media_id": SAMPLE_MEDIA["id"], "created_by": "host", "status": "active"}
+        return None
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+
+    p._route_components(ctx, _component_event("otaku:wp-join:7", user_id="late"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_watch_party_members" in c["sql"]]
+    assert inserts and inserts[-1]["params"][0] == 7
+
+
+def test_wp_join_already_member_short_circuits():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 7, "media_id": SAMPLE_MEDIA["id"], "created_by": "host", "status": "active"}
+        return {"episodes_watched": 5}  # already a member
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+
+    p.cmd_wp(ctx, _wp_event("join", {"id": 7}, user_id="already"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "already in" in (follow.get("content") or "")
+    # No new member insert.
+    assert not any("INSERT INTO otaku_watch_party_members" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_wp_join_unknown_party_replies_friendly_error():
+    ctx = MockContext()
+    ctx.sql.query_one = lambda sql, params=None: None  # type: ignore[assignment]
+    p.cmd_wp(ctx, _wp_event("join", {"id": 9999}, user_id="u"))
+    follow = ctx.interaction.followups[-1]
+    assert "9999" in (follow.get("content") or "")
+
+
+def test_wp_status_lists_members_with_progress():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    ctx.sql.query_one = lambda sql, params=None: {  # type: ignore[assignment]
+        "party_id": 11, "media_id": SAMPLE_MEDIA["id"], "created_by": "host", "status": "active",
+    }
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"user_id": "alice", "episodes_watched": 3},
+        {"user_id": "bob",   "episodes_watched": 1},
+    ]
+
+    p.cmd_wp(ctx, _wp_event("status", {"id": 11}, user_id="anyone"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") in (False, None)
+    body = follow["embeds"][0]["description"]
+    assert "<@alice>" in body and "<@bob>" in body
+    assert "episode 3" in body
+
+
+def test_wp_progress_updates_episodes_watched():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})  # episodes=1 in SAMPLE_MEDIA
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 5, "media_id": SAMPLE_MEDIA["id"], "created_by": "h", "status": "active"}
+        return {"episodes_watched": 0}  # the caller is a member
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+    # The post-update sync query — only one member, so no sync announcement.
+    ctx.sql.query = lambda sql, params=None: [{"episodes_watched": 1}]  # type: ignore[assignment]
+
+    p.cmd_wp(ctx, _wp_event("progress", {"id": 5, "episode": 1}, user_id="solo"))
+
+    updates = [c for c in ctx.sql.executed if "UPDATE otaku_watch_party_members" in c["sql"]]
+    assert updates and updates[-1]["params"] == [1, 5, "solo"]
+
+
+def test_wp_progress_caps_at_total_and_warns():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})  # episodes=1
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 5, "media_id": SAMPLE_MEDIA["id"], "created_by": "h", "status": "active"}
+        return {"episodes_watched": 0}
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+    ctx.sql.query = lambda sql, params=None: [{"episodes_watched": 1}]  # type: ignore[assignment]
+
+    p.cmd_wp(ctx, _wp_event("progress", {"id": 5, "episode": 99}, user_id="solo"))
+
+    updates = [c for c in ctx.sql.executed if "UPDATE otaku_watch_party_members" in c["sql"]]
+    assert updates and updates[-1]["params"][0] == 1  # capped
+
+
+def test_wp_progress_sync_announcement_when_all_match():
+    ctx = MockContext()
+    # Use a long-running show (episodes=12 — _make_other default) so we don't trip the
+    # completion auto-promotion path.
+    media = _make_other(99, "Long Show")
+    media["episodes"] = 12
+    _mock_anilist(ctx, {"Media": media})
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 50, "media_id": 99, "created_by": "h", "status": "active"}
+        return {"episodes_watched": 2}
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+    # All members at episode 3 after the caller's update → sync announce.
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"episodes_watched": 3},
+        {"episodes_watched": 3},
+    ]
+
+    p.cmd_wp(ctx, _wp_event("progress", {"id": 50, "episode": 3}, user_id="latecomer"))
+
+    followups = ctx.interaction.followups
+    # Two followups: ephemeral confirmation + public sync announcement.
+    assert len(followups) >= 2
+    announcement = followups[-1]
+    assert announcement.get("ephemeral") in (False, None)
+    assert "everyone" in (announcement.get("content") or "").lower()
+
+
+def test_wp_progress_not_member_rejected():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    calls = {"n": 0}
+
+    def _qo(sql, params=None):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"party_id": 11, "media_id": SAMPLE_MEDIA["id"], "created_by": "h", "status": "active"}
+        return None  # caller isn't a member
+
+    ctx.sql.query_one = _qo  # type: ignore[assignment]
+
+    p.cmd_wp(ctx, _wp_event("progress", {"id": 11, "episode": 2}, user_id="lurker"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "/wp join" in (follow.get("content") or "")
+    assert not any("UPDATE otaku_watch_party_members" in c["sql"] for c in ctx.sql.executed)
+
+
 # ── v3.1.0 /compare ─────────────────────────────────────────────────────────
 
 

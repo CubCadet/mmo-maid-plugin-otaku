@@ -71,6 +71,24 @@ _SCHEMA_SERVER_WATCHLIST_DDL = (
     "  note TEXT,"
     "  PRIMARY KEY (media_id))"
 )
+# v3.2.0 — watch parties. party_id is SERIAL across all servers; the runner's
+# row-level scoping by server_id keeps tenants from seeing each other's parties.
+_SCHEMA_WATCH_PARTY_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_watch_parties ("
+    "  party_id SERIAL PRIMARY KEY,"
+    "  media_id INTEGER NOT NULL,"
+    "  created_by TEXT NOT NULL,"
+    "  created_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  status TEXT NOT NULL DEFAULT 'active')"
+)
+_SCHEMA_WATCH_PARTY_MEMBERS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_watch_party_members ("
+    "  party_id INTEGER NOT NULL,"
+    "  user_id TEXT NOT NULL,"
+    "  episodes_watched SMALLINT NOT NULL DEFAULT 0,"
+    "  joined_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (party_id, user_id))"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -189,6 +207,31 @@ class _Strings:
     )
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
+
+    # /wp — watch parties.
+    WP_CREATE_USAGE = "Pass an anime with `anime:` — e.g. `/wp create anime: Frieren`."
+    WP_ID_USAGE = "Pass a party id with `id:` — see `/wp status` or the create embed."
+    WP_PROGRESS_NEGATIVE = "Episode must be 0 or higher."
+    WP_PROGRESS_OVER_TOTAL = "Capped your episode at the show's total ({total})."
+    WP_CREATED_TITLE = "🎬 Watch party started — {title}"
+    WP_CREATED_BODY = (
+        "Party id: **{party_id}**\nStarted by <@{user}>\n\n"
+        "Anyone in the server can join with `/wp join id: {party_id}` "
+        "(or hit the button below). Track your progress with "
+        "`/wp progress id: {party_id} episode: <n>`."
+    )
+    WP_JOIN_BUTTON = "Join party"
+    WP_NOT_FOUND = "No watch party with id **{party_id}** on this server."
+    WP_JOINED = "Joined watch party **{party_id}** ({title})."
+    WP_ALREADY_JOINED = "You're already in watch party **{party_id}**."
+    WP_PROGRESS_UPDATED = "Recorded your progress on party **{party_id}**: episode {episodes}{of_total}."
+    WP_PROGRESS_NOT_MEMBER = "You haven't joined party **{party_id}** yet — `/wp join id: {party_id}`."
+    WP_STATUS_HEADER = "🎬 Watch party {party_id} — {title}"
+    WP_STATUS_EMPTY_MEMBERS = "*(no members yet)*"
+    WP_SYNC_ANNOUNCE = "🎉 Everyone in watch party **{party_id}** has reached episode {episode}!"
+    WP_STATUS_COMPLETED = "✅ Completed"
+    WP_STATUS_ABANDONED = "🛑 Abandoned"
+    WP_STATUS_ACTIVE = "▶ Active"
 
     # /compare.
     COMPARE_SELF = "Pick a *different* user — comparing against yourself isn't very interesting."
@@ -1056,6 +1099,9 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_EPISODES_DDL)
     # v3.0.0
     ctx.sql.execute(_SCHEMA_SERVER_WATCHLIST_DDL)
+    # v3.2.0
+    ctx.sql.execute(_SCHEMA_WATCH_PARTY_DDL)
+    ctx.sql.execute(_SCHEMA_WATCH_PARTY_MEMBERS_DDL)
 
 
 @plugin.on_install
@@ -1863,6 +1909,295 @@ def cmd_otaku_admin(ctx: Context, event: dict) -> None:
             content=S.ADMIN_RESET_NOTHING.format(user=target_user),
             ephemeral=True,
         )
+
+
+# ── v3.2.0 — /wp (watch parties) ────────────────────────────────────────────
+
+WATCH_PARTY_STATUS_LABEL = {
+    "active":    "▶ Active",
+    "completed": "✅ Completed",
+    "abandoned": "🛑 Abandoned",
+}
+
+
+def _wp_subcommand(event: dict) -> tuple[str, dict]:
+    raw = event.get("options") or []
+    if not isinstance(raw, list) or not raw:
+        return "", {}
+    first = raw[0] if isinstance(raw[0], dict) else {}
+    name = (first.get("name") or "").strip()
+    sub_opts = {
+        o["name"]: o["value"]
+        for o in (first.get("options") or [])
+        if isinstance(o, dict) and "name" in o
+    }
+    return name, sub_opts
+
+
+def _get_watch_party(ctx: Context, party_id: int) -> dict | None:
+    if not party_id:
+        return None
+    row = ctx.sql.query_one(
+        "SELECT party_id, media_id, created_by, status FROM otaku_watch_parties "
+        "WHERE party_id = $1",
+        [party_id],
+    )
+    return row or None
+
+
+def _get_party_member(ctx: Context, party_id: int, user_id: str) -> dict | None:
+    row = ctx.sql.query_one(
+        "SELECT episodes_watched FROM otaku_watch_party_members "
+        "WHERE party_id = $1 AND user_id = $2",
+        [party_id, user_id],
+    )
+    return row or None
+
+
+def _wp_create_embed_and_buttons(
+    party_id: int, media: dict, creator_id: str
+) -> tuple[dict, list]:
+    title = _format_title(media)
+    body = S.WP_CREATED_BODY.format(party_id=party_id, user=creator_id)
+    embed = {
+        "title": S.WP_CREATED_TITLE.format(title=title),
+        "description": body,
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.FOOTER_ANILIST},
+    }
+    cover = (media.get("coverImage") or {}).get("large")
+    if cover:
+        embed["thumbnail"] = {"url": cover}
+    components = [ActionRow(
+        Button(S.WP_JOIN_BUTTON, custom_id=f"otaku:wp-join:{party_id}", style="primary", emoji="🎬"),
+    )]
+    return embed, components
+
+
+def _wp_create(ctx: Context, event: dict, opts: dict) -> None:
+    user_id = event.get("user_id") or ""
+    raw_anime = str(opts.get("anime") or "").strip()
+    if not raw_anime:
+        ctx.interaction.respond(content=S.WP_CREATE_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    media, err = _resolve_anime_arg_for_swl(ctx, raw_anime)
+    if media is None:
+        if err is None:
+            _reply_anilist_failure(ctx, deferred=True)
+        else:
+            _reply_error(ctx, err, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    # INSERT ... RETURNING is the canonical "give me the new party_id" path.
+    new_party = ctx.sql.query_one(
+        "INSERT INTO otaku_watch_parties (media_id, created_by, status) "
+        "VALUES ($1, $2, 'active') RETURNING party_id",
+        [media_id, user_id],
+    )
+    party_id = 0
+    if isinstance(new_party, dict) and new_party.get("party_id") is not None:
+        try:
+            party_id = int(new_party["party_id"])
+        except (TypeError, ValueError):
+            party_id = 0
+
+    # Auto-add the creator as a member.
+    ctx.sql.execute(
+        "INSERT INTO otaku_watch_party_members (party_id, user_id, episodes_watched) "
+        "VALUES ($1, $2, 0) "
+        "ON CONFLICT (party_id, user_id) DO NOTHING",
+        [party_id, user_id],
+    )
+
+    embed, components = _wp_create_embed_and_buttons(party_id, media, user_id)
+    ctx.interaction.followup(embeds=[embed], components=components, ephemeral=False)
+
+
+def _wp_join_internal(ctx: Context, party_id: int, user_id: str, *, deferred: bool) -> None:
+    """Shared logic for `/wp join` and the [Join party] button."""
+    party = _get_watch_party(ctx, party_id)
+    if party is None:
+        _reply_error(ctx, S.WP_NOT_FOUND.format(party_id=party_id), deferred=deferred)
+        return
+    existing = _get_party_member(ctx, party_id, user_id)
+    if existing is not None:
+        _reply_error(ctx, S.WP_ALREADY_JOINED.format(party_id=party_id), deferred=deferred)
+        return
+    ctx.sql.execute(
+        "INSERT INTO otaku_watch_party_members (party_id, user_id, episodes_watched) "
+        "VALUES ($1, $2, 0) "
+        "ON CONFLICT (party_id, user_id) DO NOTHING",
+        [party_id, user_id],
+    )
+    # Fetch the title so the confirmation isn't just an integer.
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": int(party["media_id"])})
+    title = _format_title((data or {}).get("Media") or {}) if data else f"#{party['media_id']}"
+    msg = S.WP_JOINED.format(party_id=party_id, title=title)
+    if deferred:
+        ctx.interaction.followup(content=msg, ephemeral=True)
+    else:
+        ctx.interaction.respond(content=msg, ephemeral=True)
+
+
+def _wp_join(ctx: Context, event: dict, opts: dict) -> None:
+    user_id = event.get("user_id") or ""
+    try:
+        party_id = int(opts.get("id"))
+    except (TypeError, ValueError):
+        ctx.interaction.respond(content=S.WP_ID_USAGE, ephemeral=True)
+        return
+    ctx.interaction.defer(ephemeral=True)
+    _wp_join_internal(ctx, party_id, user_id, deferred=True)
+
+
+def _wp_status(ctx: Context, event: dict, opts: dict) -> None:
+    try:
+        party_id = int(opts.get("id"))
+    except (TypeError, ValueError):
+        ctx.interaction.respond(content=S.WP_ID_USAGE, ephemeral=True)
+        return
+    ctx.interaction.defer()
+
+    party = _get_watch_party(ctx, party_id)
+    if party is None:
+        _reply_error(ctx, S.WP_NOT_FOUND.format(party_id=party_id), deferred=True)
+        return
+
+    members = ctx.sql.query(
+        "SELECT user_id, episodes_watched FROM otaku_watch_party_members "
+        "WHERE party_id = $1 ORDER BY episodes_watched DESC, joined_at ASC",
+        [party_id],
+    ) or []
+
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": int(party["media_id"])})
+    media = (data or {}).get("Media") or {}
+    title = _format_title(media) if media else f"#{party['media_id']}"
+    total = media.get("episodes") if isinstance(media, dict) else None
+
+    if members:
+        lines = []
+        for r in members:
+            uid = r.get("user_id") or "?"
+            eps = int(r.get("episodes_watched") or 0)
+            of_total = f" / {total}" if isinstance(total, int) and total > 0 else ""
+            lines.append(f"• <@{uid}> — episode {eps}{of_total}")
+        members_body = "\n".join(lines)
+    else:
+        members_body = S.WP_STATUS_EMPTY_MEMBERS
+
+    status_label = WATCH_PARTY_STATUS_LABEL.get(party.get("status") or "active", S.WP_STATUS_ACTIVE)
+    embed = {
+        "title": S.WP_STATUS_HEADER.format(party_id=party_id, title=title),
+        "description": members_body,
+        "color": ANILIST_COLOR,
+        "fields": [
+            {"name": "Status", "value": status_label, "inline": True},
+            {"name": "Started by", "value": f"<@{party.get('created_by') or '?'}>", "inline": True},
+        ],
+        "footer": {"text": S.FOOTER_ANILIST},
+    }
+    cover = (media.get("coverImage") or {}).get("large") if isinstance(media, dict) else None
+    if cover:
+        embed["thumbnail"] = {"url": cover}
+
+    ctx.interaction.followup(embeds=[embed], ephemeral=False)
+
+
+def _wp_progress(ctx: Context, event: dict, opts: dict) -> None:
+    user_id = event.get("user_id") or ""
+    try:
+        party_id = int(opts.get("id"))
+        episodes_raw = int(opts.get("episode"))
+    except (TypeError, ValueError):
+        ctx.interaction.respond(content=S.WP_ID_USAGE, ephemeral=True)
+        return
+    if episodes_raw < 0:
+        ctx.interaction.respond(content=S.WP_PROGRESS_NEGATIVE, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+
+    party = _get_watch_party(ctx, party_id)
+    if party is None:
+        _reply_error(ctx, S.WP_NOT_FOUND.format(party_id=party_id), deferred=True)
+        return
+
+    existing = _get_party_member(ctx, party_id, user_id)
+    if existing is None:
+        _reply_error(ctx, S.WP_PROGRESS_NOT_MEMBER.format(party_id=party_id), deferred=True)
+        return
+
+    # Look up the show to cap at total episode count.
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": int(party["media_id"])})
+    media = (data or {}).get("Media") or {}
+    total = media.get("episodes") if isinstance(media, dict) else None
+
+    capped = episodes_raw
+    cap_warning = None
+    if isinstance(total, int) and total > 0 and capped > total:
+        capped = total
+        cap_warning = S.WP_PROGRESS_OVER_TOTAL.format(total=total)
+
+    ctx.sql.execute(
+        "UPDATE otaku_watch_party_members SET episodes_watched = $1 "
+        "WHERE party_id = $2 AND user_id = $3",
+        [capped, party_id, user_id],
+    )
+
+    # If everyone is at the same episode (and the party still has more than one
+    # member), announce. If everyone has hit `total`, promote to completed.
+    members_now = ctx.sql.query(
+        "SELECT episodes_watched FROM otaku_watch_party_members WHERE party_id = $1",
+        [party_id],
+    ) or []
+    sync_announce = None
+    if len(members_now) >= 2:
+        eps_values = {int(r.get("episodes_watched") or 0) for r in members_now}
+        if len(eps_values) == 1:
+            sync_announce = S.WP_SYNC_ANNOUNCE.format(party_id=party_id, episode=capped)
+    if isinstance(total, int) and total > 0 and capped == total:
+        # Mark the party completed if every member is at total.
+        if all(int(r.get("episodes_watched") or 0) >= total for r in members_now):
+            ctx.sql.execute(
+                "UPDATE otaku_watch_parties SET status = 'completed' WHERE party_id = $1",
+                [party_id],
+            )
+
+    of_total = f" / {total}" if isinstance(total, int) and total > 0 else ""
+    main_msg = S.WP_PROGRESS_UPDATED.format(
+        party_id=party_id, episodes=capped, of_total=of_total
+    )
+    if cap_warning:
+        main_msg = f"{cap_warning}\n{main_msg}"
+    ctx.interaction.followup(content=main_msg, ephemeral=True)
+
+    # The sync announcement goes out as a public follow-up so everyone sees it.
+    if sync_announce:
+        ctx.interaction.followup(content=sync_announce, ephemeral=False)
+
+
+@plugin.on_slash_command("wp")
+def cmd_wp(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    subcommand, sub_opts = _wp_subcommand(event)
+    if subcommand == "create":
+        _wp_create(ctx, event, sub_opts)
+        return
+    if subcommand == "join":
+        _wp_join(ctx, event, sub_opts)
+        return
+    if subcommand == "status":
+        _wp_status(ctx, event, sub_opts)
+        return
+    if subcommand == "progress":
+        _wp_progress(ctx, event, sub_opts)
+        return
+    ctx.interaction.respond(content=S.WP_ID_USAGE, ephemeral=True)
 
 
 # ── v3.1.0 — /compare ───────────────────────────────────────────────────────
@@ -2797,6 +3132,18 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _render_server_watchlist(ctx, page=page, deferred=True)
         return
 
+    if cid.startswith("otaku:wp-join:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        try:
+            party_id = int(cid.split(":", 2)[2])
+        except (ValueError, IndexError):
+            ctx.interaction.respond(content=S.WP_ID_USAGE, ephemeral=True)
+            return
+        ctx.interaction.defer(ephemeral=True)
+        _wp_join_internal(ctx, party_id, user_id, deferred=True)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -2815,6 +3162,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:reset-confirm:")
         or cid.startswith("otaku:reset-cancel:")
         or cid.startswith("otaku:swl:")
+        or cid.startswith("otaku:wp-join:")
     ):
         _component_dispatch(ctx, event)
 
