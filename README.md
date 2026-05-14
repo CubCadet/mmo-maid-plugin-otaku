@@ -50,6 +50,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/server-watchlist view` | Public, paginated browse of the server's curated anime watchlist. |
 | `/server-watchlist add <anime> [note]` | Admin-only. Adds an anime to the server watchlist. Optional note shown alongside the entry. |
 | `/server-watchlist remove <anime>` | Admin-only. Removes an anime from the server watchlist. Accepts title or numeric AniList ID. |
+| `/compare <user>` | Side-by-side comparison vs another user: totals, shared favorites, divergent ratings, completion recs. |
 
 ### Politeness throttle
 

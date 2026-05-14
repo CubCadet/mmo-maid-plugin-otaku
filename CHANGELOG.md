@@ -20,6 +20,22 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-05-15
+
+### Added
+- `/compare user:<user>` — side-by-side comparison of two users' anime
+  tracking on this server. Four sections:
+  - **Tracked totals** (yours / theirs / both)
+  - **Shared favorites** — anime you both marked as favorite
+  - **You disagree on** — overlap where ratings differ by ≥ 2 points
+  - **Anime they've completed (and you haven't)** — soft recs
+- Each section capped at 5 entries.
+- One AniList batch HTTP call per `/compare` invocation to resolve titles.
+- Regression file `tests/regression/test_v3_1_0.py`.
+
+### Changed
+- Comparing against yourself short-circuits ephemerally before any SQL runs.
+
 ## [3.0.0] - 2026-05-15
 
 ### Added

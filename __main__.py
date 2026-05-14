@@ -190,6 +190,24 @@ class _Strings:
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
 
+    # /compare.
+    COMPARE_SELF = "Pick a *different* user — comparing against yourself isn't very interesting."
+    COMPARE_HEADER = "🔍 You vs <@{other}>"
+    COMPARE_EMPTY_BOTH = (
+        "Neither of you have tracked any anime on this server yet. "
+        "Try `/favorite` or `/watch` after a `/anime` lookup first."
+    )
+    COMPARE_EMPTY_YOU = (
+        "You haven't tracked anything yet — go run `/anime` then `/favorite` "
+        "or `/watch`, and try again."
+    )
+    COMPARE_EMPTY_THEM = "<@{other}> hasn't tracked anything on this server yet."
+    COMPARE_FIELD_SHARED = "Shared favorites"
+    COMPARE_FIELD_DIVERGENT = "You disagree on"
+    COMPARE_FIELD_RECS = "Anime they've completed (and you haven't)"
+    COMPARE_FIELD_TOTALS = "Tracked totals"
+    COMPARE_NONE = "*(none yet)*"
+
     # /server-watchlist.
     SWL_ADD_USAGE = "Pass an anime with `anime:` — e.g. `/server-watchlist add anime: Frieren`."
     SWL_REMOVE_USAGE = "Pass an anime title or AniList media ID with `anime:`."
@@ -1845,6 +1863,175 @@ def cmd_otaku_admin(ctx: Context, event: dict) -> None:
             content=S.ADMIN_RESET_NOTHING.format(user=target_user),
             ephemeral=True,
         )
+
+
+# ── v3.1.0 — /compare ───────────────────────────────────────────────────────
+
+COMPARE_LIST_LIMIT = 5  # cap each field's bullet list at five entries
+
+
+def _user_rows_keyed_by_media(ctx: Context, user_id: str) -> dict[int, dict]:
+    """Return {media_id: {status, is_favorite, rating}} for every row a user has."""
+    rows = ctx.sql.query(
+        "SELECT media_id, status, is_favorite, rating FROM otaku_user_anime "
+        "WHERE user_id = $1",
+        [user_id],
+    ) or []
+    return {
+        int(r["media_id"]): {
+            "status": r.get("status") or "watching",
+            "is_favorite": bool(r.get("is_favorite")),
+            "rating": int(r["rating"]) if r.get("rating") is not None else None,
+        }
+        for r in rows
+        if r.get("media_id") is not None
+    }
+
+
+def _compare_users(my_rows: dict[int, dict], their_rows: dict[int, dict]) -> dict:
+    """Compute shared favorites / divergent ratings / completion-gap recs."""
+    my_ids = set(my_rows.keys())
+    their_ids = set(their_rows.keys())
+
+    shared_favs = sorted(
+        mid for mid in my_ids & their_ids
+        if my_rows[mid]["is_favorite"] and their_rows[mid]["is_favorite"]
+    )
+
+    divergent: list[tuple[int, int, int]] = []  # (media_id, my_rating, their_rating)
+    for mid in sorted(my_ids & their_ids):
+        my_r = my_rows[mid]["rating"]
+        their_r = their_rows[mid]["rating"]
+        if my_r is None or their_r is None:
+            continue
+        if abs(my_r - their_r) >= 4:  # ≥ 2 points apart on the 1–10 scale (rating is ×2)
+            divergent.append((mid, my_r, their_r))
+    # Order by the largest gap first so the spiciest disagreements lead.
+    divergent.sort(key=lambda t: abs(t[1] - t[2]), reverse=True)
+
+    completion_recs = sorted(
+        mid for mid in their_ids - my_ids
+        if their_rows[mid]["status"] == "completed"
+    )
+
+    return {
+        "shared_favorites": shared_favs[:COMPARE_LIST_LIMIT],
+        "divergent_ratings": divergent[:COMPARE_LIST_LIMIT],
+        "completion_recs": completion_recs[:COMPARE_LIST_LIMIT],
+        "my_total": len(my_ids),
+        "their_total": len(their_ids),
+        "shared_total": len(my_ids & their_ids),
+    }
+
+
+def _format_compare_lines(
+    media_ids: list[int],
+    media_by_id: dict[int, dict],
+) -> str:
+    """Bullet list of titles. Falls back to `#<id>` if AniList didn't return the title."""
+    if not media_ids:
+        return S.COMPARE_NONE
+    lines = []
+    for mid in media_ids:
+        m = media_by_id.get(int(mid))
+        if m:
+            title = _format_title(m)
+            url = m.get("siteUrl") or ""
+            lines.append(f"• [{title}]({url})" if url else f"• {title}")
+        else:
+            lines.append(f"• #{mid}")
+    return "\n".join(lines)
+
+
+def _format_divergent_lines(
+    divergent: list[tuple[int, int, int]],
+    media_by_id: dict[int, dict],
+) -> str:
+    if not divergent:
+        return S.COMPARE_NONE
+    lines = []
+    for mid, mine, theirs in divergent:
+        m = media_by_id.get(int(mid))
+        title = _format_title(m) if m else f"#{mid}"
+        url = (m or {}).get("siteUrl") or ""
+        anchor = f"[{title}]({url})" if url else title
+        lines.append(f"• {anchor} — you: {_format_rating(mine)} · them: {_format_rating(theirs)}")
+    return "\n".join(lines)
+
+
+@plugin.on_slash_command("compare")
+def cmd_compare(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    other_id = str(opts.get("user") or "").strip()
+    if not other_id or other_id == user_id:
+        ctx.interaction.respond(content=S.COMPARE_SELF, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    my_rows = _user_rows_keyed_by_media(ctx, user_id)
+    their_rows = _user_rows_keyed_by_media(ctx, other_id)
+
+    if not my_rows and not their_rows:
+        _reply_error(ctx, S.COMPARE_EMPTY_BOTH, deferred=True)
+        return
+    if not my_rows:
+        _reply_error(ctx, S.COMPARE_EMPTY_YOU, deferred=True)
+        return
+    if not their_rows:
+        _reply_error(ctx, S.COMPARE_EMPTY_THEM.format(other=other_id), deferred=True)
+        return
+
+    result = _compare_users(my_rows, their_rows)
+
+    # Collect every media_id we want a title for, then one AniList batch call.
+    title_ids: set[int] = set(result["shared_favorites"])
+    title_ids.update(mid for mid, _, _ in result["divergent_ratings"])
+    title_ids.update(result["completion_recs"])
+    media_by_id: dict[int, dict] = {}
+    if title_ids:
+        data = _anilist_query(
+            ctx, QUERY_MEDIA_BATCH, {"ids": sorted(title_ids)}, cache=True
+        )
+        if data is not None:
+            for m in ((data.get("Page") or {}).get("media") or []):
+                mid = m.get("id")
+                if isinstance(mid, int):
+                    media_by_id[mid] = m
+
+    embed = {
+        "title": S.COMPARE_HEADER.format(other=other_id),
+        "color": ANILIST_COLOR,
+        "fields": [
+            {
+                "name": S.COMPARE_FIELD_TOTALS,
+                "value": (
+                    f"You: **{result['my_total']}** · Them: **{result['their_total']}** · "
+                    f"Both: **{result['shared_total']}**"
+                ),
+                "inline": False,
+            },
+            {
+                "name": S.COMPARE_FIELD_SHARED,
+                "value": _format_compare_lines(result["shared_favorites"], media_by_id),
+                "inline": False,
+            },
+            {
+                "name": S.COMPARE_FIELD_DIVERGENT,
+                "value": _format_divergent_lines(result["divergent_ratings"], media_by_id),
+                "inline": False,
+            },
+            {
+                "name": S.COMPARE_FIELD_RECS,
+                "value": _format_compare_lines(result["completion_recs"], media_by_id),
+                "inline": False,
+            },
+        ],
+        "footer": {"text": S.FOOTER_ANILIST},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
 # ── v3.0.0 — /server-watchlist ──────────────────────────────────────────────

@@ -524,10 +524,10 @@ is reused by Phase 3's admin-only commands.
 
 ---
 
-### v3.1.0 — Friend comparison
+### v3.1.0 — Friend comparison ✅ shipped 2026-05-15
 
 **New slash command:**
-- `/compare @user` — Side-by-side stats vs. another user in the server. Shared favorites, divergent ratings, "anime they've completed that you haven't" recommendations.
+- ~~`/compare @user` — Side-by-side stats vs. another user in the server. Shared favorites, divergent ratings, "anime they've completed that you haven't" recommendations.~~ Four sections (Totals / Shared favorites / Divergent / Completion recs), each capped at 5 entries. One AniList batch HTTP call resolves titles. Divergence threshold ≥ 2 points (stored as ≥ 4 since rating is score × 2).
 
 ---
 

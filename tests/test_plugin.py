@@ -696,6 +696,103 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v3.1.0 /compare ─────────────────────────────────────────────────────────
+
+
+def test_compare_against_self_rejected_ephemerally():
+    ctx = MockContext()
+    p.cmd_compare(ctx, _slash_event("compare", {"user": "same"}, user_id="same"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "different" in (resp.get("content") or "")
+
+
+def test_compare_users_helper_finds_shared_favorites_and_divergent_ratings():
+    my_rows = {
+        1: {"status": "completed", "is_favorite": True, "rating": 20},
+        2: {"status": "completed", "is_favorite": False, "rating": 12},  # 6.0
+    }
+    their_rows = {
+        1: {"status": "completed", "is_favorite": True,  "rating": 18},  # shared favorite
+        # rating gap on id 2: stored diff |18-12|=6, threshold is ≥4 — divergent
+        2: {"status": "completed", "is_favorite": False, "rating": 18},
+        3: {"status": "completed", "is_favorite": False, "rating": None},  # completion rec
+    }
+    result = p._compare_users(my_rows, their_rows)
+    assert result["shared_favorites"] == [1]
+    # divergent: id 2, my 12 vs theirs 18 — diff is 6 (≥4 threshold)
+    assert result["divergent_ratings"] == [(2, 12, 18)]
+    assert result["completion_recs"] == [3]
+    assert result["my_total"] == 2
+    assert result["their_total"] == 3
+    assert result["shared_total"] == 2
+
+
+def test_compare_users_helper_empty_when_no_overlap():
+    my_rows = {1: {"status": "watching", "is_favorite": False, "rating": None}}
+    their_rows = {2: {"status": "watching", "is_favorite": False, "rating": None}}
+    result = p._compare_users(my_rows, their_rows)
+    assert result["shared_favorites"] == []
+    assert result["divergent_ratings"] == []
+    assert result["completion_recs"] == []
+
+
+def test_compare_command_renders_embed_with_all_four_fields():
+    ctx = MockContext()
+    # Two SQL queries — _user_rows_keyed_by_media is called for each user.
+    # Both queries hit the same `_q` stub; we check which user we're querying via params.
+    rows_by_user = {
+        "me": [
+            {"media_id": 1, "status": "completed", "is_favorite": True, "rating": 20},
+            {"media_id": 2, "status": "completed", "is_favorite": False, "rating": 10},
+        ],
+        "them": [
+            {"media_id": 1, "status": "completed", "is_favorite": True, "rating": 18},
+            {"media_id": 3, "status": "completed", "is_favorite": False, "rating": None},
+        ],
+    }
+
+    def _q(sql, params=None):  # noqa: ANN001
+        return rows_by_user.get(params[0], [])
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [
+        _make_other(1, "Shared Pick"),
+        _make_other(3, "Their Rec"),
+    ]}})
+
+    p.cmd_compare(ctx, _slash_event("compare", {"user": "them"}, user_id="me"))
+
+    follow = ctx.interaction.followups[-1]
+    embed = follow["embeds"][0]
+    field_names = {f["name"] for f in embed["fields"]}
+    assert {p.S.COMPARE_FIELD_TOTALS, p.S.COMPARE_FIELD_SHARED,
+            p.S.COMPARE_FIELD_DIVERGENT, p.S.COMPARE_FIELD_RECS}.issubset(field_names)
+    shared_field = next(f for f in embed["fields"] if f["name"] == p.S.COMPARE_FIELD_SHARED)
+    assert "Shared Pick" in shared_field["value"]
+
+
+def test_compare_command_empty_when_neither_has_data():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    p.cmd_compare(ctx, _slash_event("compare", {"user": "them"}, user_id="me-empty"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "Neither" in (follow.get("content") or "")
+
+
+def test_compare_command_only_you_have_data():
+    ctx = MockContext()
+
+    def _q(sql, params=None):  # noqa: ANN001
+        return [{"media_id": 1, "status": "completed", "is_favorite": True, "rating": 20}] if params[0] == "me" else []
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    p.cmd_compare(ctx, _slash_event("compare", {"user": "them"}, user_id="me"))
+    follow = ctx.interaction.followups[-1]
+    assert "hasn't tracked anything" in (follow.get("content") or "")
+
+
 # ── v3.0.0 /server-watchlist ────────────────────────────────────────────────
 
 
