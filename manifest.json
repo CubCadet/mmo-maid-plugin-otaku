@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "8.3.0",
+  "version": "9.0.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -182,6 +182,18 @@
     {
       "name": "character-popular",
       "description": "Top anime/manga characters by AniList favourites — paginated leaderboard."
+    },
+    {
+      "name": "find",
+      "description": "Natural-language search — describe what you want, get a curated genre/tag blend.",
+      "options": [
+        {
+          "name": "description",
+          "description": "Free-form English description (e.g. \"slow romance set in school with supernatural twist\")",
+          "type": 3,
+          "required": true
+        }
+      ]
     },
     {
       "name": "help",

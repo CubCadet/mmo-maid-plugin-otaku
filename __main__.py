@@ -674,6 +674,20 @@ class _Strings:
     MOOD_FOOTER_GENRES = "Genres: {genres}"
     MOOD_FOOTER_GENRES_TAGS = "Genres: {genres} · Tags: {tags}"
 
+    # /find (v9.0.0).
+    FIND_USAGE = "Describe what you want — e.g. `/find description: slow romance with magic`."
+    FIND_NO_MATCH = (
+        "I couldn't decode **{query}** into genres or tags. Try plain words "
+        "like *slow*, *dark*, *romance*, *school*, *supernatural*, *epic*."
+    )
+    FIND_NO_RESULTS = (
+        "AniList didn't have anything matching **{blend}**. Try a different "
+        "description, or run `/mood` for a curated vibe."
+    )
+    FIND_HEADER = "🔎 Found for *{query}*"
+    FIND_FOOTER = "Decoded as: {blend}"
+    FIND_PAGE_MALFORMED = "/find pagination button malformed."
+
 
 S = _Strings
 
@@ -2429,6 +2443,7 @@ _HELP_EXAMPLES = {
     "staff":         "`/staff query: Hayao Miyazaki`",
     "studio":        "`/studio query: Trigger`",
     "character-popular": "`/character-popular`",
+    "find":          "`/find description: slow romance set in school with supernatural twist`",
     "help":      "`/help`",
     "genres":    "`/genres`",
 }
@@ -6472,15 +6487,18 @@ MOODS: dict[str, dict] = {
 }
 
 
-def _mood_query(
+def _search_by_genre_tag_blend(
     ctx: Context, genres: list[str], tags: list[str], page: int
 ) -> tuple[list[dict] | None, bool]:
-    """Returns (media_list, has_next). media_list=None on AniList failure.
+    """Shared genre+tag search used by /mood (v6.1) and /find (v9.0).
 
-    If the mood has tags, try the tags+genres query first. If it returns
-    empty (the tag might not exist on AniList, or there's just nothing
-    matching this season), retry with genres only so we always have
-    *some* recommendations to show.
+    Returns (media_list, has_next). media_list=None on AniList failure.
+
+    If tags is non-empty, try the tags+genres query first. If it returns
+    empty (the tag might not exist on AniList, or nothing matches this
+    season), retry with genres only so we always have *some*
+    recommendations to show — fragile or missing tags never strand the
+    user. Extracted from _mood_query in v9.0 to back /find as well.
     """
     if tags:
         data = _anilist_query(
@@ -6511,11 +6529,209 @@ def _mood_query(
     return media_list, has_next
 
 
+# ── v9.0.0 — /find (natural-language search) ───────────────────────────────
+#
+# Maps a free-form English description to a blend of AniList genres and tags
+# via an inline phrase table. Per the v1.4 deviation (runtime allowlist
+# rejects sibling .json files), the phrase table lives inline like MOODS.
+# This is a purely lexical mapping; no external LLM call. v9.2 will optionally
+# bolt an LLM proxy on top IF the platform exposes one (per ROADMAP).
+#
+# Each entry maps a list of trigger substrings to a (genres, tags) blend.
+# Triggers are matched case-insensitively as whole-word substrings of the
+# tokenised input — so "slow romance" matches both "slow" and "romance"
+# entries, unioning their genres + tags.
+#
+# Entries draw from AniList's canonical genre vocabulary and the most-
+# stable AniList tags. New entries should prefer genres over tags when
+# the distinction is fuzzy (tags can disappear or drift; genres are
+# rock-stable across the AniList API history).
+
+FIND_PHRASES: list[dict] = [
+    # Pacing / tone
+    {"triggers": ["slow", "leisurely", "calm", "chill", "relaxing"],
+     "genres": ["Slice of Life"], "tags": ["Iyashikei"]},
+    {"triggers": ["dark", "gritty", "bleak"],
+     "genres": ["Horror", "Psychological"], "tags": []},
+    {"triggers": ["tense", "thriller", "suspense", "suspenseful"],
+     "genres": ["Thriller", "Psychological"], "tags": []},
+    {"triggers": ["epic", "grand", "huge", "massive", "sweeping"],
+     "genres": ["Action", "Adventure", "Fantasy"], "tags": []},
+    {"triggers": ["cathartic", "tearjerker", "sad", "tragic", "tragedy"],
+     "genres": ["Drama"], "tags": ["Tragedy"]},
+    {"triggers": ["uplifting", "heartwarming", "wholesome", "feel-good"],
+     "genres": ["Slice of Life", "Comedy"], "tags": ["Heartwarming"]},
+    {"triggers": ["funny", "hilarious", "comedy", "comedic", "humor", "humour"],
+     "genres": ["Comedy"], "tags": []},
+    {"triggers": ["nostalgic", "old", "classic", "retro"],
+     "genres": ["Romance", "Slice of Life"], "tags": ["Coming of Age"]},
+    # Setting
+    {"triggers": ["school", "high school", "highschool", "classroom", "student"],
+     "genres": [], "tags": ["School"]},
+    {"triggers": ["space", "cosmic", "interstellar", "galaxy"],
+     "genres": ["Sci-Fi"], "tags": ["Space"]},
+    {"triggers": ["isekai", "transported", "another world", "reborn"],
+     "genres": ["Fantasy"], "tags": ["Isekai"]},
+    {"triggers": ["mecha", "robot", "robots", "giant robots"],
+     "genres": ["Mecha", "Sci-Fi"], "tags": []},
+    {"triggers": ["cyberpunk", "dystopian", "dystopia"],
+     "genres": ["Sci-Fi"], "tags": ["Cyberpunk"]},
+    {"triggers": ["historical", "edo", "feudal", "samurai"],
+     "genres": ["Action"], "tags": ["Historical"]},
+    {"triggers": ["post-apocalyptic", "apocalypse", "wasteland"],
+     "genres": ["Sci-Fi"], "tags": ["Post-Apocalyptic"]},
+    {"triggers": ["urban", "city", "modern"],
+     "genres": [], "tags": ["Urban Fantasy"]},
+    # Theme / content
+    {"triggers": ["romance", "romantic", "love", "rom-com"],
+     "genres": ["Romance"], "tags": []},
+    {"triggers": ["magic", "magical", "wizard", "sorcery", "spells"],
+     "genres": ["Fantasy"], "tags": ["Magic"]},
+    {"triggers": ["supernatural", "ghost", "yokai", "spirit", "haunted"],
+     "genres": ["Supernatural"], "tags": []},
+    {"triggers": ["mystery", "detective", "whodunit"],
+     "genres": ["Mystery"], "tags": []},
+    {"triggers": ["sports", "athletic", "tournament"],
+     "genres": ["Sports"], "tags": []},
+    {"triggers": ["music", "musical", "band", "concert"],
+     "genres": ["Music"], "tags": []},
+    {"triggers": ["food", "cooking", "chef", "restaurant"],
+     "genres": [], "tags": ["Food"]},
+    {"triggers": ["war", "military", "soldier", "battle"],
+     "genres": ["Action"], "tags": ["War"]},
+    {"triggers": ["psychological", "mind-bending", "mindbending"],
+     "genres": ["Psychological"], "tags": []},
+    # Audience / archetype
+    {"triggers": ["female", "girl", "female protagonist", "heroine"],
+     "genres": [], "tags": ["Female Protagonist"]},
+    {"triggers": ["male", "male protagonist", "hero"],
+     "genres": [], "tags": ["Male Protagonist"]},
+    {"triggers": ["coming of age", "coming-of-age", "growing up"],
+     "genres": [], "tags": ["Coming of Age"]},
+    # Genre catchalls (last so more-specific phrases match first if both present)
+    {"triggers": ["action"], "genres": ["Action"], "tags": []},
+    {"triggers": ["adventure"], "genres": ["Adventure"], "tags": []},
+    {"triggers": ["fantasy"], "genres": ["Fantasy"], "tags": []},
+    {"triggers": ["horror", "scary", "creepy"],
+     "genres": ["Horror"], "tags": []},
+    {"triggers": ["drama", "dramatic"], "genres": ["Drama"], "tags": []},
+    {"triggers": ["sci-fi", "scifi", "science fiction"],
+     "genres": ["Sci-Fi"], "tags": []},
+]
+
+
+def _match_find_phrases(text: str) -> tuple[set[str], set[str]]:
+    """Tokenise + lowercase + match `text` against FIND_PHRASES.
+
+    Returns (genres, tags). Both sets are unions over every matched entry.
+    A trigger matches if its full string appears as a substring of the
+    lowercased input — so "high school" matches "high school" and "junior
+    high school" but not "schooled".
+    """
+    normalised = " " + text.lower().strip() + " "
+    # Light punctuation strip; preserve hyphens (some triggers use them).
+    for ch in ".,!?\"'():;":
+        normalised = normalised.replace(ch, " ")
+    # Collapse runs of whitespace so multi-word triggers match cleanly.
+    while "  " in normalised:
+        normalised = normalised.replace("  ", " ")
+
+    genres: set[str] = set()
+    tags: set[str] = set()
+    for entry in FIND_PHRASES:
+        for trigger in entry["triggers"]:
+            # Use " <trigger> " match against the padded normalised string
+            # so triggers don't accidentally match inside a longer word
+            # (e.g. "art" → "heart").
+            if f" {trigger.lower()} " in normalised:
+                genres.update(entry.get("genres") or [])
+                tags.update(entry.get("tags") or [])
+                break  # one match per entry is enough
+    return genres, tags
+
+
+def _render_find(
+    ctx: Context,
+    query: str,
+    genres: list[str],
+    tags: list[str],
+    page: int,
+    *,
+    deferred: bool,
+) -> None:
+    media_list, has_next = _search_by_genre_tag_blend(ctx, genres, tags, page)
+    if media_list is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+
+    # Build the "decoded as" footer up-front so users see what we matched.
+    if genres and tags:
+        blend = f"genres: {', '.join(genres)} · tags: {', '.join(tags)}"
+    elif genres:
+        blend = f"genres: {', '.join(genres)}"
+    else:
+        blend = f"tags: {', '.join(tags)}"
+
+    if not media_list:
+        _reply_error(ctx, S.FIND_NO_RESULTS.format(blend=blend), deferred=deferred)
+        return
+
+    header = S.FIND_HEADER.format(query=_truncate(query, 80))
+    embed = _make_list_embed(media_list, header, page=page, has_next=has_next)
+    embed["footer"] = {"text": S.FIND_FOOTER.format(blend=blend)}
+
+    # Pagination uses a compact custom_id: otaku:find:<page>. The genres+tags
+    # blend isn't re-encoded — page 2 re-runs _match_find_phrases against the
+    # same description, which is stable per FIND_PHRASES. To support multi-
+    # turn paging without re-tokenisation, we'd need to encode the blend
+    # OR persist it in KV; the simpler choice is to cap /find at one page
+    # and link users to /discover for deeper browsing. v9.0 ships single-
+    # page; pagination can come in v9.0.x if user-demand surfaces.
+    components = []
+    select_row = _make_select_row(media_list)
+    if select_row is not None:
+        components.append(select_row)
+
+    if deferred:
+        ctx.interaction.followup(embeds=[embed], components=components or None)
+    else:
+        ctx.interaction.respond(embeds=[embed], components=components or None)
+
+
+@plugin.on_slash_command("find")
+def cmd_find(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    query = (opts.get("description") or "").strip()
+    if not query:
+        ctx.interaction.respond(content=S.FIND_USAGE, ephemeral=True)
+        return
+
+    genres_set, tags_set = _match_find_phrases(query)
+    if not genres_set and not tags_set:
+        ctx.interaction.respond(
+            content=S.FIND_NO_MATCH.format(query=_truncate(query, 80)),
+            ephemeral=True,
+        )
+        return
+
+    # Sort for deterministic ordering in the footer + cache key.
+    genres = sorted(genres_set)
+    tags = sorted(tags_set)
+
+    ctx.interaction.defer()
+    _render_find(ctx, query, genres, tags, page=1, deferred=True)
+
+
 def _render_mood(
     ctx: Context, feeling: str, page: int, *, deferred: bool, ephemeral_reply: bool = False
 ) -> None:
     mood = MOODS[feeling]
-    media_list, has_next = _mood_query(ctx, mood["genres"], mood.get("tags") or [], page)
+    media_list, has_next = _search_by_genre_tag_blend(
+        ctx, mood["genres"], mood.get("tags") or [], page
+    )
     if media_list is None:
         _reply_anilist_failure(ctx, deferred=deferred)
         return

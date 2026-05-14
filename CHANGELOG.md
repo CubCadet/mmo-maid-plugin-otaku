@@ -20,6 +20,83 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [9.0.0] - 2026-05-14
+
+### Phase 9 opens — AI & multi-source integrations
+
+This version is a **MAJOR** because it opens Phase 9 (the architectural
+phase that culminates in v9.1 multi-source aggregation). v9.0 itself
+ships a single new command + a small refactor — but the refactor is
+load-bearing for v9.1.
+
+### Added
+- `/find description:<text>` — natural-language search. The user types
+  a free-form English description ("slow romance set in school with
+  supernatural twist") and the plugin decodes it into a genre/tag
+  blend via the inline `FIND_PHRASES` table (34 entries covering
+  pacing, setting, theme, audience, and genre catch-alls). Single-page
+  result (5 picks).
+- Footer surfaces what was decoded — e.g. `Decoded as: genres: Romance,
+  Slice of Life · tags: Iyashikei, School` — so users understand why
+  the picks look the way they do.
+- `_match_find_phrases(text)` — word-boundary substring matcher.
+  Lowercases + strips punctuation + collapses whitespace, then matches
+  each FIND_PHRASES trigger as a full-word substring of the padded
+  normalised input. Protects against false positives like "art"
+  matching "heart" by requiring leading + trailing whitespace.
+
+### Refactored — load-bearing for v9.1
+- Extracted `_search_by_genre_tag_blend` from v6.1's `_mood_query`.
+  Both `/mood` and `/find` now share the same with-tags-then-genres-
+  only fallback path. v6.1 regression contract preserved (tests still
+  pass; the function-rename was the only behavior-equivalent change).
+- This is the v8.0.1 audit's "do it once, not piecewise" recommendation
+  from the [don't-double-defer memory](.claude/...). v9.1 will also
+  call `_search_by_genre_tag_blend` when MAL/Kitsu fallback paths
+  need to route AniList-style genre/tag queries through the shared
+  fallback chain.
+
+### Tests
+- New regression file `tests/regression/test_v9_0_0.py` (21 tests):
+  manifest entry, shared-helper extraction contract (both /mood and
+  /find route through it), FIND_PHRASES table contract (≥30 entries,
+  every entry has a trigger AND a genre or tag), `_match_find_phrases`
+  multi-word union, case-insensitivity, word-boundary protection
+  (the classic "art" / "heart" false-positive case), punctuation
+  strip, empty + unrecognised input, isekai trigger routing,
+  empty-query short-circuit (no AniList call), no-trigger-match
+  surfacing the pointer-to-trigger-words error (no AniList call),
+  decoded-blend footer rendering, query-in-header verbatim, AniList
+  empty surfacing the /mood-pointer fallback, AniList failure
+  surfacing the default error, sorted-stable genres in the routed
+  blend, shared-helper routing locked.
+
+### Capability surface
+- **No new capabilities.** /find decodes locally; only AniList HTTP
+  is invoked (existing `proxy:http`).
+
+### Deferred — for v9.0.x or v9.1 patches
+- /find pagination. v9.0 ships single-page because re-tokenising the
+  same description on page 2 is fine, but encoding the decoded blend
+  in the pagination custom_id is fiddly. Single-page is plenty for
+  the natural-language search UX; if users want depth, /discover or
+  /mood are the structured paths.
+- AniList tag drift. FIND_PHRASES uses what's stable today (Iyashikei,
+  School, Cyberpunk, Magic, Isekai, etc.). If AniList retires a tag,
+  the `_search_by_genre_tag_blend` shared helper falls through to
+  genres-only — the tag drift never strands a `/find` user.
+
+### What's next — Phase 9 roadmap
+- v9.1.0 — multi-source aggregation (MAL/Jikan + Kitsu fallbacks).
+  Per the v8.0.1 audit cheat sheet: canonical-dict abstraction for
+  embed rendering; parallel `_jikan_query` / `_kitsu_query`; per-source
+  rate-limit buckets; new `proxy_domains_requested` entries. v9.1 is
+  the real architectural shift — v9.0 was the warmup that proved the
+  `_search_by_genre_tag_blend` extraction works.
+- v9.2.0 — AI summaries (optional, slips if platform doesn't expose
+  an LLM proxy).
+- v9.3.x — translation + spoiler control.
+
 ## [8.3.0] - 2026-05-14
 
 ### Phase 8 closes — character popularity leaderboard

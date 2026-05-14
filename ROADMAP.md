@@ -923,11 +923,29 @@ patch. Total slash commands: 44. No new capabilities Phase-wide.
 
 **Goal:** Get smarter than the underlying APIs.
 
-### v9.0.0 — Natural-language search
+### v9.0.0 — Natural-language search ✅ shipped 2026-05-14 (opens Phase 9)
 
-`/find <english description>` — Takes free-form English ("a slow romance set in a school with supernatural elements") and translates to genre + tag filters.
+~~`/find <english description>` — Takes free-form English ("a slow romance set in a school with supernatural elements") and translates to genre + tag filters.~~
 
-Backed by a small mapping table maintained in code. No external LLM call required at this stage — purely lexical/tag-based.
+~~Backed by a small mapping table maintained in code. No external LLM call required at this stage — purely lexical/tag-based.~~
+
+Shipped. **`FIND_PHRASES` is the inline mapping table** (34 entries
+covering pacing, setting, theme, audience, and genre catch-alls — same
+allowlist-respecting pattern as v6.1's MOODS and v1.4's S strings).
+The matcher is word-boundary-aware so "art" doesn't match "heart".
+Footer surfaces the decoded blend so users understand the result.
+
+**Load-bearing refactor:** extracted `_search_by_genre_tag_blend` from
+v6.1's `_mood_query`. Both `/mood` and `/find` share it; v9.1's
+multi-source path will reuse it too. Behavior-preserving — all v6.1
+regression tests still pass without modification.
+
+Single-page result for v9.0; pagination deferred to v9.0.x if user
+demand surfaces. The decoded blend doesn't re-encode in a custom_id —
+keeping the pagination contract simple was cheaper than supporting
+deep browsing on free-text input.
+
+**Capability:** no new capabilities — local decoding + AniList HTTP.
 
 ---
 

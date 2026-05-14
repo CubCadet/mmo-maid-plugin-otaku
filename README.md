@@ -48,6 +48,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/staff <query>` | Look up an anime/manga staff person (director, writer, composer, etc.). Shows bio, primary occupations, and the top 5 production credits prefixed with the staff role at each project. First match only. |
 | `/studio <query>` | Look up an animation studio. Shows recent works (last 2 years) and older catalog works (each up to 5). Header emoji distinguishes animation studios from other production orgs (licensors, distributors). |
 | `/character-popular` | Global character popularity leaderboard, sorted by AniList favourites. Paginated 5 per page; rank numbers continue across pages (#1–5 page 1, #6–10 page 2, etc.). Each row links to the character + their most-popular parent media. |
+| `/find <description>` | Natural-language search. Describe what you want in plain English ("slow romance set in school with supernatural twist"); the plugin decodes it into a genre/tag blend via an inline mapping table and shows 5 picks. Footer surfaces what was decoded so you can see why. Single-page; no external LLM. |
 | `/help` | Lists every otaku command with a one-line description and example. Built from `manifest.json` so it always reflects what's registered. |
 | `/genres` | Shows AniList's canonical genre list. Cached in KV at `genres:global` (24h TTL); falls back to a live AniList call on cache miss. |
 | `/favorite [anime] [remove]` | Mark (or unmark) the user's last `/anime` lookup as a favorite, or pass an `anime:` title explicitly. Stored in SQL. |
