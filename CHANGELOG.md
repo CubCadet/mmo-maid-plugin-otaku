@@ -20,6 +20,51 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-05-14
+
+### Added — Phase 7 opens
+- `/review` slash command — opens a modal pre-filled with the caller's
+  existing review (if any) for their cached `last_anime`. Modal has a
+  Title (short, max 100) and Body (paragraph, max 2000). Submitting
+  upserts a row in the new `otaku_reviews` table.
+- `/reviews [anime]` slash command — paginated 3-per-page view of this
+  server's reviews for an anime. `anime` accepts a title, numeric
+  AniList ID, or is omitted to use the caller's cached `last_anime`.
+  Sorted `updated_at DESC` so freshly-edited reviews surface first.
+- Modal submit routing — extended `_route_components` to also handle
+  `interaction_type == 5` (MODAL_SUBMIT) with prefix `otaku:review-modal:`.
+  The custom_id encodes the media_id since Discord modals can't
+  receive context other than their custom_id and submitted values.
+- Regression file `tests/regression/test_v7_0_0.py` (18 tests) freezes
+  the schema bootstrap, the modal custom_id shape, the existing-review
+  pre-fill path, the upsert (insert vs. update) routing, and the
+  paginated /reviews query contract.
+
+### Changed — schema
+- New table `otaku_reviews (user_id, media_id, title, body, created_at,
+  updated_at, PK (user_id, media_id))`. Idempotent CREATE wired into
+  `_bootstrap_schema`. **MAJOR version bump per the roadmap doctrine**
+  — new schema is a schema change even though it's additive.
+
+### Deviation from the roadmap
+- The roadmap showed `/review <anime>` with anime as a positional arg.
+  Discord's 3-second pre-modal wall clock makes a synchronous AniList
+  title lookup unreliable before `send_modal()`, so `/review` is
+  cached-`last_anime`-only (same pattern as `/watch`, `/rate`,
+  `/progress`). Users who want to review a specific anime do
+  `/anime query: <title>` first; the cached AniList lookup is
+  in-process and instant for the modal-prefill path. `/reviews` keeps
+  the optional anime arg with title-or-ID resolution because it can
+  `defer()` before querying.
+- An `updated_at` column was added on top of the roadmap's schema so
+  re-reviewing reorders the list freshness-first instead of being
+  invisible.
+
+### Capability surface
+- **No new capabilities.** `storage:sql`, `proxy:http`, and
+  `interaction:respond` already covered everything Phase 7 v7.0.0
+  needed. (Modals piggy-back on `interaction:respond`.)
+
 ## [6.2.0] - 2026-05-14
 
 ### Added

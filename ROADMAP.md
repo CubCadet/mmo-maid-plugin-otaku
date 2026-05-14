@@ -738,11 +738,19 @@ something to show.
 
 **Goal:** Make the server itself participate. Reviews, polls, awards.
 
-### v7.0.0 — Reviews & ratings
+### v7.0.0 — Reviews & ratings ✅ shipped 2026-05-14
 
-**New slash command:**
-- `/review <anime>` — Opens a modal to write a review (title + body). Stored per-user-per-anime.
-- `/reviews <anime>` — Show all reviews from this server for an anime.
+**New slash commands:**
+- ~~`/review <anime>` — Opens a modal to write a review (title + body). Stored per-user-per-anime.~~ Shipped as `/review` with **no
+  options** — Discord's 3-second pre-`send_modal` wall clock makes a
+  synchronous AniList title lookup unsafe before the modal, so the
+  command uses cached `last_anime` only (same pattern as `/watch`,
+  `/rate`, `/progress`). Users run `/anime query: <title>` first if
+  they want to review something specific. The modal pre-fills the
+  existing review (if any) so editing is one-shot.
+- ~~`/reviews <anime>` — Show all reviews from this server for an anime.~~ Shipped as `/reviews [anime]`. `anime` accepts a title or
+  numeric AniList ID, defaults to cached `last_anime`. Paginated 3 per
+  page, sorted `updated_at DESC` so re-edited reviews resurface.
 
 **Schema:**
 ```sql
@@ -751,10 +759,16 @@ CREATE TABLE otaku_reviews (
   media_id    INTEGER NOT NULL,
   title       TEXT NOT NULL,
   body        TEXT NOT NULL,
-  created_at  TIMESTAMP NOT NULL DEFAULT now(),
+  created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),  -- added on top of the roadmap
   PRIMARY KEY (user_id, media_id)
 );
 ```
+
+Added `updated_at` so re-reviewing reorders the list freshness-first.
+
+**Capability:** none new — `storage:sql` + `interaction:respond` cover
+both the modal and the SQL upsert.
 
 ---
 

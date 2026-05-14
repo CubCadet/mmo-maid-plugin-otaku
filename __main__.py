@@ -28,6 +28,7 @@ from mmo_maid_sdk import (
     RpcTimeoutError,
     SelectMenu,
     SelectOption,
+    TextInput,
     ValidationError,
 )
 
@@ -99,6 +100,19 @@ _SCHEMA_NOTIFICATIONS_DDL = (
     "  media_id INTEGER NOT NULL,"
     "  channel_id TEXT,"
     "  added_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (user_id, media_id))"
+)
+# v7.0.0 — per-user-per-anime reviews. Updating a review keeps the original
+# created_at and bumps updated_at, so we can sort newest-edited-first while
+# still showing how old the review is.
+_SCHEMA_REVIEWS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_reviews ("
+    "  user_id TEXT NOT NULL,"
+    "  media_id INTEGER NOT NULL,"
+    "  title TEXT NOT NULL,"
+    "  body TEXT NOT NULL,"
+    "  created_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),"
     "  PRIMARY KEY (user_id, media_id))"
 )
 
@@ -424,6 +438,34 @@ class _Strings:
         "You haven't tracked any anime yet. Try `/favorite` or `/rate score: <n>` "
         "after a `/anime` lookup."
     )
+
+    # /review and /reviews (v7.0.0).
+    REVIEW_NO_CACHE = (
+        "You haven't looked up an anime yet. Try `/anime query: <title>` first."
+    )
+    REVIEW_NO_DATA = (
+        "Couldn't load your last lookup right now — try `/anime query: <title>` to refresh it."
+    )
+    REVIEW_MODAL_TITLE = "Review · {title}"
+    REVIEW_FIELD_TITLE = "Title"
+    REVIEW_FIELD_BODY = "Body"
+    REVIEW_PLACEHOLDER_TITLE = "Short summary — e.g. \"a quiet masterpiece\""
+    REVIEW_PLACEHOLDER_BODY = "Your thoughts on the anime…"
+    REVIEW_SUBMIT_MALFORMED = "Review form was malformed — try `/review` again."
+    REVIEW_SUBMIT_EMPTY = "Review needs both a title and a body."
+    REVIEW_SAVED_NEW = "📝 Posted your review of **{title}**."
+    REVIEW_SAVED_EDIT = "📝 Updated your review of **{title}**."
+
+    REVIEWS_USAGE = (
+        "Pass `anime:` with a title or numeric AniList ID, or run "
+        "`/anime query: <title>` first to set your last lookup."
+    )
+    REVIEWS_HEADER = "📝 Reviews · {title}"
+    REVIEWS_EMPTY = (
+        "No reviews yet for **{title}** on this server. Be the first with `/review`!"
+    )
+    REVIEWS_PAGE_MALFORMED = "Reviews button malformed."
+    REVIEWS_FOOTER_PAGE = "Page {page}/{total} · {n} reviews on this server"
 
     # /genre-trends (v6.2.0).
     GENRE_TRENDS_EMPTY = (
@@ -1282,6 +1324,8 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_WATCH_PARTY_MEMBERS_DDL)
     # v4.0.0
     ctx.sql.execute(_SCHEMA_NOTIFICATIONS_DDL)
+    # v7.0.0
+    ctx.sql.execute(_SCHEMA_REVIEWS_DDL)
 
 
 @plugin.on_install
@@ -4202,14 +4246,42 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _render_mood(ctx, feeling, page=page, deferred=True)
         return
 
+    if cid.startswith("otaku:reviews:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        # otaku:reviews:<media_id>:<page>
+        parts = cid.split(":", 3)
+        if len(parts) < 4:
+            ctx.interaction.respond(content=S.REVIEWS_PAGE_MALFORMED, ephemeral=True)
+            return
+        _, _, mid_s, page_s = parts
+        try:
+            media_id = int(mid_s)
+            page = max(1, int(page_s))
+        except ValueError:
+            ctx.interaction.respond(content=S.REVIEWS_PAGE_MALFORMED, ephemeral=True)
+            return
+        ctx.interaction.defer()
+        _render_reviews(ctx, media_id, page=page, deferred=True)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
 @plugin.on_event("interaction_create")
 def _route_components(ctx: Context, event: dict) -> None:
-    if event.get("interaction_type") != 3:  # MESSAGE_COMPONENT
-        return
+    itype = event.get("interaction_type")
     cid = event.get("custom_id") or ""
+
+    # Modal submits (v7.0.0+) route through a separate dispatcher because they
+    # don't share the cooldown / defer dance of the component buttons.
+    if itype == 5:  # MODAL_SUBMIT
+        if cid.startswith("otaku:review-modal:"):
+            _handle_review_submit(ctx, event)
+        return
+
+    if itype != 3:  # MESSAGE_COMPONENT
+        return
     if cid == "otaku:expand":
         return  # handled by @plugin.on_component above
     if (
@@ -4223,6 +4295,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:wp-join:")
         or cid.startswith("otaku:premieres:")
         or cid.startswith("otaku:mood:")
+        or cid.startswith("otaku:reviews:")
     ):
         _component_dispatch(ctx, event)
 
@@ -4269,6 +4342,258 @@ def comp_expand(ctx: Context, event: dict) -> None:
     if site_url:
         buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
     ctx.interaction.followup(embeds=[embed], components=[ActionRow(*buttons)], ephemeral=True)
+
+
+# ── v7.0.0 — /review and /reviews (per-anime user reviews) ──────────────────
+#
+# /review opens a modal pre-filled with the caller's existing review (if any)
+# for their cached last_anime. /reviews paginates this server's reviews for a
+# given anime (lookup arg accepts a title OR numeric AniList ID; defaults to
+# the caller's cached last_anime). One review per user per anime — submitting
+# again upserts. The 3-second pre-modal Discord wall clock is why /review
+# doesn't accept a title arg: we'd need an AniList lookup before send_modal,
+# and that can't reliably finish in time. Users who want to review a specific
+# anime do `/anime query: <title>` first.
+
+REVIEW_TITLE_MAX = 100        # Discord short-input max
+REVIEW_BODY_MAX = 2000        # Discord paragraph practical max
+REVIEWS_PAGE_SIZE = 3         # reviews per /reviews page (each has title + body)
+
+
+def _get_review(ctx: Context, user_id: str, media_id: int) -> dict | None:
+    rows = ctx.sql.query(
+        "SELECT title, body, created_at, updated_at FROM otaku_reviews "
+        "WHERE user_id = $1 AND media_id = $2",
+        [user_id, media_id],
+    ) or []
+    return rows[0] if rows else None
+
+
+def _upsert_review(
+    ctx: Context, user_id: str, media_id: int, *, title: str, body: str
+) -> bool:
+    """Insert or update the review. Returns True if a new row was created,
+    False if an existing one was updated."""
+    existing = _get_review(ctx, user_id, media_id)
+    if existing is None:
+        ctx.sql.execute(
+            "INSERT INTO otaku_reviews (user_id, media_id, title, body) "
+            "VALUES ($1, $2, $3, $4)",
+            [user_id, media_id, title, body],
+        )
+        return True
+    ctx.sql.execute(
+        "UPDATE otaku_reviews SET title = $1, body = $2, updated_at = NOW() "
+        "WHERE user_id = $3 AND media_id = $4",
+        [title, body, user_id, media_id],
+    )
+    return False
+
+
+@plugin.on_slash_command("review")
+def cmd_review(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+
+    # Resolve via cached last_anime only. Discord's 3-second pre-modal wall
+    # clock makes an AniList title lookup unsafe before send_modal.
+    media_id = _resolve_last_anime_id(ctx, user_id)
+    if media_id is None:
+        ctx.interaction.respond(content=S.REVIEW_NO_CACHE, ephemeral=True)
+        return
+
+    # Cached fetch for the title — the cached path is in-process and instant.
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id}, cache=True)
+    if data is None or not data.get("Media"):
+        ctx.interaction.respond(content=S.REVIEW_NO_DATA, ephemeral=True)
+        return
+    title = _truncate(_format_title(data["Media"]), 40)
+
+    existing = _get_review(ctx, user_id, media_id)
+    title_value = (existing or {}).get("title") or ""
+    body_value = (existing or {}).get("body") or ""
+
+    ctx.interaction.send_modal(
+        title=_truncate(S.REVIEW_MODAL_TITLE.format(title=title), 45),
+        custom_id=f"otaku:review-modal:{media_id}",
+        fields=[
+            TextInput(
+                S.REVIEW_FIELD_TITLE,
+                "title",
+                style="short",
+                placeholder=S.REVIEW_PLACEHOLDER_TITLE,
+                value=title_value,
+                required=True,
+                max_length=REVIEW_TITLE_MAX,
+            ),
+            TextInput(
+                S.REVIEW_FIELD_BODY,
+                "body",
+                style="paragraph",
+                placeholder=S.REVIEW_PLACEHOLDER_BODY,
+                value=body_value,
+                required=True,
+                max_length=REVIEW_BODY_MAX,
+            ),
+        ],
+    )
+
+
+def _handle_review_submit(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    cid = event.get("custom_id") or ""
+    parts = cid.split(":", 2)
+    if len(parts) < 3:
+        ctx.interaction.respond(content=S.REVIEW_SUBMIT_MALFORMED, ephemeral=True)
+        return
+    try:
+        media_id = int(parts[2])
+    except ValueError:
+        ctx.interaction.respond(content=S.REVIEW_SUBMIT_MALFORMED, ephemeral=True)
+        return
+
+    values = event.get("modal_values") or {}
+    review_title = (values.get("title") or "").strip()
+    review_body = (values.get("body") or "").strip()
+    if not review_title or not review_body:
+        ctx.interaction.respond(content=S.REVIEW_SUBMIT_EMPTY, ephemeral=True)
+        return
+    # Cap defensively in case the client sneaks past max_length.
+    review_title = review_title[:REVIEW_TITLE_MAX]
+    review_body = review_body[:REVIEW_BODY_MAX]
+
+    is_new = _upsert_review(
+        ctx, user_id, media_id, title=review_title, body=review_body
+    )
+
+    # Resolve the display title (cached — instant on the happy path).
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id}, cache=True)
+    if data and data.get("Media"):
+        display_title = _format_title(data["Media"])
+    else:
+        display_title = f"anime #{media_id}"
+
+    msg = (S.REVIEW_SAVED_NEW if is_new else S.REVIEW_SAVED_EDIT).format(title=display_title)
+    ctx.interaction.respond(content=msg, ephemeral=True)
+
+
+def _select_reviews_page(
+    ctx: Context, media_id: int, page: int
+) -> tuple[list[dict], int]:
+    """Returns (rows_for_page, total_count). Rows sorted updated_at DESC."""
+    total_rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE media_id = $1",
+        [media_id],
+    ) or [{"n": 0}]
+    total = int((total_rows[0] or {}).get("n") or 0)
+    if total == 0:
+        return [], 0
+    offset = (page - 1) * REVIEWS_PAGE_SIZE
+    rows = ctx.sql.query(
+        "SELECT user_id, title, body, created_at, updated_at "
+        "FROM otaku_reviews WHERE media_id = $1 "
+        "ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
+        [media_id, REVIEWS_PAGE_SIZE, max(0, offset)],
+    ) or []
+    return rows, total
+
+
+def _render_reviews(
+    ctx: Context, media_id: int, page: int, *, deferred: bool, ephemeral_reply: bool = False
+) -> None:
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+    media = data.get("Media") or {}
+    display_title = _format_title(media) if media else f"anime #{media_id}"
+
+    rows, total = _select_reviews_page(ctx, media_id, page)
+    if total == 0:
+        _reply_error(
+            ctx, S.REVIEWS_EMPTY.format(title=display_title), deferred=deferred
+        )
+        return
+
+    total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+
+    fields = []
+    for r in rows:
+        author = r.get("user_id") or "?"
+        rev_title = _truncate(r.get("title") or "", REVIEW_TITLE_MAX)
+        rev_body = _truncate(r.get("body") or "", 1024)  # embed-field cap
+        fields.append({
+            "name": f"<@{author}> · {rev_title}",
+            "value": rev_body,
+            "inline": False,
+        })
+
+    embed = {
+        "title": S.REVIEWS_HEADER.format(title=display_title),
+        "color": ANILIST_COLOR,
+        "fields": fields,
+        "footer": {
+            "text": S.REVIEWS_FOOTER_PAGE.format(page=page, total=total_pages, n=total)
+        },
+    }
+    cover = (media.get("coverImage") or {}).get("large")
+    if cover:
+        embed["thumbnail"] = {"url": cover}
+
+    prev_id = f"otaku:reviews:{media_id}:{page - 1}" if page > 1 else None
+    next_id = f"otaku:reviews:{media_id}:{page + 1}" if page < total_pages else None
+    components = [_page_buttons(prev_id, next_id)]
+
+    if deferred:
+        ctx.interaction.followup(
+            embeds=[embed], components=components, ephemeral=ephemeral_reply
+        )
+    else:
+        ctx.interaction.respond(
+            embeds=[embed], components=components, ephemeral=ephemeral_reply
+        )
+
+
+@plugin.on_slash_command("reviews")
+def cmd_reviews(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    anime_arg = (opts.get("anime") or "").strip()
+
+    ctx.interaction.defer()
+
+    # Numeric arg → use directly. String arg → AniList search. No arg →
+    # cached last_anime fallback.
+    if anime_arg.isdigit():
+        media_id = int(anime_arg)
+    elif anime_arg:
+        data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": anime_arg.lower()}, cache=True)
+        if data is None:
+            _reply_anilist_failure(ctx, deferred=True)
+            return
+        media = data.get("Media")
+        if not media:
+            _reply_error(
+                ctx, S.ANIME_NOT_FOUND.format(query=_truncate(anime_arg, 80)),
+                deferred=True,
+            )
+            return
+        media_id = int(media.get("id") or 0)
+        if not media_id:
+            _reply_error(ctx, S.REVIEWS_USAGE, deferred=True)
+            return
+    else:
+        cached = _resolve_last_anime_id(ctx, user_id)
+        if cached is None:
+            _reply_error(ctx, S.REVIEWS_USAGE, deferred=True)
+            return
+        media_id = cached
+
+    _render_reviews(ctx, media_id, page=1, deferred=True)
 
 
 # ── v6.2.0 — /genre-trends (genre-trend recommendations) ────────────────────
