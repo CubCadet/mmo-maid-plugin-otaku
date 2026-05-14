@@ -32,3 +32,9 @@ def _clear_anilist_cache():
     _module._cache_clear()
     yield
     _module._cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch):
+    """Make the retry backoff sleep a no-op in tests — keeps the suite fast."""
+    monkeypatch.setattr(_module, "_sleep_for_retry", lambda _s: None)

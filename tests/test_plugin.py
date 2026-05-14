@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 import plugin_main as p
-from mmo_maid_sdk import RpcTimeoutError
+from mmo_maid_sdk import RateLimitError, RpcTimeoutError
 from mmo_maid_sdk.testing import MockContext, make_event
 
 
@@ -455,6 +455,86 @@ def test_character_handles_missing_description_gracefully():
     follow = ctx.interaction.followups[-1]
     embed = follow["embeds"][0]
     assert "no description" in embed["description"]
+
+
+# ── v1.2.0 retry + better errors ────────────────────────────────────────────
+
+def test_retry_recovers_after_first_timeout():
+    """One RpcTimeoutError, then success — caller should see the anime card."""
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    calls = {"n": 0}
+
+    real_post = ctx.http.post
+
+    def flaky_post(url, body="", headers=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RpcTimeoutError("first try times out")
+        return real_post(url, body=body, headers=headers)
+
+    ctx.http.post = flaky_post  # type: ignore[assignment]
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "your name"}, user_id="r1"))
+
+    assert calls["n"] >= 2, "expected at least one retry"
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("embeds"), "should have served the card on retry success"
+
+
+def test_retry_exhaustion_returns_friendly_error():
+    """Every attempt times out — user gets the action-suggesting error."""
+    ctx = MockContext()
+
+    calls = {"n": 0}
+
+    def always_timeout(*_args, **_kwargs):
+        calls["n"] += 1
+        raise RpcTimeoutError("nope")
+
+    ctx.http.post = always_timeout  # type: ignore[assignment]
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "x"}, user_id="r2"))
+
+    # 1 initial + 2 retries = 3 calls.
+    assert calls["n"] == 3
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    content = follow.get("content") or ""
+    assert "AniList" in content and ("try" in content.lower() or "again" in content.lower())
+
+
+def test_rate_limit_is_not_retried():
+    """RateLimitError should NOT trigger retry — back off per skill convention."""
+    ctx = MockContext()
+    calls = {"n": 0}
+
+    def rate_limited(*_args, **_kwargs):
+        calls["n"] += 1
+        raise RateLimitError("slow down")
+
+    ctx.http.post = rate_limited  # type: ignore[assignment]
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "x"}, user_id="r3"))
+
+    assert calls["n"] == 1, "rate-limit must not be retried"
+
+
+def test_user_fixable_anilist_error_is_surfaced():
+    """AniList's 'must contain at least 3 characters' should reach the user verbatim."""
+    ctx = MockContext()
+    ctx.http.mock_response(
+        "graphql.anilist.co",
+        status=200,
+        body=json.dumps({"errors": [{"message": "Query must contain at least 3 characters."}]}),
+    )
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "ab"}, user_id="r4"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "must contain at least 3 characters" in (follow.get("content") or "")
 
 
 # ── v1.0.2 caching ──────────────────────────────────────────────────────────

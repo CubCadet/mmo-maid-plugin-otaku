@@ -29,3 +29,10 @@ def _clear_anilist_cache():
     _plugin_cache_clear()
     yield
     _plugin_cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch):
+    """Stub out retry backoff sleeps for fast regression runs."""
+    import plugin_main
+    monkeypatch.setattr(plugin_main, "_sleep_for_retry", lambda _s: None)

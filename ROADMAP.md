@@ -324,28 +324,20 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 ---
 
-### v1.2.0 — Error UX polish + retry logic
+### v1.2.0 — Error UX polish + retry logic ✅ shipped 2026-05-14
 
 **Target:** Minor. Make failures feel intentional.
 
 **Tasks:**
-- Replace generic error strings with action-suggesting ones: "AniList didn't answer — try again, or use a different keyword."
-- Add automatic retry (up to 2 retries, exponential backoff at 0.5s and 1.5s) for `ctx.http.post` calls that raise `RpcTimeoutError` or get a 5xx status.
-- Surface AniList's GraphQL `errors[]` to the user when they're user-fixable (e.g., "Query must contain at least 3 characters") and silently log them otherwise.
+- ~~Replace generic error strings with action-suggesting ones~~
+- ~~Add automatic retry (up to 2 retries, exponential backoff at 0.5s and 1.5s)~~
+- ~~Surface AniList's GraphQL `errors[]` to the user when they're user-fixable~~
 
-**Regression check:** All v1.0.x and v1.1.x tests pass. Add new tests for retry behavior — mock the first call to raise `RpcTimeoutError`, the second to succeed.
+**Regression check:** ~~All v1.0.x and v1.1.x tests pass. Add new tests for retry behavior~~. Retry tests live in `tests/test_plugin.py`; existing regression files unchanged.
 
 **Failure modes:**
-- Retries during deferred interactions can blow past the 15-minute followup window for big payloads. Cap total retry budget at 4 seconds.
-- `RateLimitError` is **not retried** automatically — back off using `exc.retry_after` per the skill's convention.
-
-**Commits:**
-- `feat(http): 2-retry exponential backoff on transient AniList errors`
-- `feat(error): action-suggesting error messages`
-- `test(http): cover retry success path`
-- `test(http): cover retry exhaustion path`
-- `docs(changelog): v1.2.0 entry`
-- `chore(release): v1.2.0`
+- ~~Retries during deferred interactions can blow past the 15-minute followup window for big payloads. Cap total retry budget at 4 seconds.~~ Budget is ~2s (0.5 + 1.5).
+- ~~`RateLimitError` is **not retried** automatically.~~ Confirmed via test.
 
 ---
 

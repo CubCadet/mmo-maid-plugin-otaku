@@ -20,6 +20,22 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-14
+
+### Added
+- Automatic retry (up to 2 retries with 0.5s + 1.5s exponential backoff) for
+  AniList calls that raise `RpcTimeoutError` or return a 5xx status. Total
+  retry budget ~2 seconds, well under the 15-minute followup window.
+- User-fixable AniList GraphQL errors (e.g. "Query must contain at least 3
+  characters") are now surfaced verbatim to the user instead of the generic
+  fallback line.
+
+### Changed
+- All generic AniList failure messages now include actionable suggestions:
+  "try again in a moment, or try a different keyword."
+- `RateLimitError` is still **not** retried — the client backs off via the
+  next user request.
+
 ## [1.1.0] - 2026-05-14
 
 ### Added

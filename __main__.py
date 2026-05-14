@@ -23,6 +23,7 @@ from mmo_maid_sdk import (
     Context,
     Plugin,
     RateLimitError,
+    RpcTimeoutError,
     SelectMenu,
     SelectOption,
     ValidationError,
@@ -38,6 +39,20 @@ COOLDOWN_SECONDS = 2
 LAST_ANIME_TTL = 7 * 24 * 60 * 60  # 7 days
 ANILIST_CACHE_TTL = 5 * 60          # 5 minutes — short enough that fresh trends still update
 ANILIST_CACHE_MAX_ENTRIES = 128     # bounded; LRU-ish via insertion-order pop
+
+# Retry budget for AniList transient failures (RpcTimeoutError, 5xx).
+# Sleeps 0.5s then 1.5s — total worst case 2s, well under the 15-min followup
+# window. RateLimitError is never retried; ValidationError isn't retryable.
+ANILIST_RETRY_BACKOFFS_S = (0.5, 1.5)
+
+# Substrings that mean "the user can fix this" — surface these to them instead
+# of the generic "AniList didn't answer" line.
+_USER_FIXABLE_ANILIST_FRAGMENTS = (
+    "must contain at least",
+    "must be a string",
+    "field name",
+    "is not a valid",
+)
 SORT_MAP = {
     "popular": "POPULARITY_DESC",
     "trending": "TRENDING_DESC",
@@ -411,6 +426,72 @@ def _cache_put(key: str, data: dict) -> None:
     _CACHE[key] = (time.monotonic() + ANILIST_CACHE_TTL, data)
 
 
+# Module-level slot for the most recent user-fixable error from AniList.
+# Callers consume it via _consume_last_user_error() and surface it ephemerally.
+_LAST_USER_ERROR: str | None = None
+
+
+def _consume_last_user_error() -> str | None:
+    """Return and clear the most recent user-fixable AniList error, if any."""
+    global _LAST_USER_ERROR
+    msg = _LAST_USER_ERROR
+    _LAST_USER_ERROR = None
+    return msg
+
+
+def _classify_anilist_errors(errors: list) -> str | None:
+    """Return a user-fixable message if any error in the list looks user-facing."""
+    for err in errors:
+        msg = (err or {}).get("message") if isinstance(err, dict) else None
+        if not msg:
+            continue
+        lower = msg.lower()
+        if any(frag in lower for frag in _USER_FIXABLE_ANILIST_FRAGMENTS):
+            return msg
+    return None
+
+
+def _sleep_for_retry(seconds: float) -> None:
+    """Indirected so tests can patch out the real sleep."""
+    time.sleep(seconds)
+
+
+def _anilist_post_once(ctx: Context, body: str) -> tuple[dict | None, str]:
+    """One POST to AniList.
+
+    Returns (response, classification) where classification is one of:
+      - "ok"       : got a response dict (which may still be 4xx/5xx)
+      - "timeout"  : RpcTimeoutError raised — retryable
+      - "rate"     : RateLimitError raised — NOT retryable
+      - "validation": ValidationError raised — NOT retryable
+      - "error"    : other exception — NOT retryable
+    """
+    try:
+        resp = ctx.http.post(
+            ANILIST_URL,
+            body=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        return resp, "ok"
+    except RpcTimeoutError as exc:
+        ctx.log(f"anilist timed out: {exc}", level="warning", tags=["anilist", "http"])
+        return None, "timeout"
+    except RateLimitError as exc:
+        ctx.log(
+            "anilist rate limited",
+            level="warning",
+            tags=["anilist", "http"],
+            retry_after=getattr(exc, "retry_after", None),
+        )
+        return None, "rate"
+    except ValidationError as exc:
+        ctx.log(f"anilist validation error: {exc}", level="error", tags=["anilist", "http"])
+        return None, "validation"
+    except Exception as exc:  # noqa: BLE001 — last-resort guard around the proxy call
+        ctx.log(f"anilist call failed: {exc}", level="error", tags=["anilist", "http"])
+        return None, "error"
+
+
 def _anilist_query(
     ctx: Context,
     query: str,
@@ -424,7 +505,13 @@ def _anilist_query(
     between respond/followup depending on whether they've deferred). It does
     log the failure with ctx.log. When `cache=True`, responses are memoized for
     ANILIST_CACHE_TTL seconds in-process.
+
+    Transient failures (RpcTimeoutError, 5xx responses) are retried with the
+    backoffs in ANILIST_RETRY_BACKOFFS_S. RateLimitError is NEVER retried
+    automatically — the caller backs off via the next user request.
     """
+    global _LAST_USER_ERROR
+
     cache_key = _cache_key(query, variables) if cache else None
     if cache_key is not None:
         cached = _cache_get(cache_key)
@@ -432,48 +519,59 @@ def _anilist_query(
             return cached
 
     body = json.dumps({"query": query, "variables": variables})
-    try:
-        resp = ctx.http.post(
-            ANILIST_URL,
-            body=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-        )
-    except RateLimitError as exc:
-        ctx.log(
-            "anilist rate limited",
-            level="warning",
-            tags=["anilist", "http"],
-            retry_after=getattr(exc, "retry_after", None),
-        )
-        return None
-    except ValidationError as exc:
-        ctx.log(f"anilist validation error: {exc}", level="error", tags=["anilist", "http"])
-        return None
-    except Exception as exc:  # noqa: BLE001 — last-resort guard around the proxy call
-        ctx.log(f"anilist call failed: {exc}", level="error", tags=["anilist", "http"])
+
+    resp: dict | None = None
+    for attempt, backoff in enumerate((0.0, *ANILIST_RETRY_BACKOFFS_S)):
+        if attempt > 0:
+            _sleep_for_retry(backoff)
+        resp, classification = _anilist_post_once(ctx, body)
+        if classification == "timeout":
+            continue  # retry
+        if classification in ("rate", "validation", "error"):
+            return None  # never retry these
+        # classification == "ok"
+        status = resp.get("status") if resp else 0
+        if 500 <= int(status or 0) < 600:
+            ctx.log(
+                "anilist 5xx",
+                level="warning",
+                tags=["anilist", "http"],
+                status=str(status),
+            )
+            continue  # retry
+        break  # got a non-5xx response — stop retrying
+    else:
+        # Exhausted retries on transient failures.
         return None
 
-    if resp.get("status") != 200:
+    if resp is None or resp.get("status") != 200:
         ctx.log(
             "anilist non-200",
             level="warning",
             tags=["anilist", "http"],
-            status=str(resp.get("status")),
+            status=str(resp.get("status") if resp else None),
         )
         return None
+
     try:
         payload = json.loads(resp.get("body_bytes") or "")
     except (TypeError, ValueError):
         ctx.log("anilist returned unparseable JSON", level="error", tags=["anilist"])
         return None
+
     if payload.get("errors"):
+        errors = payload["errors"]
         ctx.log(
             "anilist returned errors",
             level="warning",
             tags=["anilist"],
-            errors=str(payload["errors"])[:400],
+            errors=str(errors)[:400],
         )
+        user_msg = _classify_anilist_errors(errors)
+        if user_msg:
+            _LAST_USER_ERROR = user_msg
         return None
+
     data = payload.get("data")
     if cache_key is not None and data is not None:
         try:
@@ -489,6 +587,21 @@ def _reply_error(ctx: Context, message: str, *, deferred: bool) -> None:
         ctx.interaction.followup(content=message, ephemeral=True)
     else:
         ctx.interaction.respond(content=message, ephemeral=True)
+
+
+def _reply_anilist_failure(ctx: Context, *, deferred: bool, fallback: str | None = None) -> None:
+    """Reply to the user after `_anilist_query` returned None.
+
+    If the failure was a user-fixable GraphQL error (e.g. "must contain at least
+    3 characters"), surface that message verbatim. Otherwise use `fallback`, or
+    a default action-suggesting line.
+    """
+    user_msg = _consume_last_user_error()
+    if user_msg:
+        _reply_error(ctx, f"AniList: {user_msg}", deferred=deferred)
+        return
+    default = fallback or "AniList didn't answer — try again in a moment, or try a different keyword."
+    _reply_error(ctx, default, deferred=deferred)
 
 
 # ── Shared rendering for list-style commands ─────────────────────────────────
@@ -510,7 +623,7 @@ def _render_discover(
         cache=(page == 1),
     )
     if data is None:
-        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=deferred)
+        _reply_anilist_failure(ctx, deferred=deferred)
         return
     page_obj = (data.get("Page") or {})
     media_list = page_obj.get("media") or []
@@ -546,7 +659,7 @@ def _render_trending(ctx: Context, page: int, *, deferred: bool, ephemeral_reply
         cache=(page == 1),
     )
     if data is None:
-        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=deferred)
+        _reply_anilist_failure(ctx, deferred=deferred)
         return
     page_obj = (data.get("Page") or {})
     media_list = page_obj.get("media") or []
@@ -611,7 +724,7 @@ def cmd_anime(ctx: Context, event: dict) -> None:
     # Normalize the search key so equivalent queries hit the same cache entry.
     data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": query.lower()}, cache=True)
     if data is None:
-        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
+        _reply_anilist_failure(ctx, deferred=True)
         return
     media = data.get("Media")
     if not media:
@@ -669,7 +782,7 @@ def cmd_similar(ctx: Context, event: dict) -> None:
         ctx.interaction.defer()
         data = _anilist_query(ctx, QUERY_SIMILAR_BY_NAME, {"q": query})
         if data is None:
-            _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
+            _reply_anilist_failure(ctx, deferred=True)
             return
         media = data.get("Media")
         if not media:
@@ -699,7 +812,11 @@ def cmd_similar(ctx: Context, event: dict) -> None:
         return
     data = _anilist_query(ctx, QUERY_SIMILAR_BY_ID, {"id": media_id})
     if data is None or not data.get("Media"):
-        _reply_error(ctx, "Couldn't fetch recommendations for your last anime.", deferred=True)
+        _reply_anilist_failure(
+            ctx,
+            deferred=True,
+            fallback="Couldn't fetch recommendations for your last anime — try `/anime query: <title>` to refresh it.",
+        )
         return
     _render_similar(ctx, data["Media"], deferred=True)
 
@@ -721,7 +838,7 @@ def cmd_random(ctx: Context, event: dict) -> None:
     ctx.interaction.defer()
     meta = _anilist_query(ctx, QUERY_RANDOM_META, {"genre": genre}, cache=True)
     if meta is None:
-        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
+        _reply_anilist_failure(ctx, deferred=True)
         return
 
     page_info = ((meta.get("Page") or {}).get("pageInfo")) or {}
@@ -771,7 +888,7 @@ def cmd_character(ctx: Context, event: dict) -> None:
     ctx.interaction.defer()
     data = _anilist_query(ctx, QUERY_CHARACTER, {"q": query.lower()}, cache=True)
     if data is None:
-        _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
+        _reply_anilist_failure(ctx, deferred=True)
         return
     char = data.get("Character")
     if not char:
@@ -838,7 +955,11 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         ctx.interaction.defer(ephemeral=True)
         data = _anilist_query(ctx, QUERY_SIMILAR_BY_ID, {"id": media_id})
         if data is None or not data.get("Media"):
-            _reply_error(ctx, "Couldn't fetch recommendations from AniList.", deferred=True)
+            _reply_anilist_failure(
+                ctx,
+                deferred=True,
+                fallback="Couldn't fetch recommendations from AniList — try again, or pick a different anime.",
+            )
             return
         if user_id:
             ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
@@ -884,7 +1005,11 @@ def comp_expand(ctx: Context, event: dict) -> None:
     ctx.interaction.defer(ephemeral=True)
     data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id})
     if data is None or not data.get("Media"):
-        _reply_error(ctx, "Couldn't fetch that anime from AniList.", deferred=True)
+        _reply_anilist_failure(
+            ctx,
+            deferred=True,
+            fallback="Couldn't fetch that anime from AniList — try searching again with `/anime`.",
+        )
         return
     media = data["Media"]
     if user_id:
