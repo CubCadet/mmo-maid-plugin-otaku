@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import plugin_main as p
+from mmo_maid_sdk import RpcTimeoutError
 from mmo_maid_sdk.testing import MockContext, make_event
 
 
@@ -299,3 +300,52 @@ def test_cooldown_blocks_rapid_repeat():
         "Slow down" in (r.get("content") or "") and r.get("ephemeral") is True
         for r in ctx.interaction.responses
     )
+
+
+# ── v1.0.1 hardening: error paths ───────────────────────────────────────────
+
+def test_anime_handles_rpc_timeout_with_ephemeral_followup():
+    """If AniList times out, the user sees an ephemeral error — not a hang."""
+    ctx = MockContext()
+
+    def _raise(*_args, **_kwargs):
+        raise RpcTimeoutError("simulated timeout")
+
+    ctx.http.post = _raise  # type: ignore[assignment]
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "anything"}, user_id="net1"))
+
+    assert ctx.interaction.defers, "should defer before the http call"
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "AniList" in (follow.get("content") or "")
+
+
+def test_anime_handles_malformed_response_with_errors_array():
+    """AniList sometimes returns {errors:[...]} with no data — surface ephemerally."""
+    ctx = MockContext()
+    ctx.http.mock_response(
+        "graphql.anilist.co",
+        status=200,
+        body=json.dumps({"errors": [{"message": "Query must contain at least 3 characters"}]}),
+    )
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "ab"}, user_id="net2"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert (follow.get("content") or "")  # non-empty error message
+
+
+def test_anime_embed_caps_genres_at_five():
+    """An anime with 8 genres should display only the first 5."""
+    many_genres = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    media = dict(SAMPLE_MEDIA)
+    media["genres"] = many_genres
+
+    embed = p._make_anime_embed(media)
+
+    genres_field = next(f for f in embed["fields"] if f["name"] == "Genres")
+    listed = [g.strip() for g in genres_field["value"].split(",")]
+    assert listed == many_genres[:5]
+    assert "F" not in genres_field["value"]
