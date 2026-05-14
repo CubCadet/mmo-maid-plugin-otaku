@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking"],
@@ -192,6 +192,10 @@
           "required": true
         }
       ]
+    },
+    {
+      "name": "otaku-reset",
+      "description": "Wipe ALL of your tracked anime data (favorites, ratings, progress, list). Asks for confirmation."
     },
     {
       "name": "stats",

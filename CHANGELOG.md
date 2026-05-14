@@ -20,6 +20,29 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-05-15
+
+### Added
+- `/otaku-reset` — self-service data deletion. Surfaces a confirm prompt
+  with a destructive-style "🗑 Yes, delete it all" button and a cancel
+  option. Custom_id encodes the original caller's id so a different user
+  clicking the button can't trigger the delete.
+- `/anime`, `/random`, and the expand-from-list select now show the
+  user's rating ("🎯 8.5/10") alongside the progress field when the user
+  has rated the anime.
+- New helper `_get_user_tracking(ctx, user_id, media_id)` returns
+  `(episodes, rating)` in a single SELECT; old `_get_user_progress` is
+  kept as a thin shim.
+
+### Note on roadmap deviation
+- v2.5.x in ROADMAP.md called for `/otaku-admin reset-user @user`
+  (server-admin-only moderation). The SDK's `interaction_create` event
+  doesn't carry caller permissions; gating to admins would require
+  `discord:read` plus a Discord API call, a meaningful capability bump
+  mid-phase. The self-service `/otaku-reset` ships the GDPR-friendly
+  half of that work; admin moderation is deferred to Phase 4 or later
+  when other Discord caps land.
+
 ## [2.4.0] - 2026-05-15
 
 ### Added

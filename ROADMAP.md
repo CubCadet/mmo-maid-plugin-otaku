@@ -490,9 +490,14 @@ ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT 
 
 ---
 
-### v2.5.x — Patch refinements
+### v2.5.0 — Patch refinements ✅ shipped 2026-05-15
 
-Polishing pass: better UX on `/list` pagination, status emoji in embeds, server-admin command `/otaku-admin reset-user @user` for moderation, performance tuning.
+Polishing pass:
+- ~~better UX on `/list` pagination~~ — pagination already polished in v2.0.0 (status emoji, prev/next, expand-select).
+- ~~status emoji in embeds~~ — already in v2.0.0.
+- ~~server-admin command `/otaku-admin reset-user @user` for moderation~~ — **deferred**. The SDK doesn't pass caller permissions through `interaction_create`, so gating to admins would require `discord:read` + a Discord API call — meaningful capability bump mid-phase. Shipped the GDPR-friendly half as **self-service** `/otaku-reset` instead; admin moderation comes back in Phase 4+ when other Discord caps land.
+- Added "Your rating" field to `/anime` / `/random` / expand-select cards.
+- New `_get_user_tracking` helper combines progress + rating into a single SELECT.
 
 ---
 

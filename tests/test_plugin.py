@@ -696,6 +696,77 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v2.5.0 /otaku-reset + rating-on-card ────────────────────────────────────
+
+
+def test_otaku_reset_shows_confirmation_prompt():
+    ctx = MockContext()
+    p.cmd_otaku_reset(ctx, _slash_event("otaku-reset", {}, user_id="reset1"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "delete" in (resp.get("content") or "").lower()
+    components = resp.get("components") or []
+    assert components, "expected confirm + cancel buttons"
+
+
+def test_otaku_reset_confirm_deletes_rows():
+    ctx = MockContext()
+    # Pretend the DELETE affected 3 rows by stubbing execute's return.
+    real_execute = ctx.sql.execute
+
+    def _exec(sql, params=None):  # noqa: ANN001
+        real_execute(sql, params)
+        return 3
+
+    ctx.sql.execute = _exec  # type: ignore[assignment]
+    event = _component_event("otaku:reset-confirm:reset2", user_id="reset2")
+    p._route_components(ctx, event)
+
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "3" in (resp.get("content") or "")
+    # DELETE was issued.
+    assert any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_otaku_reset_confirm_only_works_for_original_caller():
+    """A different user clicking another person's confirm button gets nothing destroyed."""
+    ctx = MockContext()
+    event = _component_event("otaku:reset-confirm:victim", user_id="attacker")
+    p._route_components(ctx, event)
+    # Got a "cancelled" response.
+    resp = ctx.interaction.responses[-1]
+    assert "Cancelled" in (resp.get("content") or "")
+    # No DELETE was issued.
+    assert not any("DELETE FROM otaku_user_anime" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_otaku_reset_cancel_button():
+    ctx = MockContext()
+    p._route_components(ctx, _component_event("otaku:reset-cancel:u", user_id="u"))
+    resp = ctx.interaction.responses[-1]
+    assert "Cancelled" in (resp.get("content") or "")
+
+
+def test_anime_card_shows_rating_when_user_has_rated():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    # The user has watched 5 episodes and rated 8.5.
+    ctx.sql.query_one = lambda sql, params=None: {  # type: ignore[assignment]
+        "episodes_watched": 5,
+        "rating": 17,
+    }
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "kimi"}, user_id="rate-card"))
+
+    fields = ctx.interaction.followups[-1]["embeds"][0]["fields"]
+    names = {f["name"] for f in fields}
+    assert "Your progress" in names
+    assert "Your rating" in names
+    rating_field = next(f for f in fields if f["name"] == "Your rating")
+    assert "8.5/10" in rating_field["value"]
+
+
 # ── v2.4.0 /import anilist ──────────────────────────────────────────────────
 
 

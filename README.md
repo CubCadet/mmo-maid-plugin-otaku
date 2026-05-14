@@ -44,6 +44,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/progress <episodes>` | Record episodes watched for the user's last `/anime` lookup. Caps at the anime's total; auto-promotes status to `completed` at total. |
 | `/stats [user]` | Aggregate per-user view: counts by status, episodes, est. hours (24min/ep heuristic), mean score, top genre. |
 | `/import anilist <username>` | Bulk-import an AniList user's list into your tracker. Streams 50 entries per page. Idempotent — re-imports update, don't duplicate. |
+| `/otaku-reset` | Self-service deletion of every tracked row for the caller on this server. Asks to confirm. |
 
 ### Politeness throttle
 

@@ -180,6 +180,21 @@ class _Strings:
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
 
+    # /otaku-reset.
+    RESET_CONFIRM_PROMPT = (
+        "⚠️ This will delete **all** of your otaku data on this server: favorites, "
+        "ratings, watch statuses, episode progress, everything tracked. "
+        "Your `/anime` lookups stay (those aren't stored). This **cannot be undone**."
+    )
+    RESET_CONFIRM_BUTTON = "Yes, delete it all"
+    RESET_CANCEL_BUTTON = "Cancel"
+    RESET_DONE = "Deleted **{rows}** tracked row(s). You're starting fresh on this server."
+    RESET_NOTHING = "You don't have any tracked anime on this server. Nothing to delete."
+    RESET_CANCELLED = "Cancelled — nothing was deleted."
+
+    # Rating-on-card.
+    RATING_FIELD_NAME = "Your rating"
+
     # /progress.
     PROGRESS_NO_CACHE = (
         "You haven't looked up an anime yet. Try `/anime query: <title>` first."
@@ -486,11 +501,18 @@ def _season_field(media: dict) -> str:
     return "—"
 
 
-def _make_anime_embed(media: dict, *, user_progress: int | None = None) -> dict:
+def _make_anime_embed(
+    media: dict,
+    *,
+    user_progress: int | None = None,
+    user_rating: int | None = None,
+) -> dict:
     """Full anime card — used by /anime and the expand-from-list select.
 
     If `user_progress` is a positive int, a "Your progress" field is appended
-    so users can see where they left off without running /list.
+    so users can see where they left off without running /list. If
+    `user_rating` is a SMALLINT (2..20), a "Your rating" field is shown
+    alongside.
     """
     title = _format_title(media)
     site_url = media.get("siteUrl") or None
@@ -520,7 +542,13 @@ def _make_anime_embed(media: dict, *, user_progress: int | None = None) -> dict:
             value = S.PROGRESS_FIELD_VALUE_BOUNDED.format(episodes=user_progress, total=total)
         else:
             value = S.PROGRESS_FIELD_VALUE_UNBOUNDED.format(episodes=user_progress)
-        embed["fields"].append({"name": S.PROGRESS_FIELD_NAME, "value": value, "inline": False})
+        embed["fields"].append({"name": S.PROGRESS_FIELD_NAME, "value": value, "inline": True})
+    if user_rating is not None and user_rating > 0:
+        embed["fields"].append({
+            "name": S.RATING_FIELD_NAME,
+            "value": f"🎯 {_format_rating(user_rating)}/10",
+            "inline": True,
+        })
     cover = (media.get("coverImage") or {}).get("large")
     if cover:
         embed["thumbnail"] = {"url": cover}
@@ -1067,8 +1095,8 @@ def cmd_anime(ctx: Context, event: dict) -> None:
     if media_id is not None and user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
 
-    progress = _get_user_progress(ctx, user_id, int(media_id or 0))
-    embed = _make_anime_embed(media, user_progress=progress)
+    progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0))
+    embed = _make_anime_embed(media, user_progress=progress, user_rating=rating)
     buttons = [Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁")]
     site_url = media.get("siteUrl")
     if site_url:
@@ -1194,8 +1222,8 @@ def cmd_random(ctx: Context, event: dict) -> None:
     if media_id is not None and user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
 
-    progress = _get_user_progress(ctx, user_id, int(media_id or 0))
-    embed = _make_anime_embed(media, user_progress=progress)
+    progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0))
+    embed = _make_anime_embed(media, user_progress=progress, user_rating=rating)
     if genre:
         embed["title"] = f"🎲 {embed['title']}"
     buttons = [Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁")]
@@ -1624,6 +1652,45 @@ def cmd_list(ctx: Context, event: dict) -> None:
     )
 
 
+# ── v2.5.0 — /otaku-reset (self-service data deletion) ──────────────────────
+
+@plugin.on_slash_command("otaku-reset")
+def cmd_otaku_reset(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    # Show the confirm prompt right away — no defer needed.
+    components = [ActionRow(
+        Button(S.RESET_CONFIRM_BUTTON, custom_id=f"otaku:reset-confirm:{user_id}", style="danger", emoji="🗑"),
+        Button(S.RESET_CANCEL_BUTTON, custom_id=f"otaku:reset-cancel:{user_id}", style="secondary"),
+    )]
+    ctx.interaction.respond(content=S.RESET_CONFIRM_PROMPT, components=components, ephemeral=True)
+
+
+def _handle_reset_confirm(ctx: Context, event: dict) -> None:
+    cid = event.get("custom_id") or ""
+    caller_id = event.get("user_id") or ""
+    # custom_id encodes the original caller — make sure only they can confirm.
+    target_user = cid.split(":", 2)[2] if cid.count(":") >= 2 else ""
+    if target_user != caller_id:
+        ctx.interaction.respond(content=S.RESET_CANCELLED, ephemeral=True)
+        return
+    rows_affected = ctx.sql.execute(
+        "DELETE FROM otaku_user_anime WHERE user_id = $1",
+        [caller_id],
+    )
+    if rows_affected and isinstance(rows_affected, int) and rows_affected > 0:
+        ctx.interaction.respond(content=S.RESET_DONE.format(rows=rows_affected), ephemeral=True)
+    else:
+        # MockSql returns 0; treat any non-positive as "nothing to delete." Prod
+        # returns the actual row count, but tests should still see a clean reply.
+        ctx.interaction.respond(content=S.RESET_NOTHING, ephemeral=True)
+
+
+def _handle_reset_cancel(ctx: Context, event: dict) -> None:
+    ctx.interaction.respond(content=S.RESET_CANCELLED, ephemeral=True)
+
+
 # ── v2.4.0 — /import anilist ────────────────────────────────────────────────
 
 # AniList MediaList.status → our status column.
@@ -1884,21 +1951,37 @@ def cmd_stats(ctx: Context, event: dict) -> None:
 
 # ── v2.2.0 — episode progress ───────────────────────────────────────────────
 
-def _get_user_progress(ctx: Context, user_id: str, media_id: int) -> int:
-    """Look up the user's recorded episodes_watched for a media id. 0 if no row."""
+def _get_user_tracking(ctx: Context, user_id: str, media_id: int) -> tuple[int, int | None]:
+    """Look up the user's recorded (episodes_watched, rating) for a media id.
+
+    Returns (0, None) when there's no row. `rating` is the SMALLINT (2..20)
+    that v2.1 stored, or None if unrated.
+    """
     if not user_id or not media_id:
-        return 0
+        return 0, None
     row = ctx.sql.query_one(
-        "SELECT episodes_watched FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
+        "SELECT episodes_watched, rating FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
         [user_id, media_id],
     )
     if not row:
-        return 0
-    val = row.get("episodes_watched") or 0
+        return 0, None
     try:
-        return max(0, int(val))
+        progress = max(0, int(row.get("episodes_watched") or 0))
     except (TypeError, ValueError):
-        return 0
+        progress = 0
+    raw_rating = row.get("rating")
+    rating: int | None
+    try:
+        rating = int(raw_rating) if raw_rating is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    return progress, rating
+
+
+def _get_user_progress(ctx: Context, user_id: str, media_id: int) -> int:
+    """Back-compat shim for v2.2 callers — returns only the progress component."""
+    progress, _ = _get_user_tracking(ctx, user_id, media_id)
+    return progress
 
 
 @plugin.on_slash_command("progress")
@@ -2156,6 +2239,14 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         )
         return
 
+    if cid.startswith("otaku:reset-confirm:"):
+        _handle_reset_confirm(ctx, event)
+        return
+
+    if cid.startswith("otaku:reset-cancel:"):
+        _handle_reset_cancel(ctx, event)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -2171,6 +2262,8 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:trend:")
         or cid.startswith("otaku:similar:")
         or cid.startswith("otaku:list:")
+        or cid.startswith("otaku:reset-confirm:")
+        or cid.startswith("otaku:reset-cancel:")
     ):
         _component_dispatch(ctx, event)
 
@@ -2210,8 +2303,8 @@ def comp_expand(ctx: Context, event: dict) -> None:
     if user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media.get("id"), ttl_seconds=LAST_ANIME_TTL)
 
-    progress = _get_user_progress(ctx, user_id, int(media.get("id") or 0))
-    embed = _make_anime_embed(media, user_progress=progress)
+    progress, rating = _get_user_tracking(ctx, user_id, int(media.get("id") or 0))
+    embed = _make_anime_embed(media, user_progress=progress, user_rating=rating)
     buttons = [Button("Similar", custom_id=f"otaku:similar:{media.get('id')}", style="primary", emoji="🔁")]
     site_url = media.get("siteUrl")
     if site_url:
