@@ -1,0 +1,9 @@
+{
+  "id": "otaku",
+  "name": "My Plugin",
+  "version": "0.1.0",
+  "description": "A new MMO Maid plugin.",
+  "capabilities_required": [
+    "discord:send_message"
+  ]
+}

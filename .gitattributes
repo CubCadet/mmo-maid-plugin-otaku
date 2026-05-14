@@ -1,0 +1,25 @@
+# Normalize line endings on commit; check out with native EOL.
+* text=auto eol=lf
+
+# Explicit binary files (don't try to diff)
+*.whl    binary
+*.zip    binary
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.ico    binary
+*.woff   binary
+*.woff2  binary
+
+# Keep `git archive` output (.tar.gz attached to GitHub releases) lean.
+# NOTE: this does NOT affect the upload zip — that's built by scripts/build_release.py
+# from a runtime-only allowlist, independent of these markers.
+tests/                  export-ignore
+.github/                export-ignore
+.gitignore              export-ignore
+.gitattributes          export-ignore
+.pre-commit-config.yaml export-ignore
+Makefile                export-ignore
+CHANGELOG.md            export-ignore
+requirements-dev.txt    export-ignore
+scripts/                export-ignore
