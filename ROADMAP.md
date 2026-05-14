@@ -479,14 +479,14 @@ ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT 
 
 ---
 
-### v2.4.0 — Bulk import from AniList
+### v2.4.0 — Bulk import from AniList ✅ shipped 2026-05-15
 
 **New slash command:**
-- `/import anilist <username>` — Pulls an existing AniList list for a user and seeds the local DB. Idempotent — re-imports update statuses but don't duplicate.
+- ~~`/import anilist <username>` — Pulls an existing AniList list for a user and seeds the local DB. Idempotent — re-imports update statuses but don't duplicate.~~ Status, episodes_watched, rating updated; is_favorite preserved.
 
-**Capability:** No new capabilities; uses existing `proxy:http`.
+**Capability:** ~~No new capabilities; uses existing `proxy:http`.~~ Confirmed.
 
-**Failure modes:** AniList lists can be huge (1000+). Stream in pages of 50; abort cleanly if the response is malformed mid-stream.
+**Failure modes:** ~~AniList lists can be huge (1000+). Stream in pages of 50; abort cleanly if the response is malformed mid-stream.~~ Capped at 100 pages (5000 anime); partial imports tell the user which page failed.
 
 ---
 

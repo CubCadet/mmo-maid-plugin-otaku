@@ -20,6 +20,20 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-05-15
+
+### Added
+- `/import anilist <username>` — bulk-imports an AniList user's anime list
+  into the caller's tracker. Streams 50 entries per page; aborts cleanly
+  if a page comes back malformed mid-stream and tells the user how many
+  rows landed. Hard cap at 100 pages (5000 anime).
+- AniList status mapping (`CURRENT/REPEATING → watching`, `COMPLETED →
+  completed`, etc.) and `score(format: POINT_10)` → our SMALLINT rating
+  via score × 2.
+- Re-imports update `status`, `episodes_watched`, and `rating` only; the
+  `is_favorite` flag is preserved (AniList doesn't model it the same way).
+- Regression file `tests/regression/test_v2_4_0.py`.
+
 ## [2.3.0] - 2026-05-15
 
 ### Added

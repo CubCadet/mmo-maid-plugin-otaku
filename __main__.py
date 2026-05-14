@@ -194,6 +194,21 @@ class _Strings:
     PROGRESS_FIELD_VALUE_UNBOUNDED = "Episode {episodes}"
     PROGRESS_FIELD_VALUE_BOUNDED = "Episode {episodes} / {total}"
 
+    # /import.
+    IMPORT_USERNAME_BLANK = "Pass an AniList username with `anilist:` — e.g. `/import anilist: yourname`."
+    IMPORT_USER_NOT_FOUND = (
+        "AniList didn't find a user named **{username}** — double-check spelling and "
+        "make sure their list is public."
+    )
+    IMPORT_SUMMARY = (
+        "Imported **{total}** anime from AniList user **{username}**: "
+        "{new} new, {updated} updated."
+    )
+    IMPORT_PARTIAL = (
+        "Import stopped after page {pages} due to a malformed response. "
+        "Got {total} so far — try again to pick up the rest."
+    )
+
     # /stats.
     STATS_HEADER_OWN = "📊 Your anime stats"
     STATS_HEADER_OTHER = "📊 {who}'s anime stats"
@@ -363,6 +378,19 @@ QUERY_MEDIA_BATCH = (
     "query ($ids: [Int]) {"
     "  Page(perPage: 50) {"
     "    media(id_in: $ids, type: ANIME) {" + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
+
+# v2.4.0 — paginated user-list import.
+QUERY_USER_MEDIALIST_PAGE = (
+    "query ($userName: String, $page: Int) {"
+    "  Page(page: $page, perPage: 50) {"
+    "    pageInfo { hasNextPage currentPage }"
+    "    mediaList(userName: $userName, type: ANIME) {"
+    "      status progress score(format: POINT_10)"
+    "      media { id }"
+    "    }"
     "  }"
     "}"
 )
@@ -1593,6 +1621,142 @@ def cmd_list(ctx: Context, event: dict) -> None:
         scope=status,
         page=1,
         deferred=True,
+    )
+
+
+# ── v2.4.0 — /import anilist ────────────────────────────────────────────────
+
+# AniList MediaList.status → our status column.
+ANILIST_STATUS_MAP = {
+    "CURRENT":   "watching",
+    "REPEATING": "watching",
+    "COMPLETED": "completed",
+    "PAUSED":    "on_hold",
+    "DROPPED":   "dropped",
+    "PLANNING":  "plan",
+}
+
+# Cap the number of pages we'll pull from AniList in a single /import call.
+# At 50 entries per page, 100 pages = 5000 anime — well past anyone's actual list.
+IMPORT_MAX_PAGES = 100
+
+
+def _row_from_medialist(entry: dict) -> tuple[int, str, int, int | None] | None:
+    """Convert one AniList MediaList entry to our row tuple, or None if it's garbage.
+
+    Returns (media_id, status, episodes_watched, rating_or_none) where rating is the
+    encoded SMALLINT (2..20) or None if unrated.
+    """
+    media = entry.get("media") or {}
+    media_id = media.get("id")
+    if not isinstance(media_id, int) or media_id <= 0:
+        return None
+    raw_status = entry.get("status") or "CURRENT"
+    status = ANILIST_STATUS_MAP.get(str(raw_status).upper(), "watching")
+    progress = entry.get("progress")
+    try:
+        episodes = max(0, int(progress or 0))
+    except (TypeError, ValueError):
+        episodes = 0
+    score = entry.get("score")
+    rating: int | None = None
+    if score is not None:
+        try:
+            s = float(score)
+        except (TypeError, ValueError):
+            s = 0.0
+        if s > 0:
+            rating = max(2, min(20, int(round(s * 2))))
+    return (media_id, status, episodes, rating)
+
+
+@plugin.on_slash_command("import")
+def cmd_import(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    username = (opts.get("anilist") or "").strip()
+    if not username:
+        ctx.interaction.respond(content=S.IMPORT_USERNAME_BLANK, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+
+    total = 0
+    new_count = 0
+    updated = 0
+    pages_pulled = 0
+    aborted = False
+    user_found = True
+
+    for page in range(1, IMPORT_MAX_PAGES + 1):
+        data = _anilist_query(
+            ctx, QUERY_USER_MEDIALIST_PAGE, {"userName": username, "page": page}
+        )
+        if data is None:
+            # First page: surface as "user not found" since the typical 4xx path
+            # for this query is "no such user". Subsequent pages: partial.
+            if page == 1:
+                user_found = False
+            else:
+                aborted = True
+            break
+
+        page_obj = data.get("Page") or {}
+        entries = page_obj.get("mediaList") or []
+        if not entries and page == 1:
+            user_found = False
+            break
+
+        pages_pulled = page
+        for entry in entries:
+            row = _row_from_medialist(entry)
+            if row is None:
+                continue
+            media_id, status, episodes, rating = row
+
+            # Check whether the row already exists so we can report new vs updated.
+            existing = ctx.sql.query_one(
+                "SELECT 1 FROM otaku_user_anime WHERE user_id = $1 AND media_id = $2",
+                [user_id, media_id],
+            )
+
+            # We only touch the columns the import provides. is_favorite is left alone.
+            ctx.sql.execute(
+                "INSERT INTO otaku_user_anime (user_id, media_id, status, episodes_watched, rating) "
+                "VALUES ($1, $2, $3, $4, $5) "
+                "ON CONFLICT (user_id, media_id) DO UPDATE SET "
+                "  status = EXCLUDED.status, "
+                "  episodes_watched = EXCLUDED.episodes_watched, "
+                "  rating = COALESCE(EXCLUDED.rating, otaku_user_anime.rating)",
+                [user_id, media_id, status, episodes, rating],
+            )
+            total += 1
+            if existing:
+                updated += 1
+            else:
+                new_count += 1
+
+        if not (page_obj.get("pageInfo") or {}).get("hasNextPage"):
+            break
+
+    if not user_found:
+        _reply_error(ctx, S.IMPORT_USER_NOT_FOUND.format(username=username), deferred=True)
+        return
+
+    if aborted:
+        ctx.interaction.followup(
+            content=S.IMPORT_PARTIAL.format(pages=pages_pulled, total=total),
+            ephemeral=True,
+        )
+        return
+
+    ctx.interaction.followup(
+        content=S.IMPORT_SUMMARY.format(
+            username=username, total=total, new=new_count, updated=updated
+        ),
+        ephemeral=True,
     )
 
 

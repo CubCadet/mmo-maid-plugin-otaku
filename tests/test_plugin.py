@@ -696,6 +696,102 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v2.4.0 /import anilist ──────────────────────────────────────────────────
+
+
+def test_import_blank_username_rejected():
+    ctx = MockContext()
+    p.cmd_import(ctx, _slash_event("import", {"anilist": ""}, user_id="imp-blank"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+
+
+def test_import_streams_pages_until_no_next_and_summarizes():
+    ctx = MockContext()
+    # Two paginated responses, served by sequentially-popped queue.
+    responses = [
+        json.dumps({"data": {"Page": {
+            "pageInfo": {"hasNextPage": True, "currentPage": 1},
+            "mediaList": [
+                {"status": "CURRENT", "progress": 3, "score": 8.5, "media": {"id": 10}},
+                {"status": "COMPLETED", "progress": 12, "score": 9, "media": {"id": 11}},
+            ],
+        }}}),
+        json.dumps({"data": {"Page": {
+            "pageInfo": {"hasNextPage": False, "currentPage": 2},
+            "mediaList": [
+                {"status": "PLANNING", "progress": 0, "score": 0, "media": {"id": 12}},
+            ],
+        }}}),
+    ]
+
+    def _post(url, body="", headers=None):  # noqa: ANN001
+        return {"status": 200, "body_bytes": responses.pop(0), "headers": {}, "truncated": False}
+
+    ctx.http.post = _post  # type: ignore[assignment]
+    # All inserts treated as "new" — query_one always returns None.
+
+    p.cmd_import(ctx, _slash_event("import", {"anilist": "kace"}, user_id="imp1"))
+
+    follow = ctx.interaction.followups[-1]
+    msg = follow.get("content") or ""
+    assert "Imported **3** anime" in msg
+    assert "3 new, 0 updated" in msg
+    # Three INSERTs.
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert len(inserts) == 3
+    # First row mapped CURRENT → watching, score 8.5 → 17.
+    assert inserts[0]["params"][2] == "watching"
+    assert inserts[0]["params"][4] == 17
+
+
+def test_import_unknown_user_replies_with_user_not_found():
+    ctx = MockContext()
+    # AniList typically returns a 404 or empty mediaList for an unknown name.
+    ctx.http.mock_response("graphql.anilist.co", status=404, body="not found")
+
+    p.cmd_import(ctx, _slash_event("import", {"anilist": "ghost"}, user_id="imp-ghost"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "didn't find" in (follow.get("content") or "")
+
+
+def test_import_skips_malformed_entries_in_a_page():
+    ctx = MockContext()
+    ctx.http.mock_response("graphql.anilist.co", status=200, body=json.dumps({"data": {"Page": {
+        "pageInfo": {"hasNextPage": False, "currentPage": 1},
+        "mediaList": [
+            {"status": "CURRENT", "progress": 1, "score": 0, "media": {"id": 5}},
+            {"status": "CURRENT", "progress": 1, "score": 0, "media": {}},  # missing id
+            {"status": "CURRENT", "progress": 1, "score": 0, "media": {"id": "abc"}},  # bad id
+        ],
+    }}}))
+
+    p.cmd_import(ctx, _slash_event("import", {"anilist": "kace"}, user_id="imp-skip"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    # Only the one valid row.
+    assert len(inserts) == 1
+    assert inserts[0]["params"][1] == 5
+
+
+def test_import_idempotency_marks_existing_as_updated():
+    ctx = MockContext()
+    ctx.http.mock_response("graphql.anilist.co", status=200, body=json.dumps({"data": {"Page": {
+        "pageInfo": {"hasNextPage": False, "currentPage": 1},
+        "mediaList": [
+            {"status": "COMPLETED", "progress": 12, "score": 9, "media": {"id": 7}},
+        ],
+    }}}))
+    # Pretend the row already exists.
+    ctx.sql.query_one = lambda sql, params=None: {"1": 1}  # type: ignore[assignment]
+
+    p.cmd_import(ctx, _slash_event("import", {"anilist": "kace"}, user_id="imp-dup"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "0 new, 1 updated" in (follow.get("content") or "")
+
+
 # ── v2.3.0 /stats ───────────────────────────────────────────────────────────
 
 
