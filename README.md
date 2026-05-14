@@ -71,6 +71,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/notify-list` | Show your active subscriptions with the next-episode ETA. |
 | `/otaku-admin set-channel <#channel>` | Admin-only. Sets where airing pings post. Omit the channel to clear. |
 | `/season-premieres [season] [year]` | Paginated browse of upcoming anime premieres. Defaults to next season. |
+| `/my-stats` | Richer personal view than `/stats` — top rated, top favorites, recently completed, with completion percentage. |
 
 ### Politeness throttle
 

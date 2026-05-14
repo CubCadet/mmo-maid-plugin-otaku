@@ -622,9 +622,9 @@ Originally "server announcement channel." Shipped as part of v4.0.0 above.
 
 ---
 
-### v5.1.0 — Personal stats page
+### v5.1.0 — Personal stats page ✅ shipped 2026-05-15
 
-Each user can view their own stats page via a `/my-stats` slash command that produces a richer embed than `/stats`.
+~~Each user can view their own stats page via a `/my-stats` slash command that produces a richer embed than `/stats`.~~ Adds three list sections (top rated, top favorites, recently completed) plus a completion-percentage hint. One AniList batch HTTP call resolves titles for everything that lands in the embed.
 
 ---
 

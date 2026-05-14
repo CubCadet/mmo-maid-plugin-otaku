@@ -20,6 +20,19 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-15
+
+### Added
+- `/my-stats` — richer self-view than `/stats`. Adds three list sections
+  on top of the aggregate fields:
+  - **Top rated** (your 5 highest-scored anime, with rating shown)
+  - **Top favorites** (your 5 most-recent favorites)
+  - **Recently completed** (your 5 most-recent completions)
+- Completion percentage now displayed alongside the completed count.
+- One AniList batch HTTP call resolves titles for everything that lands
+  in the embed (cached via the existing 5-min cache).
+- Regression file `tests/regression/test_v5_1_0.py`.
+
 ## [5.0.0] - 2026-05-15
 
 ### Added

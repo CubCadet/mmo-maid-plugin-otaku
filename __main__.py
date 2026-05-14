@@ -378,6 +378,14 @@ class _Strings:
         "Got {total} so far — try again to pick up the rest."
     )
 
+    # /my-stats.
+    MY_STATS_HEADER = "📊 Your full otaku report"
+    MY_STATS_EMPTY = (
+        "You haven't tracked any anime yet. Try `/favorite`, `/watch`, or "
+        "`/progress` after a `/anime` lookup."
+    )
+    MY_STATS_NONE = "*(none yet)*"
+
     # /stats.
     STATS_HEADER_OWN = "📊 Your anime stats"
     STATS_HEADER_OTHER = "📊 {who}'s anime stats"
@@ -3492,6 +3500,139 @@ def cmd_import(ctx: Context, event: dict) -> None:
         ),
         ephemeral=True,
     )
+
+
+# ── v5.1.0 — /my-stats (richer self-view) ───────────────────────────────────
+
+MY_STATS_TOP_RATED_LIMIT = 5
+MY_STATS_TOP_FAVORITES_LIMIT = 5
+MY_STATS_RECENT_COMPLETED_LIMIT = 5
+
+
+def _my_stats_top_rated(ctx: Context, user_id: str) -> list[dict]:
+    return ctx.sql.query(
+        "SELECT media_id, rating FROM otaku_user_anime "
+        "WHERE user_id = $1 AND rating IS NOT NULL "
+        "ORDER BY rating DESC, added_at DESC LIMIT $2",
+        [user_id, MY_STATS_TOP_RATED_LIMIT],
+    ) or []
+
+
+def _my_stats_top_favorites(ctx: Context, user_id: str) -> list[dict]:
+    return ctx.sql.query(
+        "SELECT media_id FROM otaku_user_anime "
+        "WHERE user_id = $1 AND is_favorite = TRUE "
+        "ORDER BY added_at DESC LIMIT $2",
+        [user_id, MY_STATS_TOP_FAVORITES_LIMIT],
+    ) or []
+
+
+def _my_stats_recently_completed(ctx: Context, user_id: str) -> list[dict]:
+    return ctx.sql.query(
+        "SELECT media_id FROM otaku_user_anime "
+        "WHERE user_id = $1 AND status = 'completed' "
+        "ORDER BY added_at DESC LIMIT $2",
+        [user_id, MY_STATS_RECENT_COMPLETED_LIMIT],
+    ) or []
+
+
+def _format_titled_lines(
+    media_ids: list[int],
+    media_by_id: dict[int, dict],
+    suffixes: dict[int, str] | None = None,
+) -> str:
+    """Bulleted list of titles. Optional per-id suffix (e.g. rating string)."""
+    if not media_ids:
+        return S.MY_STATS_NONE
+    lines = []
+    for mid in media_ids:
+        m = media_by_id.get(int(mid))
+        title = _format_title(m) if m else f"#{mid}"
+        url = (m or {}).get("siteUrl") or ""
+        anchor = f"[{title}]({url})" if url else title
+        suffix = (suffixes or {}).get(int(mid), "")
+        lines.append(f"• {anchor}{(' ' + suffix) if suffix else ''}")
+    return "\n".join(lines)
+
+
+@plugin.on_slash_command("my-stats")
+def cmd_my_stats(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    ctx.interaction.defer(ephemeral=True)
+
+    agg = _aggregate_user_stats(ctx, user_id)
+    if not agg:
+        _reply_error(ctx, S.MY_STATS_EMPTY, deferred=True)
+        return
+
+    top_rated = _my_stats_top_rated(ctx, user_id)
+    top_favs = _my_stats_top_favorites(ctx, user_id)
+    recent_done = _my_stats_recently_completed(ctx, user_id)
+
+    # Collect every media_id we need a title for, then ONE AniList batch call.
+    title_ids: set[int] = set()
+    title_ids.update(int(r["media_id"]) for r in top_rated)
+    title_ids.update(int(r["media_id"]) for r in top_favs)
+    title_ids.update(int(r["media_id"]) for r in recent_done)
+
+    media_by_id: dict[int, dict] = {}
+    if title_ids:
+        data = _anilist_query(
+            ctx, QUERY_MEDIA_BATCH, {"ids": sorted(title_ids)}, cache=True
+        )
+        if data:
+            for m in ((data.get("Page") or {}).get("media") or []):
+                mid = m.get("id")
+                if isinstance(mid, int):
+                    media_by_id[mid] = m
+
+    top_rated_ids = [int(r["media_id"]) for r in top_rated]
+    rating_suffix = {int(r["media_id"]): f"· 🎯 {_format_rating(int(r['rating']))}/10" for r in top_rated}
+    fav_ids = [int(r["media_id"]) for r in top_favs]
+    done_ids = [int(r["media_id"]) for r in recent_done]
+
+    by_status = agg["by_status"]
+    completion_pct = (by_status.get("completed", 0) / agg["total"] * 100) if agg["total"] else 0
+    fields = [
+        {"name": "Total tracked", "value": f"{agg['total']:,}", "inline": True},
+        {"name": "✅ Completed", "value": f"{by_status.get('completed', 0)} ({completion_pct:.0f}%)", "inline": True},
+        {"name": "📺 Watching", "value": str(by_status.get("watching", 0)), "inline": True},
+        {"name": "Episodes", "value": f"{agg['total_episodes']:,}", "inline": True},
+        {"name": "Est. hours", "value": f"{agg['total_hours']:.1f}", "inline": True},
+        {
+            "name": "Mean score",
+            "value": (
+                f"{agg['mean_rating'] / 2:.1f}/10 ({agg['rated_count']})"
+                if agg["mean_rating"] is not None else "—"
+            ),
+            "inline": True,
+        },
+        {
+            "name": "🎯 Top rated",
+            "value": _format_titled_lines(top_rated_ids, media_by_id, rating_suffix),
+            "inline": False,
+        },
+        {
+            "name": "⭐ Top favorites",
+            "value": _format_titled_lines(fav_ids, media_by_id),
+            "inline": False,
+        },
+        {
+            "name": "✅ Recently completed",
+            "value": _format_titled_lines(done_ids, media_by_id),
+            "inline": False,
+        },
+    ]
+
+    embed = {
+        "title": S.MY_STATS_HEADER,
+        "color": ANILIST_COLOR,
+        "fields": fields,
+        "footer": {"text": f"{STATS_MINUTES_PER_EPISODE}min/episode heuristic · Data from AniList"},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
 # ── v2.3.0 — /stats ─────────────────────────────────────────────────────────

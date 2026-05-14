@@ -696,6 +696,96 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v5.1.0 /my-stats ────────────────────────────────────────────────────────
+
+
+def test_my_stats_empty_user_replies_empty_state():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    p.cmd_my_stats(ctx, _slash_event("my-stats", {}, user_id="ms-empty"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "haven't" in (follow.get("content") or "")
+
+
+def test_my_stats_renders_fields_with_titled_lists():
+    ctx = MockContext()
+    # Stub each of the 4 SQL queries by inspecting the SQL.
+    def _q(sql, params=None):  # noqa: ANN001
+        if "GROUP BY status" in sql:
+            return [
+                {"status": "completed", "count": 4, "episodes": 48, "mean_rating": 16.0},
+                {"status": "watching",  "count": 1, "episodes": 2,  "mean_rating": None},
+            ]
+        if "rating IS NOT NULL" in sql:
+            return [
+                {"media_id": 10, "rating": 18},
+                {"media_id": 11, "rating": 14},
+            ]
+        if "is_favorite = TRUE" in sql:
+            return [{"media_id": 20}]
+        if "status = 'completed'" in sql:
+            return [{"media_id": 30}, {"media_id": 31}]
+        return []
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [
+        _make_other(10, "Top1"), _make_other(11, "Top2"),
+        _make_other(20, "Fav1"),
+        _make_other(30, "Done1"), _make_other(31, "Done2"),
+    ]}})
+
+    p.cmd_my_stats(ctx, _slash_event("my-stats", {}, user_id="ms-1"))
+
+    follow = ctx.interaction.followups[-1]
+    embed = follow["embeds"][0]
+    field_names = {f["name"] for f in embed["fields"]}
+    assert "🎯 Top rated" in field_names
+    assert "⭐ Top favorites" in field_names
+    assert "✅ Recently completed" in field_names
+    top_rated_field = next(f for f in embed["fields"] if f["name"] == "🎯 Top rated")
+    # The 9.0 rating (18 stored / 2) should appear next to Top1.
+    assert "Top1" in top_rated_field["value"]
+    assert "9.0" in top_rated_field["value"]
+
+
+def test_my_stats_completion_percentage_shown():
+    ctx = MockContext()
+
+    def _q(sql, params=None):  # noqa: ANN001
+        if "GROUP BY status" in sql:
+            return [
+                {"status": "completed", "count": 3, "episodes": 0, "mean_rating": None},
+                {"status": "watching",  "count": 1, "episodes": 0, "mean_rating": None},
+            ]
+        return []
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": []}})
+
+    p.cmd_my_stats(ctx, _slash_event("my-stats", {}, user_id="ms-pct"))
+
+    follow = ctx.interaction.followups[-1]
+    completed_field = next(
+        f for f in follow["embeds"][0]["fields"] if f["name"] == "✅ Completed"
+    )
+    # 3 of 4 → 75% completion shown alongside the count.
+    assert "75%" in completed_field["value"]
+
+
+def test_my_stats_top_rated_helper_sorts_desc():
+    ctx = MockContext()
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        return []
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    p._my_stats_top_rated(ctx, "u")
+    assert "ORDER BY rating DESC" in captured["sql"]
+
+
 # ── v5.0.0 dashboard handlers ───────────────────────────────────────────────
 
 
