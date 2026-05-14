@@ -10,7 +10,7 @@ jobs:
     permissions:
       contents: write   # required to attach assets to the release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
