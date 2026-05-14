@@ -699,7 +699,34 @@ DESC_MAX = 350
 COOLDOWN_SECONDS = 2
 LAST_ANIME_TTL = 7 * 24 * 60 * 60  # 7 days
 ANILIST_CACHE_TTL = 5 * 60          # 5 minutes — short enough that fresh trends still update
-ANILIST_CACHE_MAX_ENTRIES = 128     # bounded; LRU-ish via insertion-order pop
+ANILIST_CACHE_MAX_ENTRIES = 256     # v9.1: bumped from 128 — multi-source widens the working set
+
+# v9.1.0 — multi-source aggregation. AniList stays primary; MAL (Jikan v4) and
+# Kitsu are secondary fallbacks for /anime + /manga search. Each source has
+# its own rate-limit posture; the per-source token buckets in _RATE_BUCKETS
+# (declared later, near _rate_acquire) keep the plugin honest.
+JIKAN_BASE_URL = "https://api.jikan.moe/v4"
+KITSU_BASE_URL = "https://kitsu.io/api/edge"
+
+# Per-source rate limits as (max_requests, window_seconds) tuples. v9.1's
+# _rate_acquire enforces these in-process; multi-tenant pool workers all
+# share the same bucket per-process (which is what we want — the limit is
+# per source IP, not per server).
+SOURCE_RATE_LIMITS = {
+    "anilist": (90, 60),    # AniList: 90 req/min
+    "jikan":   (3, 1),      # Jikan v4: 3 req/sec (the tight constraint)
+    "kitsu":   (10, 1),     # Kitsu: 10 req/sec (loosest)
+}
+
+# Per-source attribution labels surfaced in embed footers + button labels.
+SOURCE_LABEL = {
+    "anilist": "AniList",
+    "mal":     "MyAnimeList",
+    "kitsu":   "Kitsu",
+}
+
+# Canonical media dict has source: "anilist" | "mal" | "kitsu". (Note: source
+# string for Jikan responses is "mal" — Jikan is the API, MAL is the dataset.)
 
 # v2.0.0 — per-user anime tracking.
 VALID_STATUSES = ("watching", "completed", "on_hold", "dropped", "plan")
@@ -1253,6 +1280,166 @@ def _make_manga_embed(
     return embed
 
 
+# ── v9.1.0 — canonical media dict + per-source adapters ─────────────────────
+#
+# The canonical dict reuses AniList's key shape (title.romaji/english,
+# coverImage.large, averageScore as 0..100, siteUrl, etc.) so the v1–v8
+# embed builders keep working without rewriting. Each adapter annotates
+# the dict with a `source` field ("anilist" | "mal" | "kitsu") and a
+# `source_id` for the native ID at that source. Embed builders read the
+# `source` field to render the right "Open on X" button label and footer.
+#
+# Why AniList-shaped instead of a fresh snake_case schema: keeps the
+# blast radius of v9.1 small. The audit's option 4 — repoint embed
+# builders onto a canonical dict — works for either shape; the
+# AniList-shape choice means MAL/Kitsu adapters do the rewriting work
+# instead of every existing caller.
+
+
+def _canonicalize_anilist_media(raw: dict | None) -> dict | None:
+    """Mark an AniList media dict as canonical-source-tagged.
+
+    AniList responses already satisfy the canonical contract; this just
+    stamps the source + source_id annotations so downstream code can
+    distinguish anime from MAL/Kitsu fallbacks. Returns None if the
+    input is None or doesn't have an `id`.
+    """
+    if not raw or not isinstance(raw, dict) or raw.get("id") is None:
+        return None
+    out = dict(raw)
+    out["source"] = "anilist"
+    out["source_id"] = raw["id"]
+    return out
+
+
+def _canonicalize_jikan_media(raw: dict | None) -> dict | None:
+    """Map a Jikan v4 (MyAnimeList) media object onto the AniList-shaped
+    canonical dict.
+
+    Jikan REST shape (per https://docs.api.jikan.moe/, anime endpoint):
+      {mal_id, url, title, title_english, title_japanese,
+       images: {jpg: {large_image_url, ...}, webp: {...}},
+       synopsis, score (0..10), members, scored_by, type, episodes,
+       status, aired: {from: "YYYY-MM-DD...", to: ...},
+       season ("winter"|...), year, genres: [{name}, ...]}
+
+    Manga differs slightly (chapters, volumes; no season/year/episodes).
+    The function handles both — type-irrelevant fields just stay None.
+    """
+    if not raw or not isinstance(raw, dict) or raw.get("mal_id") is None:
+        return None
+
+    images = raw.get("images") or {}
+    jpg = images.get("jpg") or {}
+    cover_url = jpg.get("large_image_url") or jpg.get("image_url")
+
+    # Jikan returns score as a float 0..10. Rescale to AniList's 0..100.
+    score = raw.get("score")
+    score_pct = int(round(score * 10)) if isinstance(score, (int, float)) and score else None
+
+    # Jikan's `season` is lowercase ("winter"); AniList uses uppercase.
+    season = (raw.get("season") or "").upper() or None
+
+    genres = [g.get("name") for g in (raw.get("genres") or []) if isinstance(g, dict)]
+
+    return {
+        # Annotate the source.
+        "source": "mal",
+        "source_id": raw["mal_id"],
+        # AniList-shaped fields that the embed builders read.
+        "id": raw["mal_id"],
+        "title": {
+            "romaji":  raw.get("title") or "",
+            "english": raw.get("title_english") or "",
+            "native":  raw.get("title_japanese") or "",
+        },
+        "description": raw.get("synopsis") or "",
+        "coverImage": {"large": cover_url or ""},
+        "bannerImage": None,
+        "averageScore": score_pct,
+        "popularity":   raw.get("members"),
+        "format":       (raw.get("type") or "").upper().replace(" ", "_") or None,
+        "episodes":     raw.get("episodes"),
+        "chapters":     raw.get("chapters"),
+        "volumes":      raw.get("volumes"),
+        "status":       (raw.get("status") or "").upper().replace(" ", "_") or None,
+        "season":       season,
+        "seasonYear":   raw.get("year"),
+        "startDate":    {"year": raw.get("year")},
+        "genres":       [g for g in genres if g],
+        "siteUrl":      raw.get("url") or f"https://myanimelist.net/anime/{raw['mal_id']}",
+    }
+
+
+def _canonicalize_kitsu_media(raw: dict | None) -> dict | None:
+    """Map a Kitsu JSON:API media object onto the AniList-shaped canonical dict.
+
+    Kitsu JSON:API shape (per https://kitsu.docs.apiary.io/):
+      {id, type: "anime"|"manga",
+       attributes: {canonicalTitle, titles: {en, en_jp, ja_jp},
+                    synopsis, posterImage: {original, large, medium, ...},
+                    coverImage: {original, ...} (banner-like),
+                    averageRating (0..100 as string), userCount,
+                    showType / mangaType, episodeCount, chapterCount,
+                    volumeCount, status, startDate ("YYYY-MM-DD")}}
+    """
+    if not raw or not isinstance(raw, dict) or raw.get("id") is None:
+        return None
+
+    attrs = raw.get("attributes") or {}
+    titles = attrs.get("titles") or {}
+
+    poster = attrs.get("posterImage") or {}
+    cover_url = poster.get("large") or poster.get("original") or poster.get("medium")
+    # Kitsu's coverImage is a banner-style hero image, NOT the thumbnail.
+    cover = attrs.get("coverImage") or {}
+    banner_url = cover.get("original") or cover.get("large")
+
+    # Kitsu's averageRating is a string "0".."100". Parse defensively.
+    rating_raw = attrs.get("averageRating")
+    score_pct: int | None
+    try:
+        score_pct = int(round(float(rating_raw))) if rating_raw else None
+    except (TypeError, ValueError):
+        score_pct = None
+
+    # Year extraction from "YYYY-MM-DD".
+    start_date = (attrs.get("startDate") or "")
+    year: int | None
+    if isinstance(start_date, str) and len(start_date) >= 4 and start_date[:4].isdigit():
+        year = int(start_date[:4])
+    else:
+        year = None
+
+    show_type = (attrs.get("showType") or attrs.get("mangaType") or "").upper() or None
+
+    return {
+        "source": "kitsu",
+        "source_id": raw["id"],
+        "id": raw["id"],  # Kitsu uses string IDs
+        "title": {
+            "romaji":  titles.get("en_jp") or attrs.get("canonicalTitle") or "",
+            "english": titles.get("en") or "",
+            "native":  titles.get("ja_jp") or "",
+        },
+        "description": attrs.get("synopsis") or "",
+        "coverImage": {"large": cover_url or ""},
+        "bannerImage": banner_url or None,
+        "averageScore": score_pct,
+        "popularity":   attrs.get("userCount"),
+        "format":       show_type,
+        "episodes":     attrs.get("episodeCount"),
+        "chapters":     attrs.get("chapterCount"),
+        "volumes":      attrs.get("volumeCount"),
+        "status":       (attrs.get("status") or "").upper().replace(" ", "_") or None,
+        "season":       None,  # Kitsu doesn't expose season directly
+        "seasonYear":   year,
+        "startDate":    {"year": year},
+        "genres":       [],  # Kitsu requires a separate include for genres; v9.1 skips
+        "siteUrl":      f"https://kitsu.io/{(attrs.get('type') or 'anime')}/{raw.get('slug') or raw['id']}",
+    }
+
+
 def _make_character_embed(char: dict) -> dict:
     """AniList character card — name, image, description, top media."""
     name = (char.get("name") or {})
@@ -1542,8 +1729,25 @@ def _on_cooldown(ctx: Context, user_id: str) -> bool:
 _CACHE: dict[str, tuple[float, dict]] = {}
 
 
-def _cache_key(query: str, variables: dict) -> str:
-    return repr((query, sorted(variables.items())))
+def _cache_key(*parts) -> str:
+    """Build a stable cache key from arbitrary parts.
+
+    v9.1 changed the signature from `(query, variables)` to `*parts` so the
+    same in-process cache can serve AniList GraphQL, Jikan REST, and Kitsu
+    JSON:API responses without key collision. AniList callers pass
+    ``_cache_key(query, variables)``; Jikan/Kitsu callers pass
+    ``_cache_key("jikan", path, params)`` or ``_cache_key("kitsu", path, params)``.
+
+    Dicts inside `parts` are normalised to sorted (key, value) tuples so
+    semantically-identical variables hash to the same key.
+    """
+    normalised = []
+    for p in parts:
+        if isinstance(p, dict):
+            normalised.append(tuple(sorted(p.items())))
+        else:
+            normalised.append(p)
+    return repr(tuple(normalised))
 
 
 def _cache_get(key: str) -> dict | None:
@@ -1726,6 +1930,235 @@ def _anilist_query(
         except Exception:  # noqa: BLE001 — cache must never raise into the caller
             pass
     return data
+
+
+# ── v9.1.0 — multi-source transport: rate buckets, Jikan, Kitsu ─────────────
+
+# In-process token buckets per source. Keys are source names; values are
+# deques of float monotonic-clock timestamps for requests we've made in the
+# current window. _rate_acquire trims expired entries, then either:
+#   - admits the call immediately (returns 0.0)
+#   - sleeps until the oldest in-window timestamp would expire (returns
+#     the slept time, > 0)
+# The buckets are module-global so they're shared across the (server,
+# plugin) tuple — which is what we want, since rate limits are per
+# source IP, not per server.
+_RATE_BUCKETS: dict[str, list[float]] = {s: [] for s in SOURCE_RATE_LIMITS}
+
+
+def _rate_acquire(source: str) -> float:
+    """Block the caller (via time.sleep) until the source's per-window
+    budget admits a new request. Returns the seconds slept (0.0 if no
+    wait needed). Sources without a configured limit are admitted
+    unconditionally — useful for tests and for keep-AniList-only paths.
+    """
+    if source not in SOURCE_RATE_LIMITS:
+        return 0.0
+    max_n, window_s = SOURCE_RATE_LIMITS[source]
+    now = time.monotonic()
+    bucket = _RATE_BUCKETS.setdefault(source, [])
+    # Drop expired timestamps.
+    cutoff = now - window_s
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+    slept = 0.0
+    if len(bucket) >= max_n:
+        # Sleep until the oldest in-window entry would expire.
+        wait_until = bucket[0] + window_s
+        slept = max(0.0, wait_until - now)
+        if slept > 0:
+            _sleep_for_retry(slept)
+        # Re-trim after sleeping.
+        now = time.monotonic()
+        cutoff = now - window_s
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+    bucket.append(now)
+    return slept
+
+
+def _jikan_query(
+    ctx: Context, path: str, params: dict | None = None, *, cache: bool = False
+) -> dict | None:
+    """REST GET against Jikan v4 (MAL data). Returns the parsed JSON body's
+    `data` field on success, or None on any error. Honors the jikan rate
+    bucket. cache=True memoizes for ANILIST_CACHE_TTL (the cache key
+    namespaces on source so AniList ↔ Jikan responses don't collide).
+
+    Path is relative to JIKAN_BASE_URL (e.g. "/anime?q=Frieren"). The
+    caller composes the path; this helper only handles transport, rate
+    limiting, and JSON parsing.
+    """
+    cache_key = _cache_key("jikan", path, params or {}) if cache else None
+    if cache_key is not None:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+    _rate_acquire("jikan")
+    url = f"{JIKAN_BASE_URL}{path}"
+    try:
+        resp = ctx.http.get(
+            url,
+            params=params or {},
+            headers={"Accept": "application/json"},
+        )
+    except RpcTimeoutError as exc:
+        ctx.log(f"jikan timed out: {exc}", level="warning", tags=["jikan", "http"])
+        return None
+    except RateLimitError as exc:
+        ctx.log(
+            "jikan rate limited", level="warning",
+            tags=["jikan", "http"],
+            retry_after=getattr(exc, "retry_after", None),
+        )
+        return None
+    except ValidationError as exc:
+        ctx.log(f"jikan validation error: {exc}", level="error", tags=["jikan", "http"])
+        return None
+    except Exception as exc:  # noqa: BLE001
+        ctx.log(f"jikan call failed: {exc}", level="error", tags=["jikan", "http"])
+        return None
+
+    status = (resp or {}).get("status_code") or (resp or {}).get("status") or 0
+    if not isinstance(status, int) or status < 200 or status >= 300:
+        return None
+    body = (resp or {}).get("body")
+    if not body:
+        return None
+    try:
+        payload = json.loads(body) if isinstance(body, str) else body
+    except (ValueError, TypeError):
+        return None
+    # Jikan wraps results in a `data` field; pagination metadata in `pagination`.
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if data is None:
+        return None
+    if cache_key is not None:
+        try:
+            _cache_put(cache_key, {"data": data})
+        except Exception:  # noqa: BLE001
+            pass
+    return data
+
+
+def _kitsu_query(
+    ctx: Context, path: str, params: dict | None = None, *, cache: bool = False
+) -> list[dict] | None:
+    """JSON:API GET against Kitsu. Returns the parsed `data` array on
+    success (or single resource if the endpoint returns one), or None on
+    error. Honors the kitsu rate bucket. cache=True memoizes for
+    ANILIST_CACHE_TTL.
+
+    Path is relative to KITSU_BASE_URL (e.g. "/anime?filter[text]=Frieren").
+    """
+    cache_key = _cache_key("kitsu", path, params or {}) if cache else None
+    if cache_key is not None:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached.get("data")  # unwrap the cache envelope
+
+    _rate_acquire("kitsu")
+    url = f"{KITSU_BASE_URL}{path}"
+    try:
+        resp = ctx.http.get(
+            url,
+            params=params or {},
+            headers={"Accept": "application/vnd.api+json"},
+        )
+    except RpcTimeoutError as exc:
+        ctx.log(f"kitsu timed out: {exc}", level="warning", tags=["kitsu", "http"])
+        return None
+    except RateLimitError as exc:
+        ctx.log(
+            "kitsu rate limited", level="warning",
+            tags=["kitsu", "http"],
+            retry_after=getattr(exc, "retry_after", None),
+        )
+        return None
+    except ValidationError as exc:
+        ctx.log(f"kitsu validation error: {exc}", level="error", tags=["kitsu", "http"])
+        return None
+    except Exception as exc:  # noqa: BLE001
+        ctx.log(f"kitsu call failed: {exc}", level="error", tags=["kitsu", "http"])
+        return None
+
+    status = (resp or {}).get("status_code") or (resp or {}).get("status") or 0
+    if not isinstance(status, int) or status < 200 or status >= 300:
+        return None
+    body = (resp or {}).get("body")
+    if not body:
+        return None
+    try:
+        payload = json.loads(body) if isinstance(body, str) else body
+    except (ValueError, TypeError):
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if data is None:
+        return None
+    # Normalize single-resource responses to a list of one for caller simplicity.
+    if isinstance(data, dict):
+        data = [data]
+    if cache_key is not None:
+        try:
+            _cache_put(cache_key, {"data": data})
+        except Exception:  # noqa: BLE001
+            pass
+    return data
+
+
+def _search_media(
+    ctx: Context, query: str, *, media_type: str = "anime"
+) -> dict | None:
+    """Multi-source media search with AniList → Jikan → Kitsu fallback.
+
+    Returns the canonical media dict from whichever source served the result,
+    or None if all three sources failed. Used by /anime and /manga (v9.1).
+    Other commands (/discover, /similar, /random, /mood, /find, /genres,
+    /character, /notify*) stay AniList-only per the v8.0.1 audit cheat sheet
+    — those features depend on AniList-specific schemas (recommendation
+    graph, tag taxonomy, GenreCollection, airing schedules).
+
+    `media_type` is "anime" or "manga". Returns canonical dicts shaped the
+    same as v8.0's `_make_anime_embed` / `_make_manga_embed` expect, with
+    `source` / `source_id` annotations added.
+    """
+    query_lower = query.lower().strip()
+
+    # 1) AniList — primary. Reuse the existing query constants based on type.
+    anilist_query = QUERY_SEARCH_ONE if media_type == "anime" else QUERY_MANGA_SEARCH_ONE
+    data = _anilist_query(ctx, anilist_query, {"q": query_lower}, cache=True)
+    if data is not None:
+        media = data.get("Media")
+        if media:
+            return _canonicalize_anilist_media(media)
+
+    # 2) Jikan (MyAnimeList) — first fallback. Jikan exposes /anime and /manga
+    # as separate REST endpoints.
+    jikan_path = f"/{media_type}"
+    jikan_data = _jikan_query(
+        ctx, jikan_path, params={"q": query_lower, "limit": 1}, cache=True,
+    )
+    if jikan_data is not None:
+        results = jikan_data if isinstance(jikan_data, list) else [jikan_data]
+        if results:
+            canonical = _canonicalize_jikan_media(results[0])
+            if canonical is not None:
+                return canonical
+
+    # 3) Kitsu — second fallback. JSON:API filter syntax.
+    kitsu_data = _kitsu_query(
+        ctx,
+        f"/{media_type}",
+        params={"filter[text]": query_lower, "page[limit]": 1},
+        cache=True,
+    )
+    if kitsu_data:
+        canonical = _canonicalize_kitsu_media(kitsu_data[0])
+        if canonical is not None:
+            return canonical
+
+    return None
 
 
 def _reply_error(ctx: Context, message: str, *, deferred: bool) -> None:
@@ -2079,27 +2512,46 @@ def cmd_anime(ctx: Context, event: dict) -> None:
         return
 
     ctx.interaction.defer()
-    # Normalize the search key so equivalent queries hit the same cache entry.
-    data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": query.lower()}, cache=True)
-    if data is None:
-        _reply_anilist_failure(ctx, deferred=True)
-        return
-    media = data.get("Media")
-    if not media:
+    # v9.1: multi-source search. AniList primary; falls through to MAL
+    # (Jikan v4) then Kitsu if AniList misses or fails. Returns a canonical
+    # media dict with `source` annotation; the embed builders read AniList-
+    # shaped fields directly. /similar, /random etc. stay AniList-only
+    # because they depend on AniList-specific schemas.
+    media = _search_media(ctx, query, media_type="anime")
+    if media is None:
         _reply_error(ctx, S.ANIME_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
         return
 
     media_id = media.get("id")
-    if media_id is not None and user_id:
+    # Only cache `last_anime` for AniList results — the cache key is keyed
+    # on AniList ids, and downstream commands (/similar, /watch, /rate,
+    # etc.) all assume AniList ids. MAL/Kitsu fallback results are still
+    # rendered but don't propagate to the cache. v9.1 known limitation
+    # documented in CHANGELOG.
+    source = media.get("source") or "anilist"
+    if source == "anilist" and media_id is not None and user_id:
         ctx.kv.set(f"last_anime:user:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
 
-    progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0))
+    # Local tracking lookup is anime-only and keyed on AniList ids; skip
+    # for non-AniList sources.
+    progress, rating = (0, None)
+    if source == "anilist":
+        progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0))
     embed = _make_anime_embed(media, user_progress=progress, user_rating=rating)
-    buttons = [Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁")]
+
+    # Source attribution in the footer + "Open on X" button label.
+    source_label = SOURCE_LABEL.get(source, "AniList")
+    embed["footer"] = {"text": f"Data from {source_label}"}
+
+    buttons = []
+    # /similar only meaningful for AniList ids — skip for MAL/Kitsu fallbacks.
+    if source == "anilist" and media_id is not None:
+        buttons.append(Button("Similar", custom_id=f"otaku:similar:{media_id}", style="primary", emoji="🔁"))
     site_url = media.get("siteUrl")
     if site_url:
-        buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
-    ctx.interaction.followup(embeds=[embed], components=[ActionRow(*buttons)])
+        buttons.append(Button(f"Open on {source_label}", url=site_url, style="link", emoji="🌐"))
+    components = [ActionRow(*buttons)] if buttons else None
+    ctx.interaction.followup(embeds=[embed], components=components)
 
 
 @plugin.on_slash_command("discover")
@@ -2495,25 +2947,33 @@ def cmd_manga(ctx: Context, event: dict) -> None:
         return
 
     ctx.interaction.defer()
-    data = _anilist_query(ctx, QUERY_MANGA_SEARCH_ONE, {"q": query.lower()}, cache=True)
-    if data is None:
-        _reply_anilist_failure(ctx, deferred=True)
-        return
-    media = data.get("Media")
-    if not media:
+    # v9.1: multi-source search (AniList → Jikan → Kitsu). See cmd_anime
+    # for the same fallback semantics; manga responses come through the
+    # same canonical pipeline.
+    media = _search_media(ctx, query, media_type="manga")
+    if media is None:
         _reply_error(ctx, S.MANGA_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
         return
 
     media_id = media.get("id")
-    if media_id is not None and user_id:
+    source = media.get("source") or "anilist"
+    # Only cache `last_manga` for AniList results — same rationale as
+    # cmd_anime: the cache key is on AniList ids; v9.1 known limitation.
+    if source == "anilist" and media_id is not None and user_id:
         ctx.kv.set(f"{LAST_MANGA_KV_PREFIX}:{user_id}", media_id, ttl_seconds=LAST_ANIME_TTL)
 
-    progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0), media_type="manga")
+    progress, rating = (0, None)
+    if source == "anilist":
+        progress, rating = _get_user_tracking(ctx, user_id, int(media_id or 0), media_type="manga")
     embed = _make_manga_embed(media, user_progress=progress, user_rating=rating)
+
+    source_label = SOURCE_LABEL.get(source, "AniList")
+    embed["footer"] = {"text": f"Data from {source_label}"}
+
     buttons = []
     site_url = media.get("siteUrl")
     if site_url:
-        buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
+        buttons.append(Button(f"Open on {source_label}", url=site_url, style="link", emoji="🌐"))
     components = [ActionRow(*buttons)] if buttons else None
     ctx.interaction.followup(embeds=[embed], components=components)
 

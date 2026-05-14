@@ -15,7 +15,7 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 | Capability | Tier | Why |
 |---|---|---|
 | `interaction:respond` | Safe | Reply to slash commands and component (button/select) clicks. Auto-added because the manifest declares `slash_commands`. |
-| `proxy:http` | Safe | Call AniList's GraphQL endpoint (`graphql.anilist.co`) — the only outbound host. |
+| `proxy:http` | Safe | Call AniList's GraphQL endpoint (`graphql.anilist.co`) for primary search/lookup. v9.1 added MAL (Jikan v4 at `api.jikan.moe`) and Kitsu (`kitsu.io`) as secondary fallback sources for `/anime` and `/manga` when AniList misses. Per-source rate buckets enforce AniList 90/min, Jikan 3/sec, Kitsu 10/sec. |
 | `storage:kv` | Safe | Cache each user's last-viewed anime ID for 7 days so `/similar` can default to it. Also caches AniList's genre list for 24h. |
 | `storage:sql` | Risky | Per-user anime tracking (`/favorite`, `/watch`, `/list`, `/favorites`). Single table `otaku_user_anime`, auto-scoped per server. |
 | `discord:read` | Safe | Read the caller's guild membership and roles to gate `/otaku-admin` to server admins (anyone with `Administrator` or `Manage Server`). Used purely for permission checks. |
@@ -38,7 +38,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 
 | Command | Description |
 |---|---|
-| `/anime <query>` | Search AniList by title. Replies with a full anime card (cover, score, episodes, status, genres, description, AniList link) plus `[🔁 Similar]` and `[🌐 Open on AniList]` buttons. Also caches the result as your "last anime" for 7 days. |
+| `/anime <query>` | Multi-source search. Tries AniList first, falls through to MyAnimeList (Jikan) then Kitsu when AniList misses. Replies with a full anime card; footer shows which source served the result. `[🔁 Similar]` button appears only for AniList results (the recommendation graph is AniList-specific). Cached as "last anime" (7 days) — AniList results only. |
 | `/discover <genre> [sort]` | Browse a genre. `sort` is one of `popular` (default), `trending`, or `score`. Replies with a paginated list of 5 results plus `[⬅️ Prev]` / `[Next ➡️]` buttons and a select menu to expand any result into the full anime card. |
 | `/trending` | Top 5 trending anime for the current season (Winter/Spring/Summer/Fall) — same paginated style as `/discover`. |
 | `/similar [anime]` | Top 5 AniList-recommended anime for a given title. If `anime` is omitted, uses your cached last `/anime` lookup (if any); otherwise tells you ephemerally to run `/anime` first. |
@@ -84,7 +84,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/reviews [anime]` | Browse this server's reviews for an anime. Accepts a title, a numeric AniList ID, or defaults to your last `/anime` lookup. Paginated, sorted by most-recently-edited. |
 | `/aotw start \| status \| end` | Anime-of-the-week voting. Admin starts (top 5 from server watchlist); members vote via numbered buttons; admin ends and winner gets posted in the announcement channel. One active poll per server. |
 | `/poll create \| status \| end` | Free-form server polls. Admin creates with a question and 2–4 options; members vote via A/B/C/D buttons; admin ends. Multiple concurrent polls allowed; each has its own `poll_id`. |
-| `/manga <query>` | Search AniList for a manga. Renders chapters, volumes, start year. Caches the result as your "last manga" for 7 days. |
+| `/manga <query>` | Multi-source manga search (AniList → MAL → Kitsu fallback). Renders chapters, volumes, start year. Footer shows the source. Cached as "last manga" (7 days) — AniList results only. |
 | `/manga-discover <genre> [sort]` | Browse manga by genre. Paginated 5 results per page; sorts `popular`/`trending`/`score`. |
 | `/manga-favorites [manga] [remove]` | Favorite or unfavorite a manga (defaults to your last `/manga` lookup), or list your manga favorites when called with no args. Manga rows are stored in the same `otaku_user_media` table as anime, separated by `media_type='manga'`. |
 

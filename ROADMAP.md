@@ -949,11 +949,42 @@ deep browsing on free-text input.
 
 ---
 
-### v9.1.0 — Multi-source aggregation
+### v9.1.0 — Multi-source aggregation ✅ shipped 2026-05-14
 
-Add MyAnimeList (Jikan) and Kitsu as secondary sources. When AniList misses a title, fall back to MAL.
+~~Add MyAnimeList (Jikan) and Kitsu as secondary sources. When AniList misses a title, fall back to MAL.~~ Shipped.
 
-**Capability:** New proxy domains added.
+`/anime` and `/manga` search now fall through AniList → Jikan (MAL) →
+Kitsu. New transports `_jikan_query` (REST) and `_kitsu_query` (JSON:API)
+sit alongside `_anilist_query` (GraphQL). Per-source token buckets in
+`_RATE_BUCKETS` enforce AniList 90/min, Jikan 3/sec, Kitsu 10/sec.
+
+Canonical media dict reuses the AniList shape (title.romaji/.english,
+coverImage.large, averageScore, siteUrl, etc.) so the v1–v8 embed
+builders work without rewriting. Per-source canonicalisers
+(`_canonicalize_jikan_media`, `_canonicalize_kitsu_media`) map onto
+that shape and stamp `source` + `source_id` annotations.
+
+**Other commands stay AniList-only** by design per the v8.0.1 audit
+cheat sheet — `/similar`, `/random`, `/discover`, `/mood`, `/find`,
+`/genres`, `/character`, `/voice-actor`, `/staff`, `/studio`,
+`/character-popular`, `/notify*` all depend on AniList-specific
+schemas (recommendation graph, GenreCollection, tag taxonomy,
+airingSchedules).
+
+**v9.1 known limitations** (deferred to v9.1.x):
+- MAL/Kitsu fallback results don't populate `last_anime` / `last_manga`
+  KV cache — downstream commands (`/similar`, `/watch`, `/rate`)
+  assume AniList IDs. A user who looked up a manga via Kitsu fallback
+  has to re-look-it-up before favoriting/rating.
+- `/discover` and `/season-premieres` are still AniList-only. Adding
+  per-source genre+season filters needs more design work — Jikan and
+  Kitsu use different filter syntaxes.
+- `/import` source-aware variant not yet shipped.
+
+**Capability:** No new capability tier shift — `proxy:http` was
+already declared. The new `proxy_domains_requested` entries
+(`api.jikan.moe`, `kitsu.io`) DO trigger marketplace re-review per
+ROADMAP working principle #6 — plan accordingly.
 
 ---
 

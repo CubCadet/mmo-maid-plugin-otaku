@@ -20,6 +20,132 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [9.1.0] - 2026-05-14
+
+### Multi-source aggregation — Phase 9 architectural shift
+
+`/anime` and `/manga` search now fall through **AniList → MyAnimeList
+(Jikan v4) → Kitsu** when AniList misses or fails. The plugin's primary
+source stays AniList; MAL and Kitsu are safety nets for the long tail
+of titles AniList doesn't have indexed.
+
+### Added — transport
+- `_jikan_query(ctx, path, params, *, cache=False)` — REST GET against
+  `https://api.jikan.moe/v4`. Honors the per-source rate bucket. Logs
+  with `tags=["jikan", "http"]`.
+- `_kitsu_query(ctx, path, params, *, cache=False)` — JSON:API GET
+  against `https://kitsu.io/api/edge`. Same rate-bucket + logging
+  pattern. Returns a `data` array (single-resource responses normalized
+  to a list of one).
+- `_RATE_BUCKETS` — in-process per-source token buckets. Constants
+  `SOURCE_RATE_LIMITS` freeze the per-source limits: AniList 90/min,
+  Jikan 3/sec, Kitsu 10/sec.
+- `_rate_acquire(source)` — admits immediately or sleeps via
+  `_sleep_for_retry` until the source's per-window budget allows the
+  next request. Returns seconds slept (0.0 on admit). Unknown sources
+  admit unconditionally — useful for tests.
+
+### Added — canonical media dict
+- `_canonicalize_anilist_media(raw)` — passes the AniList shape through
+  and stamps `source="anilist"`, `source_id=raw["id"]`.
+- `_canonicalize_jikan_media(raw)` — maps Jikan v4 fields onto the
+  AniList shape (`title_english`/`title_japanese` → `title.english`/
+  `.native`; `images.jpg.large_image_url` → `coverImage.large`;
+  score×10 → `averageScore`; `season` uppercased; genres flattened).
+  Stamps `source="mal"`, `source_id=raw["mal_id"]`.
+- `_canonicalize_kitsu_media(raw)` — maps Kitsu JSON:API attributes onto
+  the AniList shape (`canonicalTitle`/`titles` → `title`;
+  `posterImage.large` → `coverImage.large`; `averageRating` string parsed
+  to int; `startDate[:4]` → `seasonYear`). Stamps `source="kitsu"`,
+  `source_id=raw["id"]`.
+
+### Added — aggregator
+- `_search_media(ctx, query, *, media_type="anime")` — sequential
+  fallback chain. Returns the canonical dict from whichever source
+  served the result, or None if all three failed. Caches each source's
+  response independently (cache key includes the source).
+- `/anime` and `/manga` repointed to use `_search_media`. All other
+  commands (`/similar`, `/random`, `/discover`, `/mood`, `/find`,
+  `/genres`, `/character`, `/voice-actor`, `/staff`, `/studio`,
+  `/character-popular`, `/notify*`) stay AniList-only by design — they
+  depend on AniList-specific schemas (recommendation graph, GenreCollection,
+  tag taxonomy, airingSchedules) that MAL/Kitsu don't expose 1:1.
+
+### Added — UX
+- Embed footer now reads `Data from <Source>` per the source that
+  served the result.
+- "Open on AniList" button becomes "Open on MyAnimeList" / "Open on
+  Kitsu" when the canonical media's `source` field changes.
+- `/similar` button is suppressed when source != "anilist" (the
+  recommendation graph is AniList-specific; a MAL ID would route to
+  nothing).
+- `last_anime:user:<id>` and `last_manga:user:<id>` KV cache is ONLY
+  populated when source == "anilist" — downstream `/similar`, `/watch`,
+  `/rate`, `/progress`, `/notify`, etc. all assume AniList IDs.
+  A MAL/Kitsu fallback result is displayed but doesn't propagate to
+  the cache. **v9.1 known limitation.**
+
+### Changed — cache key
+- `_cache_key` signature changed from `(query, variables)` to `(*parts)`.
+  AniList callers pass `(query, variables)` unchanged; Jikan callers
+  pass `("jikan", path, params)`; Kitsu callers pass `("kitsu", path,
+  params)`. The varargs form is hash-stable: dict args are sorted before
+  inclusion in the repr. Backwards-compatible — no caller required
+  changes beyond the two new sources.
+- `ANILIST_CACHE_MAX_ENTRIES` bumped 128 → 256 to accommodate the
+  ~3x working set across three sources. (Constant name kept as
+  `ANILIST_CACHE_MAX_ENTRIES` for back-compat; v9.1.x may rename to
+  `MEDIA_CACHE_MAX_ENTRIES`.)
+
+### Changed — manifest
+- `proxy_domains_requested` now includes `api.jikan.moe` and `kitsu.io`
+  (bare hosts — no scheme, no path; the validator at
+  `scripts/validate_plugin.py` enforces this). NOTE: this is a
+  **marketplace re-review trigger** per ROADMAP working principle #6.
+  No capability tier shift (`proxy:http` was already declared).
+
+### Tests
+- New regression file `tests/regression/test_v9_1_0.py` (26 tests):
+  manifest proxy_domains, rate-limit constants frozen, source-label
+  coverage, rate-bucket admit/sleep contract, unknown-source no-op,
+  all three canonicalisers (AniList passthrough, Jikan score rescale +
+  season uppercasing + genre flattening, Kitsu string rating parsing +
+  date year extraction + slug-based URL), `_search_media` fallback chain
+  (AniList hit short-circuits MAL+Kitsu; MAL fallback works; Kitsu
+  third fallback works; all-three-miss returns None), `/anime` and
+  `/manga` routing through `_search_media`, no-`last_anime`-cache on
+  MAL fallback, no-`/similar`-button on non-AniList source, footer
+  attribution per source, button label per source, cache-key
+  namespacing across sources.
+- Updated three legacy `tests/test_plugin.py` tests
+  (`test_anime_handles_rpc_timeout_with_ephemeral_followup`,
+  `test_retry_exhaustion_returns_friendly_error`,
+  `test_user_fixable_anilist_error_is_surfaced`) to accept either the
+  v9.1 cross-source "not found" message OR the legacy AniList-specific
+  message. The new contract: when AniList fails, MAL and Kitsu are
+  tried before the user sees an error.
+
+### Capability surface
+- **No new capabilities.** `proxy:http` covers all three sources.
+  `proxy_domains_requested` is a domain-list expansion within an
+  already-granted capability — no tier shift (Risky/Dangerous),
+  but DOES re-trigger marketplace human review per ROADMAP §6.
+
+### Deferred to v9.1.x or v9.2
+- `/discover`, `/season-premieres`, `/import` source-aware variants.
+  `/discover` and `/season-premieres` use AniList's genre+season
+  filters; Jikan/Kitsu have different filter syntaxes. `/import`
+  already has the `source:` arg shape ready to add per the v8.0.1
+  cheat sheet but lands cleanest after the canonicaliser settles.
+- AniList-specific user-fixable error fragments
+  (`_USER_FIXABLE_ANILIST_FRAGMENTS`) stay AniList-only. v9.1 doesn't
+  add MAL/Kitsu-specific error message classification — if AniList
+  rejects with "must contain at least 3 characters" but MAL accepts
+  the query and returns a result, the user just sees the MAL result.
+- Constant rename `ANILIST_CACHE_MAX_ENTRIES` → `MEDIA_CACHE_MAX_ENTRIES`.
+  The current name is misleading post-v9.1; deferred to a v9.1.x
+  cosmetic patch.
+
 ## [9.0.0] - 2026-05-14
 
 ### Phase 9 opens — AI & multi-source integrations
