@@ -441,18 +441,19 @@ CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx
 
 ---
 
-### v2.1.0 — Ratings
+### v2.1.0 — Ratings ✅ shipped 2026-05-15
 
 **New slash commands:**
-- `/rate <score>` — Rate the last lookup (1–10, half-points allowed — score stored as int×2 to avoid floats).
-- `/ratings [user]` — List a user's rated anime sorted by score.
+- ~~`/rate <score>` — Rate the last lookup (1–10, half-points allowed — score stored as int×2 to avoid floats).~~ Encoder/decoder unit-tested.
+- ~~`/ratings [user]` — List a user's rated anime sorted by score.~~ Top 25.
 
 **Schema change (additive — no MAJOR bump):**
 ```sql
-ALTER TABLE otaku_user_anime ADD COLUMN rating SMALLINT;  -- 2..20 (×2 of user's 1..10)
+ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT;
 ```
+Wired into `_bootstrap_schema`. Idempotent via `ADD COLUMN IF NOT EXISTS`.
 
-**Regression check:** All v2.0.x tests pass.
+**Regression check:** ~~All v2.0.x tests pass.~~ One regression-fix in `test_v2_0_0.py` documented in CHANGELOG (the original test over-specified DDL count).
 
 ---
 

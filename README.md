@@ -39,6 +39,8 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/favorites [user]` | Paginated list of favorites for the caller or a mentioned user. ⭐ next to each row. |
 | `/watch <status>` | Set watch status for the user's last `/anime` lookup. Status is one of `watching`, `completed`, `on_hold`, `dropped`, `plan`. |
 | `/list [status] [user]` | Paginated tracker. Status filter optional; defaults to "all." Status emojis (📺 ✅ ⏸ ❌ 📌) prefix every row. |
+| `/rate <score>` | Rate the user's last `/anime` lookup on a 1.0–10.0 scale (half-points OK). Stored as `SMALLINT` (score × 2). |
+| `/ratings [user]` | Show a user's rated anime, top 25 sorted by score. |
 
 ### Politeness throttle
 
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS otaku_user_anime (
 );
 CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx
   ON otaku_user_anime (user_id, status, added_at DESC);
+-- v2.1.0 (additive):
+ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT;  -- score × 2 (2..20)
 ```
 
 The DDL is idempotent (`IF NOT EXISTS`) and runs from both `@plugin.on_install` and `@plugin.on_ready`. The `on_ready` path covers pool-mode workers picking up a tenant that upgraded from v1.x (where `on_install` does not re-fire).

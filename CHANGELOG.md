@@ -20,6 +20,25 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-15
+
+### Added
+- `/rate <score>` — rate the user's last `/anime` lookup on a 1.0–10.0 scale,
+  half-points allowed. Stored as `SMALLINT` (score × 2) in a new
+  `rating` column.
+- `/ratings [user]` — list a user's rated anime, top 25 by score.
+- Schema: `ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT`.
+  Wired into `_bootstrap_schema` so it runs from both `on_install` and
+  `on_ready`. Additive — no MAJOR bump needed.
+- Regression file `tests/regression/test_v2_1_0.py`.
+
+### Fixed
+- **regression-fix:** `tests/regression/test_v2_0_0.py::test_schema_ddl_idempotent`
+  used to assert `len(executed) == 4`, which over-specified the contract by
+  locking the exact DDL count. The real contract is "calling twice does not
+  raise." Now asserts the recorder doubles, which holds across additive
+  schema changes. See the inline comment.
+
 ## [2.0.0] - 2026-05-15
 
 ### Added

@@ -52,6 +52,12 @@ _SCHEMA_INDEX_DDL = (
     "ON otaku_user_anime (user_id, status, added_at DESC)"
 )
 
+# v2.1.0 — additive column for ratings (1.0–10.0 stored as int*2, range 2..20).
+# IF NOT EXISTS makes this idempotent and safe to run on existing tables.
+_SCHEMA_RATING_DDL = (
+    "ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT"
+)
+
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
 # Every string the user could ever see lives here. The runtime upload zip's
@@ -162,6 +168,21 @@ class _Strings:
     # Generic errors for v2 paths.
     SQL_FAIL = "Couldn't reach the database — try again in a moment."
     LIST_PAGE_MALFORMED = "List button malformed."
+
+    # /rate.
+    RATE_NO_CACHE = (
+        "You haven't looked up an anime yet. Try `/anime query: <title>` first."
+    )
+    RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
+    RATE_SET = "Rated **{title}** {score}/10."
+
+    # /ratings.
+    RATINGS_HEADER_OWN = "⭐ Your ratings"
+    RATINGS_HEADER_OTHER = "⭐ {who}'s ratings"
+    RATINGS_EMPTY_OWN = (
+        "You haven't rated any anime yet. Try `/rate score: 8` after a `/anime` lookup."
+    )
+    RATINGS_EMPTY_OTHER = "{who} hasn't rated any anime yet."
 
 
 S = _Strings
@@ -874,9 +895,16 @@ def _render_similar(ctx: Context, media: dict, *, deferred: bool, ephemeral_repl
 # ── Schema bootstrap + lifecycle ─────────────────────────────────────────────
 
 def _bootstrap_schema(ctx: Context) -> None:
-    """Create the otaku_user_anime table and its index if missing. Idempotent."""
+    """Create the otaku_user_anime table, its index, and additive columns. Idempotent.
+
+    DDLs land in version order. New columns added in later versions go here
+    with ADD COLUMN IF NOT EXISTS so the bootstrap stays a single source of
+    truth across every upgrade path.
+    """
     ctx.sql.execute(_SCHEMA_DDL)
     ctx.sql.execute(_SCHEMA_INDEX_DDL)
+    # v2.1.0
+    ctx.sql.execute(_SCHEMA_RATING_DDL)
 
 
 @plugin.on_install
@@ -1524,6 +1552,113 @@ def cmd_list(ctx: Context, event: dict) -> None:
         page=1,
         deferred=True,
     )
+
+
+# ── v2.1.0 — ratings ────────────────────────────────────────────────────────
+
+def _encode_rating(score: float) -> int | None:
+    """Convert a 1.0–10.0 user score to the SMALLINT we store (2..20). None if out of range."""
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return None
+    if s < 1.0 or s > 10.0:
+        return None
+    return int(round(s * 2))
+
+
+def _format_rating(stored: int | None) -> str:
+    """Render the SMALLINT back to a user-visible score like '7.5'."""
+    if stored is None:
+        return "—"
+    return f"{stored / 2:.1f}"
+
+
+@plugin.on_slash_command("rate")
+def cmd_rate(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    encoded = _encode_rating(opts.get("score"))
+    if encoded is None:
+        ctx.interaction.respond(content=S.RATE_OUT_OF_RANGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    media_id = _resolve_last_anime_id(ctx, user_id)
+    if media_id is None:
+        _reply_error(ctx, S.RATE_NO_CACHE, deferred=True)
+        return
+    data = _anilist_query(ctx, QUERY_MEDIA_BY_ID, {"id": media_id})
+    if data is None or not data.get("Media"):
+        _reply_anilist_failure(ctx, deferred=True, fallback=S.SIMILAR_FETCH_FAIL_CACHED)
+        return
+    title = _format_title(data["Media"])
+
+    # Upsert the row, setting rating only (status default for new rows is 'watching').
+    ctx.sql.execute(
+        "INSERT INTO otaku_user_anime (user_id, media_id, status, rating) "
+        "VALUES ($1, $2, $3, $4) "
+        "ON CONFLICT (user_id, media_id) DO UPDATE SET rating = EXCLUDED.rating",
+        [user_id, media_id, "watching", encoded],
+    )
+    ctx.interaction.followup(
+        content=S.RATE_SET.format(title=title, score=_format_rating(encoded)),
+        ephemeral=True,
+    )
+
+
+@plugin.on_slash_command("ratings")
+def cmd_ratings(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    target_id, display, is_self = _extract_target_user(event, opts)
+    ctx.interaction.defer(ephemeral=True)
+
+    rows = ctx.sql.query(
+        "SELECT media_id, rating, status, is_favorite FROM otaku_user_anime "
+        "WHERE user_id = $1 AND rating IS NOT NULL "
+        "ORDER BY rating DESC, added_at DESC LIMIT 25",
+        [target_id],
+    ) or []
+
+    if not rows:
+        empty = S.RATINGS_EMPTY_OWN if is_self else S.RATINGS_EMPTY_OTHER.format(who=display)
+        _reply_error(ctx, empty, deferred=True)
+        return
+
+    ids = [int(r["media_id"]) for r in rows]
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": ids}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    media_list = ((data.get("Page") or {}).get("media")) or []
+    media_by_id = {int(m.get("id") or -1): m for m in media_list}
+
+    lines = []
+    for i, row in enumerate(rows, start=1):
+        mid = int(row["media_id"])
+        m = media_by_id.get(mid)
+        title = _format_title(m) if m else f"#{mid}"
+        url = (m or {}).get("siteUrl") or ""
+        rating = _format_rating(row.get("rating"))
+        fav = " ⭐" if row.get("is_favorite") else ""
+        if url:
+            lines.append(f"**{i}. [{title}]({url})** · 🎯 {rating}/10{fav}")
+        else:
+            lines.append(f"**{i}. {title}** · 🎯 {rating}/10{fav}")
+
+    header = S.RATINGS_HEADER_OWN if is_self else S.RATINGS_HEADER_OTHER.format(who=display)
+    embed = {
+        "title": header,
+        "description": "\n".join(lines),
+        "color": ANILIST_COLOR,
+        "footer": {"text": f"{len(rows)} rated · top 25 · Data from AniList"},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
 # ── Component handlers ──────────────────────────────────────────────────────

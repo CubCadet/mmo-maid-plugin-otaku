@@ -81,11 +81,17 @@ def test_on_ready_also_creates_schema_for_pool_mode_upgrades():
 
 
 def test_schema_ddl_idempotent():
+    # regression-fix (v2.1.0): originally asserted len(executed) == 4 (two calls
+    # × two DDLs). That over-specified the contract — `_bootstrap_schema` is
+    # allowed to grow additive ADD COLUMN IF NOT EXISTS statements as later
+    # versions extend the schema. The real contract is "calling it twice does
+    # not raise" (idempotency), which is what we now assert.
     ctx = MockContext()
     p._bootstrap_schema(ctx)
+    first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)
-    # Two calls × two DDLs each = four records; none should raise.
-    assert len(ctx.sql.executed) == 4
+    # Same DDLs executed both times → second call doubles the recorder.
+    assert len(ctx.sql.executed) == first_count * 2
 
 
 # ── /favorite ───────────────────────────────────────────────────────────────

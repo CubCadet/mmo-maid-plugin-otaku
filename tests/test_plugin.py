@@ -465,14 +465,18 @@ def _list_event(options: dict | None = None, **extra) -> dict:
 
 
 def test_schema_bootstrap_is_idempotent():
-    """Running _bootstrap_schema twice must not raise — CREATE IF NOT EXISTS."""
+    """Running _bootstrap_schema twice must not raise — CREATE/ALTER IF NOT EXISTS."""
     ctx = MockContext()
     p._bootstrap_schema(ctx)
+    first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)
-    # Each call: 2 DDLs (table + index). Two calls = 4 records.
-    assert len(ctx.sql.executed) == 4
-    assert all("CREATE TABLE IF NOT EXISTS" in call["sql"] or "CREATE INDEX IF NOT EXISTS" in call["sql"]
-               for call in ctx.sql.executed)
+    # Same DDLs run both times → recorder count doubles. Each DDL is one of the
+    # idempotent forms (CREATE … IF NOT EXISTS or ADD COLUMN IF NOT EXISTS).
+    assert len(ctx.sql.executed) == first_count * 2
+    assert all(
+        "IF NOT EXISTS" in call["sql"]
+        for call in ctx.sql.executed
+    )
 
 
 def test_on_install_bootstraps_schema():
@@ -690,6 +694,101 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     resp = ctx.interaction.responses[-1]
     assert resp.get("ephemeral") is True
     assert "malformed" in (resp.get("content") or "").lower()
+
+
+# ── v2.1.0 ratings ──────────────────────────────────────────────────────────
+
+
+def test_rate_encodes_half_points_as_int_times_two():
+    """A score of 7.5 stores as 15. _encode_rating roundtrips via _format_rating."""
+    assert p._encode_rating(7.5) == 15
+    assert p._format_rating(15) == "7.5"
+    assert p._encode_rating(10) == 20
+    assert p._encode_rating(1) == 2
+
+
+def test_rate_rejects_out_of_range_scores():
+    assert p._encode_rating(0.5) is None
+    assert p._encode_rating(10.5) is None
+    assert p._encode_rating("abc") is None
+    assert p._encode_rating(None) is None
+
+
+def test_rate_command_writes_upsert():
+    ctx = MockContext()
+    ctx.kv.set("last_anime:user:rate1", SAMPLE_MEDIA["id"], ttl_seconds=3600)
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_rate(ctx, _slash_event("rate", {"score": 8.5}, user_id="rate1"))
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_anime" in c["sql"]]
+    assert inserts
+    # Params: [user_id, media_id, status, rating]
+    assert inserts[-1]["params"][0] == "rate1"
+    assert inserts[-1]["params"][1] == SAMPLE_MEDIA["id"]
+    assert inserts[-1]["params"][3] == 17  # 8.5 × 2
+    assert "rating = EXCLUDED.rating" in inserts[-1]["sql"]
+
+    follow = ctx.interaction.followups[-1]
+    assert "8.5/10" in (follow.get("content") or "")
+
+
+def test_rate_command_rejects_invalid_score():
+    ctx = MockContext()
+    p.cmd_rate(ctx, _slash_event("rate", {"score": 11}, user_id="rate2"))
+    resp = ctx.interaction.responses[-1]
+    assert resp.get("ephemeral") is True
+    assert "1.0" in (resp.get("content") or "")
+    # Must short-circuit before any SQL.
+    assert not ctx.sql.executed
+
+
+def test_rate_command_without_cached_anime_prompts_user():
+    ctx = MockContext()
+    p.cmd_rate(ctx, _slash_event("rate", {"score": 7}, user_id="rate-new"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "/anime" in (follow.get("content") or "")
+
+
+def test_ratings_lists_rows_sorted_by_score_desc():
+    ctx = MockContext()
+    rows = [
+        {"media_id": 1, "rating": 20, "status": "completed", "is_favorite": False},
+        {"media_id": 2, "rating": 15, "status": "watching", "is_favorite": True},
+    ]
+    captured = {}
+
+    def _q(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        captured["params"] = params
+        return rows
+
+    ctx.sql.query = _q  # type: ignore[assignment]
+    _mock_anilist(ctx, {"Page": {"media": [
+        _make_other(1, "Top"),
+        _make_other(2, "Second"),
+    ]}})
+
+    p.cmd_ratings(ctx, _slash_event("ratings", {}, user_id="urat"))
+
+    assert "ORDER BY rating DESC" in captured["sql"]
+    assert captured["params"][0] == "urat"
+    follow = ctx.interaction.followups[-1]
+    body = follow["embeds"][0]["description"]
+    assert "10.0" in body  # rating 20 → 10.0
+    assert "7.5" in body   # rating 15 → 7.5
+    # Top scoring row should appear before the second.
+    assert body.index("10.0") < body.index("7.5")
+
+
+def test_ratings_empty_state_message():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    p.cmd_ratings(ctx, _slash_event("ratings", {}, user_id="urat-empty"))
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "rate" in (follow.get("content") or "").lower()
 
 
 # ── v1.4.0 i18n string table ────────────────────────────────────────────────
