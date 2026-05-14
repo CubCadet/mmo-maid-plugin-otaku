@@ -20,6 +20,53 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-05-15
+
+### Added
+- **New capability:** `discord:send_message` (Risky tier — re-triggers
+  marketplace human review).
+- `/notify <anime>` — subscribe to airing notifications for an anime.
+  Stores the channel where the subscription was made, so the cron can
+  fall back to that channel if no server-wide announce channel is set.
+- `/unnotify <anime>` — remove a subscription.
+- `/notify-list` — ephemeral list of your subscriptions, with the
+  next-episode ETA pulled live from AniList.
+- `/otaku-admin set-channel [channel]` — admin-only. Sets the
+  per-server announcement channel for airing pings. Omit the channel
+  arg to clear.
+- New SQL table `otaku_notifications (user_id, media_id, channel_id,
+  added_at; PK (user_id, media_id))`.
+- New KV key `notify_channel:guild` for the per-server announce channel.
+- `@plugin.cron("5 * * * *")` — hourly airing check that polls AniList's
+  `Page.airingSchedules(airingAt_greater, airingAt_lesser)` for a
+  75-minute window (slightly wider than the cron interval to absorb
+  delay), then dispatches `discord.send_message` to each subscriber's
+  target channel.
+- Ephemeral dedup at `otaku:airing:<media_id>:<episode>` (24h TTL)
+  ensures a single airing only pings once.
+- Regression file `tests/regression/test_v4_0_0.py`.
+
+### Changed
+- Manifest description + tags reflect the notifications surface.
+
+### Migration
+- Existing v3.x installs will be re-prompted to grant `discord:send_message`
+  on next interaction. Until granted, `/notify` still records subscriptions
+  but the cron can't post pings.
+
+### Roadmap deviation
+- The ROADMAP originally split this work: `v4.0 = per-user DM pings`,
+  `v4.1 = server announcement channel`. Two SDK gaps motivated rolling
+  v4.1's work forward into v4.0:
+  1. The SDK has no DM helper — `ctx.discord.send_message` only takes a
+     `channel_id`. Channel pings with @mentions deliver the same UX in
+     a way the SDK supports cleanly.
+  2. The server-side cron manifest declaration is documented as
+     "consult the dev portal docs," which aren't bundled with this skill.
+     We use `@plugin.cron` (which works in single-tenant deployments) and
+     don't fire in pool mode. The roadmap was clear about this risk.
+- v4.1 is now vacant; v4.2 (seasonal premieres digest) is unchanged.
+
 ## [3.3.0] - 2026-05-15
 
 ### Added

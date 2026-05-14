@@ -696,6 +696,245 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v4.0.0 /notify + /unnotify + /notify-list + airing dispatch ────────────
+
+
+def test_notify_subscribes_and_stores_channel_id():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: None  # type: ignore[assignment]
+
+    event = _slash_event("notify", {"anime": "your name"}, user_id="n1")
+    event["channel_id"] = "channel-42"
+    p.cmd_notify(ctx, event)
+
+    inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_notifications" in c["sql"]]
+    assert inserts
+    # params: [user_id, media_id, channel_id]
+    assert inserts[-1]["params"] == ["n1", SAMPLE_MEDIA["id"], "channel-42"]
+    follow = ctx.interaction.followups[-1]
+    assert "pinged" in (follow.get("content") or "").lower() or "subscribed" in (follow.get("content") or "").lower()
+
+
+def test_notify_duplicate_subscription_short_circuits():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: {"1": 1}  # type: ignore[assignment]
+
+    p.cmd_notify(ctx, _slash_event("notify", {"anime": "x"}, user_id="n2"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "already" in (follow.get("content") or "").lower()
+    assert not any("INSERT INTO otaku_notifications" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_unnotify_deletes_existing_subscription():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: {"1": 1}  # type: ignore[assignment]
+
+    p.cmd_unnotify(ctx, _slash_event("unnotify", {"anime": "x"}, user_id="n3"))
+
+    deletes = [c for c in ctx.sql.executed if "DELETE FROM otaku_notifications" in c["sql"]]
+    assert deletes and deletes[-1]["params"] == ["n3", SAMPLE_MEDIA["id"]]
+
+
+def test_unnotify_not_subscribed_says_so():
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+    ctx.sql.query_one = lambda sql, params=None: None  # type: ignore[assignment]
+
+    p.cmd_unnotify(ctx, _slash_event("unnotify", {"anime": "x"}, user_id="n4"))
+
+    follow = ctx.interaction.followups[-1]
+    assert "not subscribed" in (follow.get("content") or "").lower()
+    assert not any("DELETE FROM otaku_notifications" in c["sql"] for c in ctx.sql.executed)
+
+
+def test_notify_list_empty_state():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+
+    p.cmd_notify_list(ctx, _slash_event("notify-list", {}, user_id="n5"))
+
+    follow = ctx.interaction.followups[-1]
+    assert follow.get("ephemeral") is True
+    assert "not subscribed" in (follow.get("content") or "").lower()
+
+
+def test_notify_list_populated_renders_with_titles():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: [{"media_id": 1}, {"media_id": 2}]  # type: ignore[assignment]
+    # Multi-purpose response: AniList batch returns titles. The next-airing
+    # lookup uses the same canned response since MockHttp dispatches by URL
+    # substring. That gives the test a deterministic body even though the
+    # production cron query is different.
+    _mock_anilist(ctx, {
+        "Page": {
+            "media": [_make_other(1, "First"), _make_other(2, "Second")],
+            "airingSchedules": [],
+        },
+    })
+
+    p.cmd_notify_list(ctx, _slash_event("notify-list", {}, user_id="n6"))
+
+    follow = ctx.interaction.followups[-1]
+    body = follow["embeds"][0]["description"]
+    assert "First" in body and "Second" in body
+
+
+# ── /otaku-admin set-channel ────────────────────────────────────────────────
+
+
+def test_otaku_admin_set_channel_requires_admin():
+    ctx = MockContext()
+    event = make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="otaku-admin",
+        options=[{"name": "set-channel", "type": 1,
+                  "options": [{"name": "channel", "value": "777"}]}],
+        user_id="rando",
+    )
+    p.cmd_otaku_admin(ctx, event)
+    follow = ctx.interaction.followups[-1]
+    assert "server-admin only" in (follow.get("content") or "")
+    assert ctx.kv.get(p.NOTIFY_CHANNEL_KV) is None
+
+
+def test_otaku_admin_set_channel_admin_writes_kv():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+
+    event = make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="otaku-admin",
+        options=[{"name": "set-channel", "type": 1,
+                  "options": [{"name": "channel", "value": "888"}]}],
+        user_id="boss",
+    )
+    p.cmd_otaku_admin(ctx, event)
+
+    assert ctx.kv.get(p.NOTIFY_CHANNEL_KV) == "888"
+    follow = ctx.interaction.followups[-1]
+    assert "<#888>" in (follow.get("content") or "")
+
+
+def test_otaku_admin_set_channel_clear():
+    ctx = MockContext()
+    ctx.discord.get_guild = lambda: {"id": "g", "owner_id": "boss"}  # type: ignore[assignment]
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "999")
+
+    event = make_event(
+        "interaction_create",
+        interaction_type=2,
+        command_name="otaku-admin",
+        options=[{"name": "set-channel", "type": 1, "options": []}],
+        user_id="boss",
+    )
+    p.cmd_otaku_admin(ctx, event)
+
+    assert ctx.kv.get(p.NOTIFY_CHANNEL_KV) is None
+    follow = ctx.interaction.followups[-1]
+    assert "Cleared" in (follow.get("content") or "")
+
+
+# ── Airing dispatch ─────────────────────────────────────────────────────────
+
+
+def _airing_response(media_id: int, episode: int, title: str = "Show") -> dict:
+    """Build an AniList airingSchedules payload for one airing."""
+    import datetime as _dt
+    now_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp())
+    return {
+        "Page": {
+            "pageInfo": {"hasNextPage": False},
+            "airingSchedules": [
+                {
+                    "id": 1,
+                    "episode": episode,
+                    "airingAt": now_ts,
+                    "media": {
+                        "id": media_id,
+                        "episodes": 12,
+                        "siteUrl": f"https://anilist.co/anime/{media_id}",
+                        "title": {"romaji": title, "english": ""},
+                        "coverImage": {"large": "https://img.example.com/a.jpg"},
+                    },
+                },
+            ],
+        },
+    }
+
+
+def test_dispatch_airing_announcements_posts_to_announcement_channel():
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "announce-1")
+    _mock_anilist(ctx, _airing_response(media_id=42, episode=3, title="Test"))
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"user_id": "alice", "channel_id": "channel-orig"},
+        {"user_id": "bob",   "channel_id": "channel-orig"},
+    ]
+
+    sent = p._dispatch_airing_announcements(ctx)
+
+    assert sent == 1  # one channel × one airing → one send
+    msg = ctx.discord.messages_sent[-1]
+    assert msg["channel_id"] == "announce-1"
+    assert "<@alice>" in msg["content"] and "<@bob>" in msg["content"]
+
+
+def test_dispatch_airing_announcements_falls_back_to_per_user_channel():
+    """No global announce channel → posts to the channel where each user subscribed."""
+    ctx = MockContext()
+    _mock_anilist(ctx, _airing_response(media_id=42, episode=3))
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"user_id": "alice", "channel_id": "channel-A"},
+        {"user_id": "bob",   "channel_id": "channel-B"},
+    ]
+
+    p._dispatch_airing_announcements(ctx)
+
+    targets = {m["channel_id"] for m in ctx.discord.messages_sent}
+    assert targets == {"channel-A", "channel-B"}
+
+
+def test_dispatch_airing_announcements_dedups_repeat_calls():
+    """Calling the dispatch twice for the same airing only sends once."""
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "announce-1")
+    _mock_anilist(ctx, _airing_response(media_id=42, episode=3))
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"user_id": "alice", "channel_id": "channel-orig"},
+    ]
+
+    p._dispatch_airing_announcements(ctx)
+    p._dispatch_airing_announcements(ctx)
+
+    assert len(ctx.discord.messages_sent) == 1  # second call dedup'd
+
+
+def test_dispatch_airing_announcements_no_subscribers_skips():
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "announce-1")
+    _mock_anilist(ctx, _airing_response(media_id=42, episode=3))
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+
+    sent = p._dispatch_airing_announcements(ctx)
+
+    assert sent == 0
+    assert not ctx.discord.messages_sent
+
+
+def test_cron_airing_check_calls_dispatch_safely():
+    """The cron handler should swallow exceptions from dispatch."""
+    ctx = MockContext()
+    # No mock_response → dispatch returns 0 since http will be empty.
+    p.cron_airing_check(ctx)
+    # No exception is the contract.
+
+
 # ── v3.3.0 /leaderboard ─────────────────────────────────────────────────────
 
 

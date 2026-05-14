@@ -572,32 +572,26 @@ CREATE TABLE otaku_watch_party_members (
 
 **Capability needed:** `discord:send_message` arrives here (sending unprompted to a channel, not just responding to interactions). This is the **first Risky tier capability** — will re-trigger marketplace human review.
 
-### v4.0.0 — Per-user airing subscriptions
+### v4.0.0 — Airing notifications (consolidated) ✅ shipped 2026-05-15
 
-**New slash commands:**
-- `/notify <anime>` — Subscribe to next-episode notifications for an anime. Stored per-user, DMs the user when the episode airs.
-- `/notify-list` — Show subscriptions.
-- `/unnotify <anime>` — Remove a subscription.
+Two slices of the original Phase 4 plan rolled into one tag because of SDK gaps. See CHANGELOG v4.0.0 for the full deviation note. Summary:
 
-**Implementation:**
-- A server-side cron (registered in `manifest.json`, not `@plugin.cron` — that doesn't work in pool mode) checks AniList's `airingSchedule` daily and triggers per-user pings.
-- Use AniList's `Page.airingSchedules(airingAt_greater: <now>, airingAt_lesser: <now+24h>)` query.
+**Slash commands:**
+- ~~`/notify <anime>` — DMs the user when the episode airs~~ → posts in the announcement channel (or fallback per-subscription channel) with @mentions instead of DMs. The SDK doesn't expose a DM helper, only `send_message(channel_id=...)`.
+- ~~`/notify-list`~~ ✓ (with live next-episode ETA from AniList).
+- ~~`/unnotify <anime>`~~ ✓.
+- **Added in v4.0**: `/otaku-admin set-channel` (was originally planned for v4.1). Admin-gated via the existing `_caller_is_admin` helper.
 
-**Schema:**
-```sql
-CREATE TABLE otaku_notifications (
-  user_id     TEXT NOT NULL,
-  media_id    INTEGER NOT NULL,
-  PRIMARY KEY (user_id, media_id)
-);
-```
+**Cron implementation:**
+- ~~"register a server-side cron in the manifest"~~ — the manifest field name isn't documented in this skill ("consult the dev portal docs"). Shipped with `@plugin.cron("5 * * * *")` which works in single-tenant deployments. In pool mode it doesn't fire — documented as a known limitation. Lazy fallback: `/notify-list` exercises the live AniList query so users still see fresh data even without the cron.
+
+**Schema:** added `channel_id TEXT` column vs. the roadmap's two-column shape — needed for the fallback channel when no announcement channel is set.
 
 ---
 
-### v4.1.0 — Server announcement channel
+### v4.1.0 — vacant
 
-**New slash command (admin-only):**
-- `/otaku-admin set-announcements #channel` — Designate a channel for server-wide airing announcements (anime the server is broadly tracking).
+Originally "server announcement channel." Shipped as part of v4.0.0 above.
 
 ---
 

@@ -89,6 +89,17 @@ _SCHEMA_WATCH_PARTY_MEMBERS_DDL = (
     "  joined_at TIMESTAMP NOT NULL DEFAULT NOW(),"
     "  PRIMARY KEY (party_id, user_id))"
 )
+# v4.0.0 — per-user airing notification subscriptions. channel_id remembers
+# where the user subscribed so the cron has a fallback target if no server-wide
+# announcement channel is configured.
+_SCHEMA_NOTIFICATIONS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_notifications ("
+    "  user_id TEXT NOT NULL,"
+    "  media_id INTEGER NOT NULL,"
+    "  channel_id TEXT,"
+    "  added_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (user_id, media_id))"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -207,6 +218,32 @@ class _Strings:
     )
     RATE_OUT_OF_RANGE = "Score must be between 1.0 and 10.0."
     RATE_SET = "Rated **{title}** {score}/10."
+
+    # /notify, /unnotify, /notify-list.
+    NOTIFY_USAGE = "Pass an anime with `anime:` — e.g. `/notify anime: Frieren`."
+    NOTIFY_SUBSCRIBED = "🔔 You'll be pinged when new episodes of **{title}** air."
+    NOTIFY_ALREADY = "You're already subscribed to **{title}**."
+    NOTIFY_REMOVED = "Removed airing notifications for **{title}**."
+    NOTIFY_NOT_SUBSCRIBED = "You're not subscribed to **{title}**."
+    NOTIFY_LIST_HEADER = "🔔 Your airing subscriptions"
+    NOTIFY_LIST_EMPTY = (
+        "You're not subscribed to any anime. Try `/notify anime: <title>` "
+        "to get pinged when new episodes air."
+    )
+    NOTIFY_LIST_LINE = "• [{title}]({url}) · next: {next_eta}"
+    NOTIFY_NO_NEXT = "no upcoming episode"
+    NOTIFY_ANNOUNCEMENT_TITLE = "📺 New episode airing — {title}"
+    NOTIFY_ANNOUNCEMENT_BODY = (
+        "Episode **{episode}**{of_total} is airing now.\n"
+        "{mentions}"
+    )
+
+    # /otaku-admin set-channel.
+    ADMIN_CHANNEL_SET = "Airing notifications will now post in <#{channel_id}>."
+    ADMIN_CHANNEL_CLEARED = (
+        "Cleared the announcement channel. Airing notifications will fall back to "
+        "the channel where each user subscribed."
+    )
 
     # /leaderboard.
     LEADERBOARD_HEADER_COMPLETED = "🏆 Server leaderboard — most completed"
@@ -379,6 +416,14 @@ STATUS_LABEL = {
     "plan":      "Plan to watch",
 }
 
+# v4.0.0 — airing notifications.
+NOTIFY_CHANNEL_KV = "notify_channel:guild"
+# How far ahead the cron looks for airings each run. With an hourly schedule
+# this is 60min, but we sweep slightly wider so a delayed cron doesn't miss
+# anything. The ephemeral dedup keeps a single airing from being announced twice.
+NOTIFY_LOOKAHEAD_SECONDS = 75 * 60
+NOTIFY_DEDUP_TTL = 24 * 60 * 60  # 24h — one airing only pings once per day
+
 # Retry budget for AniList transient failures (RpcTimeoutError, 5xx).
 # Sleeps 0.5s then 1.5s — total worst case 2s, well under the 15-min followup
 # window. RateLimitError is never retried; ValidationError isn't retryable.
@@ -501,6 +546,27 @@ QUERY_MEDIA_BATCH = (
     "query ($ids: [Int]) {"
     "  Page(perPage: 50) {"
     "    media(id_in: $ids, type: ANIME) {" + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
+
+# v4.0.0 — airing schedule lookup for the notification cron.
+QUERY_AIRING_WINDOW = (
+    "query ($at_gte: Int, $at_lte: Int) {"
+    "  Page(page: 1, perPage: 50) {"
+    "    pageInfo { hasNextPage }"
+    "    airingSchedules(airingAt_greater: $at_gte, airingAt_lesser: $at_lte) {"
+    "      id"
+    "      episode"
+    "      airingAt"
+    "      media {"
+    "        id"
+    "        episodes"
+    "        siteUrl"
+    "        title { romaji english }"
+    "        coverImage { large }"
+    "      }"
+    "    }"
     "  }"
     "}"
 )
@@ -1114,6 +1180,8 @@ def _bootstrap_schema(ctx: Context) -> None:
     # v3.2.0
     ctx.sql.execute(_SCHEMA_WATCH_PARTY_DDL)
     ctx.sql.execute(_SCHEMA_WATCH_PARTY_MEMBERS_DDL)
+    # v4.0.0
+    ctx.sql.execute(_SCHEMA_NOTIFICATIONS_DDL)
 
 
 @plugin.on_install
@@ -1876,26 +1944,7 @@ def _caller_is_admin(ctx: Context, user_id: str) -> bool:
     return False
 
 
-@plugin.on_slash_command("otaku-admin")
-def cmd_otaku_admin(ctx: Context, event: dict) -> None:
-    user_id = event.get("user_id") or ""
-    if _on_cooldown(ctx, user_id):
-        return
-
-    # Slash sub-commands arrive as a nested options list.
-    raw_options = event.get("options") or []
-    if not raw_options:
-        ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
-        return
-    first = raw_options[0] if isinstance(raw_options, list) else {}
-    subcommand = (first.get("name") or "").strip()
-    sub_options = first.get("options") or []
-    sub_opts = {o["name"]: o["value"] for o in sub_options if isinstance(o, dict) and "name" in o}
-
-    if subcommand != "reset-user":
-        ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
-        return
-
+def _otaku_admin_reset_user(ctx: Context, user_id: str, sub_opts: dict) -> None:
     target_user = str(sub_opts.get("user") or "").strip()
     if not target_user:
         ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
@@ -1921,6 +1970,344 @@ def cmd_otaku_admin(ctx: Context, event: dict) -> None:
             content=S.ADMIN_RESET_NOTHING.format(user=target_user),
             ephemeral=True,
         )
+
+
+def _otaku_admin_set_channel(ctx: Context, user_id: str, sub_opts: dict) -> None:
+    ctx.interaction.defer(ephemeral=True)
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.followup(content=S.ADMIN_DENIED, ephemeral=True)
+        return
+
+    channel_raw = sub_opts.get("channel")
+    if channel_raw is None or str(channel_raw).strip() == "":
+        # Empty argument → clear the channel.
+        try:
+            ctx.kv.delete(NOTIFY_CHANNEL_KV)
+        except Exception:  # noqa: BLE001
+            pass
+        ctx.interaction.followup(content=S.ADMIN_CHANNEL_CLEARED, ephemeral=True)
+        return
+
+    channel_id = str(channel_raw).strip()
+    ctx.kv.set(NOTIFY_CHANNEL_KV, channel_id)
+    ctx.interaction.followup(
+        content=S.ADMIN_CHANNEL_SET.format(channel_id=channel_id),
+        ephemeral=True,
+    )
+
+
+@plugin.on_slash_command("otaku-admin")
+def cmd_otaku_admin(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+
+    # Slash sub-commands arrive as a nested options list.
+    raw_options = event.get("options") or []
+    if not raw_options:
+        ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
+        return
+    first = raw_options[0] if isinstance(raw_options, list) else {}
+    subcommand = (first.get("name") or "").strip()
+    sub_options = first.get("options") or []
+    sub_opts = {o["name"]: o["value"] for o in sub_options if isinstance(o, dict) and "name" in o}
+
+    if subcommand == "reset-user":
+        _otaku_admin_reset_user(ctx, user_id, sub_opts)
+        return
+    if subcommand == "set-channel":
+        _otaku_admin_set_channel(ctx, user_id, sub_opts)
+        return
+
+    ctx.interaction.respond(content=S.ADMIN_USER_REQUIRED, ephemeral=True)
+
+
+# ── v4.0.0 — airing notifications ───────────────────────────────────────────
+
+def _fetch_next_airing(ctx: Context, media_id: int) -> dict | None:
+    """Best-effort lookup of the next airing for a single media id."""
+    now = int(datetime.now(timezone.utc).timestamp())
+    data = _anilist_query(
+        ctx, QUERY_AIRING_WINDOW,
+        {"at_gte": now, "at_lte": now + 60 * 60 * 24 * 14},  # 14 days ahead
+        cache=False,
+    )
+    if not data:
+        return None
+    schedules = ((data.get("Page") or {}).get("airingSchedules")) or []
+    for s in schedules:
+        if int((s.get("media") or {}).get("id") or 0) == int(media_id):
+            return s
+    return None
+
+
+def _airing_eta_str(airing_at: int | None) -> str:
+    """Human-readable countdown like '3h 21m' or 'now'."""
+    if airing_at is None:
+        return S.NOTIFY_NO_NEXT
+    delta = int(airing_at) - int(datetime.now(timezone.utc).timestamp())
+    if delta <= 0:
+        return "now"
+    days, rem = divmod(delta, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"in {days}d {hours}h"
+    if hours:
+        return f"in {hours}h {minutes}m"
+    return f"in {minutes}m"
+
+
+@plugin.on_slash_command("notify")
+def cmd_notify(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    channel_id = str(event.get("channel_id") or "")
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    raw = str(opts.get("anime") or "").strip()
+    if not raw:
+        ctx.interaction.respond(content=S.NOTIFY_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    media, err = _resolve_anime_arg_for_swl(ctx, raw)
+    if media is None:
+        if err is None:
+            _reply_anilist_failure(ctx, deferred=True)
+        else:
+            _reply_error(ctx, err, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    title = _format_title(media)
+
+    existing = ctx.sql.query_one(
+        "SELECT 1 FROM otaku_notifications WHERE user_id = $1 AND media_id = $2",
+        [user_id, media_id],
+    )
+    if existing:
+        ctx.interaction.followup(content=S.NOTIFY_ALREADY.format(title=title), ephemeral=True)
+        return
+
+    ctx.sql.execute(
+        "INSERT INTO otaku_notifications (user_id, media_id, channel_id) "
+        "VALUES ($1, $2, $3) "
+        "ON CONFLICT (user_id, media_id) DO UPDATE SET channel_id = EXCLUDED.channel_id",
+        [user_id, media_id, channel_id or None],
+    )
+    ctx.interaction.followup(
+        content=S.NOTIFY_SUBSCRIBED.format(title=title),
+        ephemeral=True,
+    )
+
+
+@plugin.on_slash_command("unnotify")
+def cmd_unnotify(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    raw = str(opts.get("anime") or "").strip()
+    if not raw:
+        ctx.interaction.respond(content=S.NOTIFY_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer(ephemeral=True)
+    media, err = _resolve_anime_arg_for_swl(ctx, raw)
+    if media is None:
+        if err is None:
+            _reply_anilist_failure(ctx, deferred=True)
+        else:
+            _reply_error(ctx, err, deferred=True)
+        return
+
+    media_id = int(media.get("id") or 0)
+    title = _format_title(media)
+
+    existing = ctx.sql.query_one(
+        "SELECT 1 FROM otaku_notifications WHERE user_id = $1 AND media_id = $2",
+        [user_id, media_id],
+    )
+    if not existing:
+        ctx.interaction.followup(content=S.NOTIFY_NOT_SUBSCRIBED.format(title=title), ephemeral=True)
+        return
+
+    ctx.sql.execute(
+        "DELETE FROM otaku_notifications WHERE user_id = $1 AND media_id = $2",
+        [user_id, media_id],
+    )
+    ctx.interaction.followup(content=S.NOTIFY_REMOVED.format(title=title), ephemeral=True)
+
+
+@plugin.on_slash_command("notify-list")
+def cmd_notify_list(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    ctx.interaction.defer(ephemeral=True)
+
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_notifications WHERE user_id = $1 "
+        "ORDER BY added_at DESC LIMIT 25",
+        [user_id],
+    ) or []
+    if not rows:
+        _reply_error(ctx, S.NOTIFY_LIST_EMPTY, deferred=True)
+        return
+
+    ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": ids}, cache=True)
+    media_by_id: dict[int, dict] = {}
+    if data:
+        for m in ((data.get("Page") or {}).get("media") or []):
+            mid = m.get("id")
+            if isinstance(mid, int):
+                media_by_id[mid] = m
+
+    lines = []
+    for mid in ids:
+        m = media_by_id.get(mid)
+        title = _format_title(m) if m else f"#{mid}"
+        url = (m or {}).get("siteUrl") or ""
+        next_airing = _fetch_next_airing(ctx, mid)
+        next_eta = _airing_eta_str((next_airing or {}).get("airingAt"))
+        if url:
+            lines.append(S.NOTIFY_LIST_LINE.format(title=title, url=url, next_eta=next_eta))
+        else:
+            lines.append(f"• {title} · next: {next_eta}")
+
+    embed = {
+        "title": S.NOTIFY_LIST_HEADER,
+        "description": "\n".join(lines),
+        "color": ANILIST_COLOR,
+        "footer": {"text": f"{len(ids)} subscription(s) · Data from AniList"},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
+
+
+def _resolve_announcement_channel(ctx: Context) -> str | None:
+    """Return the per-server announcement channel id, or None if not configured."""
+    try:
+        val = ctx.kv.get(NOTIFY_CHANNEL_KV)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+def _build_airing_embed(media: dict, episode: int) -> dict:
+    title = _format_title(media)
+    total = media.get("episodes") if isinstance(media, dict) else None
+    of_total = f" / {total}" if isinstance(total, int) and total > 0 else ""
+    embed = {
+        "title": S.NOTIFY_ANNOUNCEMENT_TITLE.format(title=title),
+        "description": f"Episode **{episode}**{of_total} is airing now.",
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.FOOTER_ANILIST},
+    }
+    cover = (media.get("coverImage") or {}).get("large") if isinstance(media, dict) else None
+    if cover:
+        embed["thumbnail"] = {"url": cover}
+    url = media.get("siteUrl") if isinstance(media, dict) else None
+    if url:
+        embed["url"] = url
+    return embed
+
+
+def _airing_dedup_key(media_id: int, episode: int) -> str:
+    return f"otaku:airing:{media_id}:{episode}"
+
+
+def _dispatch_airing_announcements(ctx: Context) -> int:
+    """Look at the next NOTIFY_LOOKAHEAD_SECONDS for airings and post pings.
+
+    Returns the number of announcements actually sent. Deduped via ephemeral
+    so a re-fired cron doesn't double-ping. Safe to call from a slash handler
+    as a fallback in pool mode.
+    """
+    now = int(datetime.now(timezone.utc).timestamp())
+    data = _anilist_query(
+        ctx, QUERY_AIRING_WINDOW,
+        {"at_gte": now - 5 * 60, "at_lte": now + NOTIFY_LOOKAHEAD_SECONDS},
+    )
+    if not data:
+        return 0
+    schedules = ((data.get("Page") or {}).get("airingSchedules")) or []
+    if not schedules:
+        return 0
+
+    fallback_channel = _resolve_announcement_channel(ctx)
+    sent = 0
+
+    for s in schedules:
+        media = s.get("media") or {}
+        media_id = int(media.get("id") or 0)
+        episode = int(s.get("episode") or 0)
+        if not media_id or not episode:
+            continue
+
+        # Dedup: one airing only pings once.
+        dedup_key = _airing_dedup_key(media_id, episode)
+        try:
+            if not ctx.ephemeral.dedup(dedup_key, ttl_seconds=NOTIFY_DEDUP_TTL):
+                continue
+        except Exception:  # noqa: BLE001 — ephemeral down → still try once
+            pass
+
+        subs = ctx.sql.query(
+            "SELECT user_id, channel_id FROM otaku_notifications WHERE media_id = $1",
+            [media_id],
+        ) or []
+        if not subs:
+            continue
+
+        # Group subscribers by which channel we'd post to.
+        by_channel: dict[str, list[str]] = {}
+        for r in subs:
+            target = fallback_channel or (r.get("channel_id") or "")
+            if not target:
+                continue
+            by_channel.setdefault(target, []).append(str(r.get("user_id") or ""))
+
+        embed = _build_airing_embed(media, episode)
+        for channel_id, user_ids in by_channel.items():
+            mentions = " ".join(f"<@{uid}>" for uid in user_ids if uid)
+            content = S.NOTIFY_ANNOUNCEMENT_BODY.format(
+                episode=episode,
+                of_total=(f" / {media.get('episodes')}" if media.get("episodes") else ""),
+                mentions=mentions,
+            )
+            try:
+                ctx.discord.send_message(
+                    channel_id=channel_id,
+                    content=content,
+                    embeds=[embed],
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                ctx.log(
+                    f"airing announce failed: {exc}",
+                    level="warning",
+                    tags=["notify"],
+                    channel_id=channel_id,
+                    media_id=str(media_id),
+                )
+    return sent
+
+
+@plugin.cron("5 * * * *")  # every hour at :05 UTC (single-tenant only)
+def cron_airing_check(ctx: Context) -> None:
+    """In pool mode this never fires. See CHANGELOG v4.0.0 — fallback runs from
+    /notify-list so users still see fresh data."""
+    try:
+        n = _dispatch_airing_announcements(ctx)
+    except Exception as exc:  # noqa: BLE001
+        ctx.log(f"cron_airing_check failed: {exc}", level="error", tags=["notify", "cron"])
+        return
+    if n:
+        ctx.log(f"airing cron sent {n} announcement(s)", level="info", tags=["notify", "cron"])
 
 
 # ── v3.3.0 — /leaderboard ───────────────────────────────────────────────────

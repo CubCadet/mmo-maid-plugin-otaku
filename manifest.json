@@ -1,12 +1,13 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "3.3.0",
-  "description": "Discover anime via AniList AND track your own — favorites, watch status, episode counts. Search by title, browse by genre, see what's trending, find similar shows, and keep a per-server list of what you've watched.",
+  "version": "4.0.0",
+  "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
-  "tags": ["anime", "anilist", "discovery", "search", "tracking"],
+  "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
   "capabilities_required": [
     "discord:read",
+    "discord:send_message",
     "interaction:respond",
     "proxy:http",
     "storage:kv",
@@ -350,8 +351,49 @@
               "required": true
             }
           ]
+        },
+        {
+          "name": "set-channel",
+          "description": "Set the channel where airing-notification pings are posted.",
+          "type": 1,
+          "options": [
+            {
+              "name": "channel",
+              "description": "Channel for airing notifications. Omit to clear.",
+              "type": 7,
+              "required": false
+            }
+          ]
         }
       ]
+    },
+    {
+      "name": "notify",
+      "description": "Subscribe to airing notifications for an anime.",
+      "options": [
+        {
+          "name": "anime",
+          "description": "Anime title or AniList media ID",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "unnotify",
+      "description": "Stop receiving airing notifications for an anime.",
+      "options": [
+        {
+          "name": "anime",
+          "description": "Anime title or AniList media ID",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "notify-list",
+      "description": "Show your active airing subscriptions."
     },
     {
       "name": "stats",

@@ -19,6 +19,7 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 | `storage:kv` | Safe | Cache each user's last-viewed anime ID for 7 days so `/similar` can default to it. Also caches AniList's genre list for 24h. |
 | `storage:sql` | Risky | Per-user anime tracking (`/favorite`, `/watch`, `/list`, `/favorites`). Single table `otaku_user_anime`, auto-scoped per server. |
 | `discord:read` | Safe | Read the caller's guild membership and roles to gate `/otaku-admin` to server admins (anyone with `Administrator` or `Manage Server`). Used purely for permission checks. |
+| `discord:send_message` | Risky | Post airing notifications to the per-server announcement channel (or the channel each user subscribed in) when AniList reports a new episode is airing. |
 
 No Discord-side write capabilities are requested — the plugin never sends, edits, or deletes channel content directly; everything is an interaction reply.
 
@@ -56,6 +57,10 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/wp status <id>` | Show the party's members and their progress, plus status (active/completed/abandoned). |
 | `/wp progress <id> <episode>` | Update your episode count. If everyone in the party is at the same episode, a public sync announcement fires. |
 | `/leaderboard [metric]` | Server-wide top-10 board. Metric: `completed` (default), `score` (≥3 rated), or `hours`. |
+| `/notify <anime>` | Subscribe to airing notifications for an anime. |
+| `/unnotify <anime>` | Stop airing notifications for an anime. |
+| `/notify-list` | Show your active subscriptions with the next-episode ETA. |
+| `/otaku-admin set-channel <#channel>` | Admin-only. Sets where airing pings post. Omit the channel to clear. |
 
 ### Politeness throttle
 
@@ -68,6 +73,7 @@ The plugin uses two KV keys:
 ```
 last_anime:user:<discord_user_id>   →   <anilist_media_id>   (TTL: 7 days, per-user)
 genres:global                       →   ["Action", ...]      (TTL: 24h, server-wide)
+notify_channel:guild                →   "<channel_id>"       (no TTL, server-wide)
 ```
 
 KV is per-server and per-plugin, so the same user is tracked independently on each server. The 7-day TTL means an inactive user's cache expires on its own — no explicit cleanup needed. KV is wiped automatically on uninstall.
@@ -115,6 +121,15 @@ CREATE TABLE IF NOT EXISTS otaku_watch_party_members (
   episodes_watched  SMALLINT NOT NULL DEFAULT 0,
   joined_at         TIMESTAMP NOT NULL DEFAULT NOW(),
   PRIMARY KEY (party_id, user_id)
+);
+
+-- v4.0.0:
+CREATE TABLE IF NOT EXISTS otaku_notifications (
+  user_id    TEXT NOT NULL,
+  media_id   INTEGER NOT NULL,
+  channel_id TEXT,
+  added_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, media_id)
 );
 ```
 
