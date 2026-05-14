@@ -679,5 +679,10 @@ def comp_expand(ctx: Context, event: dict) -> None:
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+# Non-negotiable per the mmo-maid-plugins skill: plugin.run() is the last line.
+# Tests import __main__ via a renamed module spec; they set OTAKU_SKIP_RUN=1 in
+# tests/conftest.py so the import doesn't block on the RPC loop.
+import os as _os
+
+if not _os.environ.get("OTAKU_SKIP_RUN"):
     plugin.run()

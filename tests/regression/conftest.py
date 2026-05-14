@@ -6,8 +6,11 @@ so the regression suite can be run in isolation: `pytest tests/regression -q`.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
+
+os.environ["OTAKU_SKIP_RUN"] = "1"
 
 _MAIN_PY = Path(__file__).resolve().parents[2] / "__main__.py"
 if "plugin_main" not in sys.modules:
