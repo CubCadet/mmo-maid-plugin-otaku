@@ -31,6 +31,91 @@ from mmo_maid_sdk import (
 
 plugin = Plugin()
 
+
+# ── User-facing strings (i18n-ready) ─────────────────────────────────────────
+# Every string the user could ever see lives here. The runtime upload zip's
+# allowlist doesn't permit a sibling strings.py module, so we keep them in a
+# single namespace inside __main__.py. A future localization layer can swap
+# this namespace out per-locale.
+class _Strings:
+    # Error helpers.
+    ANILIST_FAILURE_DEFAULT = (
+        "AniList didn't answer — try again in a moment, or try a different keyword."
+    )
+    ANILIST_PREFIX = "AniList: {msg}"
+
+    # Cooldown.
+    COOLDOWN_WAIT = "Slow down a bit — try again in {remaining}s."
+
+    # Generic.
+    UNTITLED = "Untitled"
+
+    # /anime.
+    ANIME_USAGE = "Usage: `/anime query: <title>`"
+    ANIME_NOT_FOUND = "No anime found matching **{query}**."
+    ANIME_NO_DESCRIPTION = "*(no description)*"
+
+    # /discover.
+    DISCOVER_USAGE = "Usage: `/discover genre: <name> [sort: popular|trending|score]`"
+    DISCOVER_NO_RESULTS = "No {genre} anime found."
+
+    # /trending.
+    TRENDING_NO_RESULTS = "No trending anime found for this season."
+
+    # /similar.
+    SIMILAR_NO_RECS = "No recommendations on AniList for **{title}** yet."
+    SIMILAR_INVALID_CACHED = (
+        "Your cached anime ID looks invalid — look one up again with `/anime`."
+    )
+    SIMILAR_NO_CACHE = (
+        "You haven't looked up an anime yet. Try `/anime query: <title>` first."
+    )
+    SIMILAR_FETCH_FAIL_CACHED = (
+        "Couldn't fetch recommendations for your last anime — try `/anime query: <title>` to refresh it."
+    )
+    SIMILAR_FETCH_FAIL_BUTTON = (
+        "Couldn't fetch recommendations from AniList — try again, or pick a different anime."
+    )
+
+    # /random.
+    RANDOM_NO_RESULTS = "No random anime came back from {label} — try a different genre."
+    RANDOM_FILTER_LABEL = "the **{genre}** filter"
+    RANDOM_NO_FILTER_LABEL = "AniList"
+
+    # /character.
+    CHARACTER_USAGE = "Usage: `/character query: <name>`"
+    CHARACTER_NOT_FOUND = "No character found matching **{query}**."
+    CHARACTER_NO_DESCRIPTION = "*(no description on AniList)*"
+    CHARACTER_UNKNOWN_NAME = "Unknown character"
+
+    # /genres.
+    GENRES_FETCH_FAIL = "Couldn't fetch AniList's genre list — try again in a moment."
+    GENRES_EMPTY = "*(no genres returned)*"
+
+    # /help.
+    HELP_TITLE = "Otaku — commands"
+    HELP_FOOTER = "All data comes from AniList. Type `/help` any time."
+    HELP_EMPTY = "*(no commands registered)*"
+
+    # Component errors.
+    PAGE_MALFORMED = "Pagination button malformed."
+    SIMILAR_BTN_MALFORMED = "Similar button malformed."
+    EXPAND_NO_SELECTION = "No selection received."
+    EXPAND_INVALID = "Selection wasn't a valid anime ID."
+    EXPAND_FETCH_FAIL = (
+        "Couldn't fetch that anime from AniList — try searching again with `/anime`."
+    )
+
+    # Footers & list strings.
+    FOOTER_ANILIST = "Data from AniList"
+    FOOTER_CHARACTER = "Data from AniList · first match only"
+    LIST_NO_RESULTS = "*No results.*"
+    LIST_LAST_PAGE = "(last page)"
+
+
+S = _Strings
+
+
 ANILIST_URL = "https://graphql.anilist.co"
 ANILIST_COLOR = 0x02A9FF
 PER_PAGE = 5
@@ -228,7 +313,7 @@ def _format_title(media: dict) -> str:
     english = (title.get("english") or "").strip()
     if english and romaji and english.lower() != romaji.lower():
         return f"{romaji} ({english})"
-    return romaji or english or "Untitled"
+    return romaji or english or S.UNTITLED
 
 
 def _score(media: dict) -> str:
@@ -252,7 +337,7 @@ def _make_anime_embed(media: dict) -> dict:
     """Full anime card — used by /anime and the expand-from-list select."""
     title = _format_title(media)
     site_url = media.get("siteUrl") or None
-    description = _truncate(_strip_html(media.get("description")), DESC_MAX) or "*(no description)*"
+    description = _truncate(_strip_html(media.get("description")), DESC_MAX) or S.ANIME_NO_DESCRIPTION
     genres = (media.get("genres") or [])[:5]
 
     embed: dict = {
@@ -268,7 +353,7 @@ def _make_anime_embed(media: dict) -> dict:
             {"name": "Status", "value": (media.get("status") or "—").replace("_", " ").title(), "inline": True},
             {"name": "Season", "value": _season_field(media), "inline": True},
         ],
-        "footer": {"text": "Data from AniList"},
+        "footer": {"text": S.FOOTER_ANILIST},
     }
     if genres:
         embed["fields"].append({"name": "Genres", "value": ", ".join(genres), "inline": False})
@@ -289,16 +374,16 @@ def _make_character_embed(char: dict) -> dict:
     if full and native and full != native:
         title = f"{full} ({native})"
     else:
-        title = full or native or "Unknown character"
+        title = full or native or S.CHARACTER_UNKNOWN_NAME
 
-    description = _truncate(_strip_html(char.get("description")), DESC_MAX) or "*(no description on AniList)*"
+    description = _truncate(_strip_html(char.get("description")), DESC_MAX) or S.CHARACTER_NO_DESCRIPTION
     site_url = char.get("siteUrl") or None
     embed: dict = {
         "title": title,
         "url": site_url,
         "description": description,
         "color": ANILIST_COLOR,
-        "footer": {"text": "Data from AniList · first match only"},
+        "footer": {"text": S.FOOTER_CHARACTER},
     }
     image = (char.get("image") or {}).get("large")
     if image:
@@ -320,9 +405,9 @@ def _make_list_embed(media_list: list[dict], header: str, page: int = 1, has_nex
     if not media_list:
         return {
             "title": header,
-            "description": "*No results.*",
+            "description": S.LIST_NO_RESULTS,
             "color": ANILIST_COLOR,
-            "footer": {"text": "Data from AniList"},
+            "footer": {"text": S.FOOTER_ANILIST},
         }
     lines = []
     for i, m in enumerate(media_list, start=1):
@@ -332,9 +417,9 @@ def _make_list_embed(media_list: list[dict], header: str, page: int = 1, has_nex
         url = m.get("siteUrl") or ""
         tag_line = f" — _{genres}_" if genres else ""
         lines.append(f"**{i}. [{title}]({url})** · ⭐ {score}{tag_line}")
-    footer_bits = [f"Page {page}", "Data from AniList"]
+    footer_bits = [f"Page {page}", S.FOOTER_ANILIST]
     if not has_next and page > 1:
-        footer_bits.insert(1, "(last page)")
+        footer_bits.insert(1, S.LIST_LAST_PAGE)
     return {
         "title": header,
         "description": "\n\n".join(lines),
@@ -379,7 +464,7 @@ def _on_cooldown(ctx: Context, user_id: str) -> bool:
     if state.get("active"):
         remaining = int(state.get("remaining_seconds") or 1) or 1
         ctx.interaction.respond(
-            content=f"Slow down a bit — try again in {remaining}s.",
+            content=S.COOLDOWN_WAIT.format(remaining=remaining),
             ephemeral=True,
         )
         return True
@@ -600,9 +685,9 @@ def _reply_anilist_failure(ctx: Context, *, deferred: bool, fallback: str | None
     """
     user_msg = _consume_last_user_error()
     if user_msg:
-        _reply_error(ctx, f"AniList: {user_msg}", deferred=deferred)
+        _reply_error(ctx, S.ANILIST_PREFIX.format(msg=user_msg), deferred=deferred)
         return
-    default = fallback or "AniList didn't answer — try again in a moment, or try a different keyword."
+    default = fallback or S.ANILIST_FAILURE_DEFAULT
     _reply_error(ctx, default, deferred=deferred)
 
 
@@ -635,7 +720,7 @@ def _render_discover(
     embed = _make_list_embed(media_list, header, page=page, has_next=has_next)
 
     if not media_list:
-        _reply_error(ctx, f"No {genre} anime found.", deferred=deferred)
+        _reply_error(ctx, S.DISCOVER_NO_RESULTS.format(genre=genre), deferred=deferred)
         return
 
     prev_id = f"otaku:page:{genre}:{sort_key}:{page - 1}" if page > 1 else None
@@ -670,7 +755,7 @@ def _render_trending(ctx: Context, page: int, *, deferred: bool, ephemeral_reply
     header = f"🔥 Trending — {season.title()} {year}"
     embed = _make_list_embed(media_list, header, page=page, has_next=has_next)
     if not media_list:
-        _reply_error(ctx, "No trending anime found for this season.", deferred=deferred)
+        _reply_error(ctx, S.TRENDING_NO_RESULTS, deferred=deferred)
         return
 
     prev_id = f"otaku:trend:{page - 1}" if page > 1 else None
@@ -694,7 +779,7 @@ def _render_similar(ctx: Context, media: dict, *, deferred: bool, ephemeral_repl
     header = f"🔁 Similar to {parent_title}"
 
     if not recs:
-        _reply_error(ctx, f"No recommendations on AniList for **{parent_title}** yet.", deferred=deferred)
+        _reply_error(ctx, S.SIMILAR_NO_RECS.format(title=parent_title), deferred=deferred)
         return
 
     embed = _make_list_embed(recs, header, page=1, has_next=False)
@@ -719,7 +804,7 @@ def cmd_anime(ctx: Context, event: dict) -> None:
     opts = _option_map(event)
     query = (opts.get("query") or "").strip()
     if not query:
-        ctx.interaction.respond(content="Usage: `/anime query: <title>`", ephemeral=True)
+        ctx.interaction.respond(content=S.ANIME_USAGE, ephemeral=True)
         return
 
     ctx.interaction.defer()
@@ -730,7 +815,7 @@ def cmd_anime(ctx: Context, event: dict) -> None:
         return
     media = data.get("Media")
     if not media:
-        _reply_error(ctx, f"No anime found matching **{_truncate(query, 80)}**.", deferred=True)
+        _reply_error(ctx, S.ANIME_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
         return
 
     media_id = media.get("id")
@@ -756,7 +841,7 @@ def cmd_discover(ctx: Context, event: dict) -> None:
     if sort_key not in SORT_MAP:
         sort_key = "popular"
     if not genre:
-        ctx.interaction.respond(content="Usage: `/discover genre: <name> [sort: popular|trending|score]`", ephemeral=True)
+        ctx.interaction.respond(content=S.DISCOVER_USAGE, ephemeral=True)
         return
 
     ctx.interaction.defer()
@@ -788,7 +873,7 @@ def cmd_similar(ctx: Context, event: dict) -> None:
             return
         media = data.get("Media")
         if not media:
-            _reply_error(ctx, f"No anime found matching **{_truncate(query, 80)}**.", deferred=True)
+            _reply_error(ctx, S.ANIME_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
             return
         # Cache the resolved anime as the user's last lookup too.
         mid = media.get("id")
@@ -800,24 +885,21 @@ def cmd_similar(ctx: Context, event: dict) -> None:
     # No query — look up cached last anime.
     cached = ctx.kv.get(f"last_anime:user:{user_id}") if user_id else None
     if cached is None:
-        ctx.interaction.respond(
-            content="You haven't looked up an anime yet. Try `/anime query: <title>` first.",
-            ephemeral=True,
-        )
+        ctx.interaction.respond(content=S.SIMILAR_NO_CACHE, ephemeral=True)
         return
 
     ctx.interaction.defer()
     try:
         media_id = int(cached)
     except (TypeError, ValueError):
-        _reply_error(ctx, "Your cached anime ID looks invalid — look one up again with `/anime`.", deferred=True)
+        _reply_error(ctx, S.SIMILAR_INVALID_CACHED, deferred=True)
         return
     data = _anilist_query(ctx, QUERY_SIMILAR_BY_ID, {"id": media_id})
     if data is None or not data.get("Media"):
         _reply_anilist_failure(
             ctx,
             deferred=True,
-            fallback="Couldn't fetch recommendations for your last anime — try `/anime query: <title>` to refresh it.",
+            fallback=S.SIMILAR_FETCH_FAIL_CACHED,
         )
         return
     _render_similar(ctx, data["Media"], deferred=True)
@@ -857,8 +939,8 @@ def cmd_random(ctx: Context, event: dict) -> None:
         pick = _anilist_query(ctx, QUERY_RANDOM_PICK, {"genre": genre, "page": 1})
         media_list = ((pick or {}).get("Page") or {}).get("media") or []
     if not media_list:
-        label = f"the **{genre_raw}** filter" if genre else "AniList"
-        _reply_error(ctx, f"No random anime came back from {label} — try a different genre.", deferred=True)
+        label = S.RANDOM_FILTER_LABEL.format(genre=genre_raw) if genre else S.RANDOM_NO_FILTER_LABEL
+        _reply_error(ctx, S.RANDOM_NO_RESULTS.format(label=label), deferred=True)
         return
 
     media = media_list[0]
@@ -884,7 +966,7 @@ def cmd_character(ctx: Context, event: dict) -> None:
     opts = _option_map(event)
     query = (opts.get("query") or "").strip()
     if not query:
-        ctx.interaction.respond(content="Usage: `/character query: <name>`", ephemeral=True)
+        ctx.interaction.respond(content=S.CHARACTER_USAGE, ephemeral=True)
         return
 
     ctx.interaction.defer()
@@ -894,7 +976,7 @@ def cmd_character(ctx: Context, event: dict) -> None:
         return
     char = data.get("Character")
     if not char:
-        _reply_error(ctx, f"No character found matching **{_truncate(query, 80)}**.", deferred=True)
+        _reply_error(ctx, S.CHARACTER_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
         return
 
     embed = _make_character_embed(char)
@@ -954,13 +1036,13 @@ def cmd_help(ctx: Context, event: dict) -> None:
         if example:
             line += f"\n  · Example: {example}"
         lines.append(line)
-    body = "\n\n".join(lines) if lines else "*(no commands registered)*"
+    body = "\n\n".join(lines) if lines else S.HELP_EMPTY
 
     embed = {
-        "title": "Otaku — commands",
+        "title": S.HELP_TITLE,
         "description": body,
         "color": ANILIST_COLOR,
-        "footer": {"text": "All data comes from AniList. Type `/help` any time."},
+        "footer": {"text": S.HELP_FOOTER},
     }
     ctx.interaction.respond(embeds=[embed], ephemeral=True)
 
@@ -991,7 +1073,7 @@ def cmd_genres(ctx: Context, event: dict) -> None:
             _reply_anilist_failure(
                 ctx,
                 deferred=True,
-                fallback="Couldn't fetch AniList's genre list — try again in a moment.",
+                fallback=S.GENRES_FETCH_FAIL,
             )
             return
         genres = data["GenreCollection"]
@@ -1010,7 +1092,7 @@ def cmd_genres(ctx: Context, event: dict) -> None:
 def _genres_embed(genres: list[str]) -> dict:
     return {
         "title": "AniList genres",
-        "description": "\n".join(f"• {g}" for g in genres) or "*(no genres returned)*",
+        "description": "\n".join(f"• {g}" for g in genres) or S.GENRES_EMPTY,
         "color": ANILIST_COLOR,
         "footer": {"text": f"{len(genres)} genres · refreshed daily · use with /discover or /random"},
     }
@@ -1033,13 +1115,13 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         # otaku:page:<genre>:<sort>:<page>
         parts = cid.split(":", 4)
         if len(parts) < 5:
-            ctx.interaction.respond(content="Pagination button malformed.", ephemeral=True)
+            ctx.interaction.respond(content=S.PAGE_MALFORMED, ephemeral=True)
             return
         _, _, genre, sort_key, page_s = parts
         try:
             page = max(1, int(page_s))
         except ValueError:
-            ctx.interaction.respond(content="Pagination button malformed.", ephemeral=True)
+            ctx.interaction.respond(content=S.PAGE_MALFORMED, ephemeral=True)
             return
         ctx.interaction.defer(ephemeral=True)
         _render_discover(ctx, genre, sort_key, page=page, deferred=True, ephemeral_reply=True)
@@ -1051,7 +1133,7 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         try:
             page = max(1, int(cid.split(":", 2)[2]))
         except (ValueError, IndexError):
-            ctx.interaction.respond(content="Pagination button malformed.", ephemeral=True)
+            ctx.interaction.respond(content=S.PAGE_MALFORMED, ephemeral=True)
             return
         ctx.interaction.defer(ephemeral=True)
         _render_trending(ctx, page=page, deferred=True, ephemeral_reply=True)
@@ -1063,7 +1145,7 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         try:
             media_id = int(cid.split(":", 2)[2])
         except (ValueError, IndexError):
-            ctx.interaction.respond(content="Similar button malformed.", ephemeral=True)
+            ctx.interaction.respond(content=S.SIMILAR_BTN_MALFORMED, ephemeral=True)
             return
         ctx.interaction.defer(ephemeral=True)
         data = _anilist_query(ctx, QUERY_SIMILAR_BY_ID, {"id": media_id})
@@ -1071,7 +1153,7 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
             _reply_anilist_failure(
                 ctx,
                 deferred=True,
-                fallback="Couldn't fetch recommendations from AniList — try again, or pick a different anime.",
+                fallback=S.SIMILAR_FETCH_FAIL_BUTTON,
             )
             return
         if user_id:
@@ -1107,12 +1189,12 @@ def comp_expand(ctx: Context, event: dict) -> None:
         return
     values = event.get("values") or []
     if not values:
-        ctx.interaction.respond(content="No selection received.", ephemeral=True)
+        ctx.interaction.respond(content=S.EXPAND_NO_SELECTION, ephemeral=True)
         return
     try:
         media_id = int(values[0])
     except (TypeError, ValueError):
-        ctx.interaction.respond(content="Selection wasn't a valid anime ID.", ephemeral=True)
+        ctx.interaction.respond(content=S.EXPAND_INVALID, ephemeral=True)
         return
 
     ctx.interaction.defer(ephemeral=True)
@@ -1121,7 +1203,7 @@ def comp_expand(ctx: Context, event: dict) -> None:
         _reply_anilist_failure(
             ctx,
             deferred=True,
-            fallback="Couldn't fetch that anime from AniList — try searching again with `/anime`.",
+            fallback=S.EXPAND_FETCH_FAIL,
         )
         return
     media = data["Media"]

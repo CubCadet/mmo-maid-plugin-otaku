@@ -363,26 +363,19 @@ The `release.yml` workflow runs the validator and tests one more time, builds th
 
 ---
 
-### v1.4.0 — i18n-ready string table
+### v1.4.0 — i18n-ready string table ✅ shipped 2026-05-14
 
 **Target:** Minor. Set up for Phase 9's localization without committing to it yet.
 
 **Tasks:**
-- Extract every user-facing string in `__main__.py` into `strings.py` as a constant.
-- Replace inline strings with `from strings import S` and `S.NO_ANIME_FOUND.format(query=...)` style.
-- Don't add a language switcher yet — just the structural separation.
+- ~~Extract every user-facing string in `__main__.py` into `strings.py` as a constant.~~ — `strings.py` would be stripped by the upload allowlist. Landed as `_Strings` (alias `S`) inside `__main__.py` instead. Same i18n properties (single source of truth, easy enumeration, swappable per-locale).
+- ~~Replace inline strings with `S.NO_ANIME_FOUND.format(query=...)` style.~~
+- ~~Don't add a language switcher yet — just the structural separation.~~
 
-**Regression check:** All v1.x.0 tests pass. The behavior is unchanged; this is purely a refactor.
+**Regression check:** ~~All v1.x.0 tests pass. The behavior is unchanged; this is purely a refactor.~~ Verified.
 
-**Failure modes:**
-- A string with embedded HTML or special chars (`<br>`, emojis) might break on extraction — convert to plain Python with format placeholders.
-- Existing test assertions on exact strings may break — update them to import from `strings`.
-
-**Commits:**
-- `refactor(i18n): extract user-facing strings into strings.py`
-- `test(i18n): assertions now use S.* constants`
-- `docs(changelog): v1.4.0 entry`
-- `chore(release): v1.4.0`
+**Failure modes encountered:**
+- The strings.py sibling-module approach hit the runtime allowlist (`{manifest.json, __main__.py, requirements.txt, dashboard_manifest.json, dashboard/}`). Solved by putting the namespace inside `__main__.py` — recorded here so v9 localization knows the shape.
 
 ---
 

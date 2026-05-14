@@ -20,6 +20,21 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-14
+
+### Changed
+- Every user-facing string is now defined as a constant on a single
+  `_Strings` class (aliased `S`) at the top of `__main__.py`. This is the
+  i18n-ready structural separation called for in the roadmap. A future
+  localization layer (planned for Phase 9) can swap `S` per-locale.
+
+### Note
+- The roadmap originally planned a sibling `strings.py` module. The plugin
+  upload zip's runtime allowlist (`manifest.json`, `__main__.py`,
+  `requirements.txt`, `dashboard_manifest.json`, `dashboard/`) doesn't
+  accept additional `.py` files, so the structural separation lives inside
+  `__main__.py` instead. Behavior is unchanged.
+
 ## [1.3.0] - 2026-05-14
 
 ### Added

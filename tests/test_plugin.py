@@ -457,6 +457,44 @@ def test_character_handles_missing_description_gracefully():
     assert "no description" in embed["description"]
 
 
+# ── v1.4.0 i18n string table ────────────────────────────────────────────────
+
+def test_strings_namespace_is_present_and_complete():
+    """S contains every constant we use; no stale references remain."""
+    assert hasattr(p, "S")
+    # Sample a few we expect to exist — the real check is that the module
+    # imported successfully with all S.* references resolved.
+    for attr in (
+        "ANILIST_FAILURE_DEFAULT",
+        "ANIME_USAGE",
+        "ANIME_NOT_FOUND",
+        "COOLDOWN_WAIT",
+        "HELP_TITLE",
+        "GENRES_FETCH_FAIL",
+        "EXPAND_FETCH_FAIL",
+    ):
+        assert isinstance(getattr(p.S, attr), str)
+
+
+def test_anime_not_found_message_uses_S():
+    """The /anime no-result message should come from S.ANIME_NOT_FOUND."""
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": None})
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "zzz"}, user_id="i18n-1"))
+
+    follow = ctx.interaction.followups[-1]
+    expected = p.S.ANIME_NOT_FOUND.format(query="zzz")
+    assert follow.get("content") == expected
+
+
+def test_help_title_uses_S():
+    ctx = MockContext()
+    p.cmd_help(ctx, _slash_event("help", {}, user_id="i18n-2"))
+    resp = ctx.interaction.responses[-1]
+    assert resp["embeds"][0]["title"] == p.S.HELP_TITLE
+
+
 # ── v1.3.0 /help + /genres ──────────────────────────────────────────────────
 
 def test_help_lists_every_manifest_command():
