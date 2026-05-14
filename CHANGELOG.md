@@ -20,6 +20,46 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-05-14
+
+### Added
+- `/mood feeling:<one of 10 choices>` — pick a vibe, get a paginated
+  list of anime matching it. Ten curated moods ship: `uplifting`,
+  `tense`, `cathartic`, `chill`, `epic`, `nostalgic`, `dark`, `funny`,
+  `romantic`, `adventurous`. Each is a small AniList genre/tag blend;
+  half also carry a tag enrichment (e.g. `chill` → Slice of Life +
+  Iyashikei). Footer surfaces the active filters so users understand
+  the recommendation.
+- Same paginated-list shape as `/discover` — prev/next via
+  `otaku:mood:<feeling>:<page>` plus an expand-select to dive into any
+  result.
+- Two GraphQL shapes (`QUERY_MOOD_WITH_TAGS`, `QUERY_MOOD_GENRE_ONLY`)
+  because AniList rejects empty in-filter lists. When a mood has tags
+  the tagged query runs first; if it returns zero matches we transparently
+  fall back to genres-only so a fragile or missing tag never strands the
+  user.
+- Regression file `tests/regression/test_v6_1_0.py` (11 tests) freezes
+  the mood set, the table shape, the genres-only routing for tag-less
+  moods, the empty-tags fallback, and the pagination custom_id contract.
+
+### Deviation from the roadmap
+- The roadmap called for `moods.json` as the mapping config. The runtime
+  upload allowlist (same one that blocked v1.4's sibling `strings.py`)
+  rejects extra top-level `.json` files, so the MOODS table lives inline
+  in `__main__.py` like the v1.4 `S` namespace. v9 localization can swap
+  this out per-locale the same way it'll swap `S`.
+- "Weighted blend" landed as **union semantics** rather than literal
+  weighting — AniList's `genre_in`/`tag_in` filters are themselves
+  OR-within-array, AND-across-arrays. The "blend" is now: a curated set
+  of genres any of which matches, optionally enriched by a tag filter
+  layered on top. True weighted scoring (e.g. boost results that match
+  multiple genres) would need post-query reranking and was out of scope
+  for this slice — noted for a possible v6.1.x or Phase 9 enhancement.
+
+### Capability surface
+- **No new capabilities.** Reuses `proxy:http` for AniList and
+  `interaction:respond` for the slash command and pagination buttons.
+
 ## [6.0.0] - 2026-05-14
 
 ### Added

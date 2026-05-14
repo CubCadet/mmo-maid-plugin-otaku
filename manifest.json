@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -438,6 +438,30 @@
     {
       "name": "recommend",
       "description": "Personalized anime recommendations based on what this server's users have rated."
+    },
+    {
+      "name": "mood",
+      "description": "Recommend anime by mood — uplifting, tense, cathartic, and more.",
+      "options": [
+        {
+          "name": "feeling",
+          "description": "Pick a mood",
+          "type": 3,
+          "required": true,
+          "choices": [
+            {"name": "✨ Uplifting",   "value": "uplifting"},
+            {"name": "😰 Tense",       "value": "tense"},
+            {"name": "😭 Cathartic",   "value": "cathartic"},
+            {"name": "🍵 Chill",       "value": "chill"},
+            {"name": "⚔️ Epic",        "value": "epic"},
+            {"name": "🌅 Nostalgic",   "value": "nostalgic"},
+            {"name": "🌑 Dark",        "value": "dark"},
+            {"name": "😂 Funny",       "value": "funny"},
+            {"name": "💖 Romantic",    "value": "romantic"},
+            {"name": "🧭 Adventurous", "value": "adventurous"}
+          ]
+        }
+      ]
     },
     {
       "name": "list",

@@ -686,12 +686,28 @@ else hits the network in the CF path.
 
 ---
 
-### v6.1.0 — Mood-based suggestions
+### v6.1.0 — Mood-based suggestions ✅ shipped 2026-05-14
 
 **New slash command:**
-- `/mood <feeling>` — Maps moods (e.g., "uplifting", "tense", "cathartic") to genre/tag combinations and returns matching anime.
+- ~~`/mood <feeling>` — Maps moods (e.g., "uplifting", "tense", "cathartic") to genre/tag combinations and returns matching anime.~~ Ten curated moods ship with `required` Discord choices (`uplifting`,
+  `tense`, `cathartic`, `chill`, `epic`, `nostalgic`, `dark`, `funny`,
+  `romantic`, `adventurous`).
 
-Maintain a `moods.json` config mapping each mood to a weighted blend of AniList genres + tags.
+~~Maintain a `moods.json` config mapping each mood to a weighted blend of AniList genres + tags.~~ — The runtime upload allowlist rejects sibling
+`.json` modules (same constraint that pushed v1.4's strings inline). The
+MOODS dict lives inside `__main__.py`. Half the moods carry a tag
+enrichment (`chill` → Slice of Life + Iyashikei, `dark` → Horror +
+Psychological + Gore, etc.); when the with-tags AniList query returns
+no matches we transparently fall back to genres-only so a fragile or
+missing tag never strands the user.
+
+"Weighted blend" landed as **union semantics** — `genre_in`/`tag_in` are
+OR-within-array, AND-across-arrays. True weighted reranking (boost
+results matching multiple genres) is deferred; the empty-set fallback
+already covers the worst case.
+
+**Capability:** no new capabilities — reuses `proxy:http` and
+`interaction:respond`.
 
 ---
 

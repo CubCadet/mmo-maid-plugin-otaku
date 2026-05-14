@@ -425,6 +425,16 @@ class _Strings:
         "after a `/anime` lookup."
     )
 
+    # /mood (v6.1.0).
+    MOOD_UNKNOWN = (
+        "Unknown mood **{feeling}**. Pick one of the suggested choices."
+    )
+    MOOD_NO_RESULTS = "No anime matched {label} — try another mood."
+    MOOD_PAGE_MALFORMED = "Mood page button malformed."
+    MOOD_HEADER = "{label} picks"
+    MOOD_FOOTER_GENRES = "Genres: {genres}"
+    MOOD_FOOTER_GENRES_TAGS = "Genres: {genres} · Tags: {tags}"
+
 
 S = _Strings
 
@@ -579,6 +589,29 @@ QUERY_RANDOM_PICK = (
 )
 
 QUERY_GENRES = "query { GenreCollection }"
+
+# v6.1.0 — /mood. Two query shapes because AniList rejects empty list
+# arguments to its in-filters; when a mood has no tag enrichment we use the
+# genre-only variant rather than sending `tag_in: []`.
+QUERY_MOOD_WITH_TAGS = (
+    "query ($genres: [String], $tags: [String], $page: Int, $perPage: Int) {"
+    "  Page(page: $page, perPage: $perPage) {"
+    "    pageInfo { hasNextPage currentPage }"
+    "    media(type: ANIME, genre_in: $genres, tag_in: $tags,"
+    "          sort: [POPULARITY_DESC]) {" + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
+
+QUERY_MOOD_GENRE_ONLY = (
+    "query ($genres: [String], $page: Int, $perPage: Int) {"
+    "  Page(page: $page, perPage: $perPage) {"
+    "    pageInfo { hasNextPage currentPage }"
+    "    media(type: ANIME, genre_in: $genres, sort: [POPULARITY_DESC]) {"
+    + _MEDIA_FIELDS + "}"
+    "  }"
+    "}"
+)
 
 # /list and /favorites — batch fetch titles for up to PER_PAGE media_ids in one round trip.
 QUERY_MEDIA_BATCH = (
@@ -4120,6 +4153,27 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _render_premieres(ctx, season, year, page=page, deferred=True)
         return
 
+    if cid.startswith("otaku:mood:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        # otaku:mood:<feeling>:<page>
+        parts = cid.split(":", 3)
+        if len(parts) < 4:
+            ctx.interaction.respond(content=S.MOOD_PAGE_MALFORMED, ephemeral=True)
+            return
+        _, _, feeling, page_s = parts
+        if feeling not in MOODS:
+            ctx.interaction.respond(content=S.MOOD_PAGE_MALFORMED, ephemeral=True)
+            return
+        try:
+            page = max(1, int(page_s))
+        except ValueError:
+            ctx.interaction.respond(content=S.MOOD_PAGE_MALFORMED, ephemeral=True)
+            return
+        ctx.interaction.defer()
+        _render_mood(ctx, feeling, page=page, deferred=True)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -4140,6 +4194,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:swl:")
         or cid.startswith("otaku:wp-join:")
         or cid.startswith("otaku:premieres:")
+        or cid.startswith("otaku:mood:")
     ):
         _component_dispatch(ctx, event)
 
@@ -4186,6 +4241,127 @@ def comp_expand(ctx: Context, event: dict) -> None:
     if site_url:
         buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
     ctx.interaction.followup(embeds=[embed], components=[ActionRow(*buttons)], ephemeral=True)
+
+
+# ── v6.1.0 — /mood (mood-based suggestions) ─────────────────────────────────
+#
+# Each mood is a curated AniList genre/tag blend. The runtime allowlist
+# rejects sibling .json / .py modules (see v1.4 strings deviation), so the
+# mapping lives inline. Tags enrich some moods; if AniList returns no
+# results for the with-tags query we transparently fall back to genres-only
+# so a fragile tag never strands the user.
+
+MOODS: dict[str, dict] = {
+    "uplifting":   {"label": "✨ Uplifting",   "genres": ["Comedy", "Slice of Life"],         "tags": ["Heartwarming"]},
+    "tense":       {"label": "😰 Tense",        "genres": ["Thriller", "Psychological"],      "tags": []},
+    "cathartic":   {"label": "😭 Cathartic",    "genres": ["Drama"],                          "tags": ["Tragedy"]},
+    "chill":       {"label": "🍵 Chill",        "genres": ["Slice of Life"],                  "tags": ["Iyashikei"]},
+    "epic":        {"label": "⚔️ Epic",         "genres": ["Action", "Adventure", "Fantasy"], "tags": []},
+    "nostalgic":   {"label": "🌅 Nostalgic",    "genres": ["Romance", "Slice of Life"], "tags": ["Coming of Age"]},
+    "dark":        {"label": "🌑 Dark",         "genres": ["Horror", "Psychological"],        "tags": ["Gore"]},
+    "funny":       {"label": "😂 Funny",        "genres": ["Comedy"],                         "tags": ["Parody"]},
+    "romantic":    {"label": "💖 Romantic",     "genres": ["Romance"],                        "tags": []},
+    "adventurous": {"label": "🧭 Adventurous",  "genres": ["Adventure"],                      "tags": []},
+}
+
+
+def _mood_query(
+    ctx: Context, genres: list[str], tags: list[str], page: int
+) -> tuple[list[dict] | None, bool]:
+    """Returns (media_list, has_next). media_list=None on AniList failure.
+
+    If the mood has tags, try the tags+genres query first. If it returns
+    empty (the tag might not exist on AniList, or there's just nothing
+    matching this season), retry with genres only so we always have
+    *some* recommendations to show.
+    """
+    if tags:
+        data = _anilist_query(
+            ctx,
+            QUERY_MOOD_WITH_TAGS,
+            {"genres": genres, "tags": tags, "page": page, "perPage": PER_PAGE},
+            cache=(page == 1),
+        )
+        if data is not None:
+            page_obj = (data.get("Page") or {})
+            media_list = page_obj.get("media") or []
+            if media_list:
+                has_next = bool((page_obj.get("pageInfo") or {}).get("hasNextPage"))
+                return media_list, has_next
+        # Empty with tags → fall through to genre-only.
+
+    data = _anilist_query(
+        ctx,
+        QUERY_MOOD_GENRE_ONLY,
+        {"genres": genres, "page": page, "perPage": PER_PAGE},
+        cache=(page == 1),
+    )
+    if data is None:
+        return None, False
+    page_obj = (data.get("Page") or {})
+    media_list = page_obj.get("media") or []
+    has_next = bool((page_obj.get("pageInfo") or {}).get("hasNextPage"))
+    return media_list, has_next
+
+
+def _render_mood(
+    ctx: Context, feeling: str, page: int, *, deferred: bool, ephemeral_reply: bool = False
+) -> None:
+    mood = MOODS[feeling]
+    media_list, has_next = _mood_query(ctx, mood["genres"], mood.get("tags") or [], page)
+    if media_list is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+    if not media_list:
+        _reply_error(
+            ctx, S.MOOD_NO_RESULTS.format(label=mood["label"]), deferred=deferred
+        )
+        return
+
+    header = S.MOOD_HEADER.format(label=mood["label"])
+    embed = _make_list_embed(media_list, header, page=page, has_next=has_next)
+    # Footer mentions the active filters so users understand the blend.
+    if mood.get("tags"):
+        footer = S.MOOD_FOOTER_GENRES_TAGS.format(
+            genres=", ".join(mood["genres"]),
+            tags=", ".join(mood["tags"]),
+        )
+    else:
+        footer = S.MOOD_FOOTER_GENRES.format(genres=", ".join(mood["genres"]))
+    embed["footer"] = {"text": footer}
+
+    prev_id = f"otaku:mood:{feeling}:{page - 1}" if page > 1 else None
+    next_id = f"otaku:mood:{feeling}:{page + 1}" if has_next else None
+    components = [_page_buttons(prev_id, next_id)]
+    select_row = _make_select_row(media_list)
+    if select_row is not None:
+        components.append(select_row)
+
+    if deferred:
+        ctx.interaction.followup(
+            embeds=[embed], components=components, ephemeral=ephemeral_reply
+        )
+    else:
+        ctx.interaction.respond(
+            embeds=[embed], components=components, ephemeral=ephemeral_reply
+        )
+
+
+@plugin.on_slash_command("mood")
+def cmd_mood(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    feeling = (opts.get("feeling") or "").strip().lower()
+    if feeling not in MOODS:
+        ctx.interaction.respond(
+            content=S.MOOD_UNKNOWN.format(feeling=feeling or "(empty)"),
+            ephemeral=True,
+        )
+        return
+    ctx.interaction.defer()
+    _render_mood(ctx, feeling, page=1, deferred=True)
 
 
 # ── v6.0.0 — /recommend (collaborative filtering) ───────────────────────────
