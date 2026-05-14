@@ -279,6 +279,12 @@ class _Strings:
     STAFF_NO_DESCRIPTION = "*(no bio on AniList)*"
     STAFF_NO_CREDITS = "*(no production credits on AniList)*"
 
+    # /character-popular (v8.3.0).
+    CHARACTER_POPULAR_HEADER = "⭐ Top characters by AniList favourites"
+    CHARACTER_POPULAR_EMPTY = "AniList didn't return any characters."
+    CHARACTER_POPULAR_FOOTER = "Page {page} · sorted by AniList favourites"
+    CHARACTER_POPULAR_PAGE_MALFORMED = "Popular-character pagination button malformed."
+
     # /studio (v8.2.0).
     STUDIO_USAGE = "Usage: `/studio query: <name>`"
     STUDIO_NOT_FOUND = "No studio found matching **{query}**."
@@ -966,6 +972,29 @@ QUERY_CHARACTER = (
     "  }"
     "}"
 )
+
+# v8.3.0 — popular-character leaderboard. AniList's Page.characters with
+# `sort: FAVOURITES_DESC` gives a global popularity ranking. We fetch the
+# parent media's most-popular title so each character row links somewhere
+# users recognise.
+QUERY_CHARACTER_POPULAR = (
+    "query ($page: Int, $perPage: Int) {"
+    "  Page(page: $page, perPage: $perPage) {"
+    "    pageInfo { hasNextPage currentPage }"
+    "    characters(sort: FAVOURITES_DESC) {"
+    "      id"
+    "      name { full native }"
+    "      image { large }"
+    "      favourites"
+    "      siteUrl"
+    "      media(perPage: 1, sort: POPULARITY_DESC) {"
+    "        nodes { id title { romaji english } siteUrl }"
+    "      }"
+    "    }"
+    "  }"
+    "}"
+)
+
 
 # v8.2.0 — studio lookup. AniList's `Studio` type carries a name and a
 # `media` connection sorted by popularity. We fetch the top 10 popular works
@@ -2316,6 +2345,76 @@ def cmd_studio(ctx: Context, event: dict) -> None:
     ctx.interaction.followup(embeds=[embed], components=components)
 
 
+# ── v8.3.0 — /character-popular (closes Phase 8) ────────────────────────────
+#
+# Global leaderboard sorted by AniList `favourites` count. Paginated via
+# `otaku:popchar:<page>` custom_ids (same pattern as /trending). 5 per page.
+
+CHARACTER_POPULAR_PER_PAGE = 5
+
+
+def _render_character_popular(ctx: Context, page: int, *, deferred: bool) -> None:
+    data = _anilist_query(
+        ctx,
+        QUERY_CHARACTER_POPULAR,
+        {"page": page, "perPage": CHARACTER_POPULAR_PER_PAGE},
+        cache=(page == 1),
+    )
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=deferred)
+        return
+
+    page_obj = (data.get("Page") or {})
+    chars = page_obj.get("characters") or []
+    has_next = bool((page_obj.get("pageInfo") or {}).get("hasNextPage"))
+
+    if not chars:
+        _reply_error(ctx, S.CHARACTER_POPULAR_EMPTY, deferred=deferred)
+        return
+
+    lines = []
+    rank_start = (page - 1) * CHARACTER_POPULAR_PER_PAGE + 1
+    for idx, c in enumerate(chars):
+        rank = rank_start + idx
+        name = (c.get("name") or {}).get("full") or "?"
+        favs = c.get("favourites") or 0
+        site = c.get("siteUrl") or ""
+        anchor = f"[{name}]({site})" if site else name
+        parent = (((c.get("media") or {}).get("nodes")) or [None])[0]
+        if parent:
+            ptitle = _format_title(parent)
+            purl = parent.get("siteUrl") or ""
+            parent_anchor = f"[{ptitle}]({purl})" if purl else ptitle
+            lines.append(f"`#{rank:>3}` **{anchor}** · ❤ {favs:,} — {parent_anchor}")
+        else:
+            lines.append(f"`#{rank:>3}` **{anchor}** · ❤ {favs:,}")
+
+    embed = {
+        "title": S.CHARACTER_POPULAR_HEADER,
+        "description": "\n".join(lines),
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.CHARACTER_POPULAR_FOOTER.format(page=page)},
+    }
+
+    prev_id = f"otaku:popchar:{page - 1}" if page > 1 else None
+    next_id = f"otaku:popchar:{page + 1}" if has_next else None
+    components = [_page_buttons(prev_id, next_id)]
+
+    if deferred:
+        ctx.interaction.followup(embeds=[embed], components=components)
+    else:
+        ctx.interaction.respond(embeds=[embed], components=components)
+
+
+@plugin.on_slash_command("character-popular")
+def cmd_character_popular(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    ctx.interaction.defer()
+    _render_character_popular(ctx, page=1, deferred=True)
+
+
 # Static usage examples — one per command. The /help embed merges these with the
 # descriptions in manifest.json so the help text never drifts behind a new
 # slash command being declared.
@@ -2329,6 +2428,7 @@ _HELP_EXAMPLES = {
     "voice-actor":   "`/voice-actor query: Aoi Yuuki`",
     "staff":         "`/staff query: Hayao Miyazaki`",
     "studio":        "`/studio query: Trigger`",
+    "character-popular": "`/character-popular`",
     "help":      "`/help`",
     "genres":    "`/genres`",
 }
@@ -5136,6 +5236,21 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _render_trending(ctx, page=page, deferred=True, ephemeral_reply=True)
         return
 
+    if cid.startswith("otaku:popchar:"):
+        if _on_cooldown(ctx, user_id):
+            return
+        # otaku:popchar:<page> — v8.3 popular-characters pagination.
+        try:
+            page = max(1, int(cid.split(":", 2)[2]))
+        except (ValueError, IndexError):
+            ctx.interaction.respond(
+                content=S.CHARACTER_POPULAR_PAGE_MALFORMED, ephemeral=True
+            )
+            return
+        ctx.interaction.defer()
+        _render_character_popular(ctx, page=page, deferred=True)
+        return
+
     if cid.startswith("otaku:similar:"):
         if _on_cooldown(ctx, user_id):
             return
@@ -5312,6 +5427,7 @@ def _route_components(ctx: Context, event: dict) -> None:
     if (
         cid.startswith("otaku:page:")
         or cid.startswith("otaku:mpage:")
+        or cid.startswith("otaku:popchar:")
         or cid.startswith("otaku:trend:")
         or cid.startswith("otaku:similar:")
         or cid.startswith("otaku:list:")

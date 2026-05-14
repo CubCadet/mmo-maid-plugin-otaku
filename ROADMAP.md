@@ -897,9 +897,25 @@ without requiring a second AniList round-trip.
 
 ---
 
-### v8.3.x — Character ranks
+### v8.3.0 — Character ranks ✅ shipped 2026-05-14 (closes Phase 8)
 
-`/character-popular` — Top characters by AniList popularity.
+~~`/character-popular` — Top characters by AniList popularity.~~
+
+Shipped as `/character-popular` (no options). Paginated 5 per page;
+rank numbers continue across pages so #1–5 on page 1, #6–10 on page 2,
+etc. Each row links to the character + their top-popularity parent
+media (the most-recognisable anchor for readers). Page 1 uses the
+AniList cache (changes slowly); pages 2+ skip the cache.
+
+Pagination uses the `otaku:popchar:<page>` prefix — distinct from
+`otaku:trend:` and `otaku:page:` so the dispatcher routes it
+unambiguously.
+
+**Capability:** no new capabilities — same read-only AniList pattern.
+
+**Phase 8 closed.** Six new slash commands shipped across four MINOR
+releases plus v8.0's schema-migration MAJOR and v8.0.1's hardening
+patch. Total slash commands: 44. No new capabilities Phase-wide.
 
 ---
 

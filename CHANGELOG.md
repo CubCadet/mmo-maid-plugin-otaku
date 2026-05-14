@@ -20,6 +20,50 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [8.3.0] - 2026-05-14
+
+### Phase 8 closes — character popularity leaderboard
+
+- `/character-popular` (no options) — global leaderboard of AniList
+  characters sorted by `favourites` count (FAVOURITES_DESC). Paginated
+  5 per page; rank numbers continue across pages (page 2 starts at #6).
+  Each row shows `#NNN **Name** · ❤ N,NNN — [Parent Media](url)`.
+- AniList query `QUERY_CHARACTER_POPULAR` — `Page(characters: sort:
+  FAVOURITES_DESC)` with each character's most-popular parent media
+  fetched in the same round-trip.
+- Pagination prefix `otaku:popchar:<page>` routed through the existing
+  `_route_components` dispatcher.
+- Constant `CHARACTER_POPULAR_PER_PAGE = 5` frozen.
+- Page 1 uses the in-process AniList cache (it changes slowly); pages
+  2+ skip the cache to keep the working set small.
+
+### Tests
+- New regression file `tests/regression/test_v8_3_0.py` (13 tests):
+  manifest entry, per-page constant, QUERY_CHARACTER_POPULAR field
+  shape, rank rendering, rank continuation across pages, pagination
+  prefix routing (must NOT collide with `otaku:trend:` or
+  `otaku:page:`), empty-page error path, AniList-failure error path,
+  null-parent-media graceful rendering, and the page-1 cache contract.
+
+### Phase 8 summary
+- Six commands shipped this phase across four MINOR releases (v8.0
+  itself was the schema-migration MAJOR):
+  - v8.0.0 — `/manga`, `/manga-discover`, `/manga-favorites`
+  - v8.0.1 — migration hardening patch (no new commands)
+  - v8.1.0 — `/voice-actor`, `/staff`
+  - v8.2.0 — `/studio`
+  - v8.3.0 — `/character-popular`
+- Total slash commands now: **44** (35 v7 + 3 manga + 2 staff + 1
+  studio + 1 character-popular + 2 unchanged sub-routings).
+- Zero new capabilities across the entire phase. Phase 8's coupling
+  surface for v9 (multi-source) is documented in the v8.0.1 audit:
+  single HTTP chokepoint at `__main__.py:1320`, 45 `_anilist_query`
+  call sites, per-query-family multi-source strategy.
+
+### Capability surface
+- **No new capabilities.** Read-only AniList lookup; reuses
+  `proxy:http` + `interaction:respond`.
+
 ## [8.2.0] - 2026-05-14
 
 ### Added
