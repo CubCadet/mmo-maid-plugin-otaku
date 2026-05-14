@@ -2487,6 +2487,124 @@ def cron_airing_check(ctx: Context) -> None:
         ctx.log(f"premieres digest failed: {exc}", level="error", tags=["notify", "digest"])
 
 
+# ── v5.0.0 — plugin dashboard (manifest mode) ───────────────────────────────
+# Every handler must finish in <10s per the SDK contract. All of the SQL here
+# is single-query and indexed; the table widget makes one AniList batch call
+# which is cached.
+
+DASHBOARD_TOP_TRACKED_LIMIT = 5
+
+
+@plugin.on_dashboard("get_total_tracked")
+def dash_total_tracked(ctx: Context, params: dict) -> dict:
+    val = ctx.sql.scalar("SELECT COUNT(*) FROM otaku_user_anime")
+    return {"value": int(val or 0), "change": ""}
+
+
+@plugin.on_dashboard("get_active_users_30d")
+def dash_active_users_30d(ctx: Context, params: dict) -> dict:
+    val = ctx.sql.scalar(
+        "SELECT COUNT(DISTINCT user_id) FROM otaku_user_anime "
+        "WHERE added_at > NOW() - INTERVAL '30 days'"
+    )
+    return {"value": int(val or 0), "change": ""}
+
+
+@plugin.on_dashboard("get_total_episodes")
+def dash_total_episodes(ctx: Context, params: dict) -> dict:
+    val = ctx.sql.scalar(
+        "SELECT COALESCE(SUM(episodes_watched), 0) FROM otaku_user_anime"
+    )
+    return {"value": int(val or 0), "change": ""}
+
+
+@plugin.on_dashboard("get_total_subscriptions")
+def dash_total_subscriptions(ctx: Context, params: dict) -> dict:
+    val = ctx.sql.scalar("SELECT COUNT(*) FROM otaku_notifications")
+    return {"value": int(val or 0), "change": ""}
+
+
+@plugin.on_dashboard("get_status_distribution")
+def dash_status_distribution(ctx: Context, params: dict) -> dict:
+    rows = ctx.sql.query(
+        "SELECT status, COUNT(*) AS n FROM otaku_user_anime "
+        "GROUP BY status"
+    ) or []
+    counts = {s: 0 for s in VALID_STATUSES}
+    for r in rows:
+        s = r.get("status") or ""
+        if s in counts:
+            counts[s] = int(r.get("n") or 0)
+    # Preserve a stable order so the chart bars don't shuffle between loads.
+    return {
+        "labels": [STATUS_LABEL[s] for s in VALID_STATUSES],
+        "series": [{
+            "name": "Rows",
+            "data": [counts[s] for s in VALID_STATUSES],
+        }],
+    }
+
+
+@plugin.on_dashboard("get_top_tracked")
+def dash_top_tracked(ctx: Context, params: dict) -> dict:
+    rows = ctx.sql.query(
+        "SELECT media_id, "
+        "       COUNT(*) AS trackers, "
+        "       COALESCE(SUM(CASE WHEN is_favorite THEN 1 ELSE 0 END), 0) AS favorites "
+        "FROM otaku_user_anime "
+        "GROUP BY media_id "
+        "ORDER BY trackers DESC, favorites DESC "
+        "LIMIT $1",
+        [DASHBOARD_TOP_TRACKED_LIMIT],
+    ) or []
+    if not rows:
+        return {"rows": [], "total": 0}
+
+    ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": ids}, cache=True)
+    media_by_id: dict[int, dict] = {}
+    if data:
+        for m in ((data.get("Page") or {}).get("media") or []):
+            mid = m.get("id")
+            if isinstance(mid, int):
+                media_by_id[mid] = m
+
+    table_rows = []
+    for r in rows:
+        mid = int(r["media_id"])
+        m = media_by_id.get(mid)
+        title = _format_title(m) if m else f"#{mid}"
+        table_rows.append({
+            "title":     title,
+            "trackers":  int(r.get("trackers") or 0),
+            "favorites": int(r.get("favorites") or 0),
+        })
+    return {"rows": table_rows, "total": len(table_rows)}
+
+
+@plugin.on_dashboard("get_settings")
+def dash_get_settings(ctx: Context, params: dict) -> dict:
+    return {
+        "values": {
+            "announce_channel_id": _resolve_announcement_channel(ctx) or "",
+        },
+    }
+
+
+@plugin.on_dashboard("save_settings")
+def dash_save_settings(ctx: Context, params: dict) -> dict:
+    vals = (params or {}).get("values") or {}
+    channel_id = str(vals.get("announce_channel_id") or "").strip()
+    if channel_id:
+        ctx.kv.set(NOTIFY_CHANNEL_KV, channel_id)
+    else:
+        try:
+            ctx.kv.delete(NOTIFY_CHANNEL_KV)
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True}
+
+
 # ── v3.3.0 — /leaderboard ───────────────────────────────────────────────────
 
 LEADERBOARD_TOP_N = 10

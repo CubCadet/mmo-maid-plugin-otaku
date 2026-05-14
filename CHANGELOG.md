@@ -20,6 +20,38 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-05-15
+
+### Added
+- **Plugin dashboard (manifest mode).** New `dashboard_manifest.json`
+  with two pages:
+  - **Overview** — four stat cards (tracked rows, active users in 30
+    days, episodes watched, airing subscriptions), one bar chart (watch
+    status distribution), one table (top 5 tracked anime).
+  - **Settings** — form with a `channel` field that mirrors
+    `/otaku-admin set-channel`, so admins can point airing pings without
+    leaving the dashboard.
+- Eight new `@plugin.on_dashboard` handlers:
+  `get_total_tracked`, `get_active_users_30d`, `get_total_episodes`,
+  `get_total_subscriptions`, `get_status_distribution`, `get_top_tracked`,
+  `get_settings`, `save_settings`.
+- Each handler is single-query SQL with `<10s` budget (per dashboard
+  contract). The `get_top_tracked` table makes one AniList batch call to
+  resolve titles, cached via the existing in-process AniList cache.
+- Regression file `tests/regression/test_v5_0_0.py`.
+
+### Changed
+- No new capability. The dashboard reads through `storage:sql` and
+  `storage:kv`, both already declared.
+- v5.0.0 bumps the MAJOR version even though no behavior changes for
+  slash users — adding a dashboard is a new surface area.
+
+### Note on the roadmap "mean score by genre" widget
+- Roadmap listed "Mean score by genre" as a v5.0 chart. Implementing it
+  needs genre data per media (we only have `media_id` in SQL), which
+  would mean ~50 AniList lookups on every dashboard load. Deferred to
+  v5.3.x (charts & trends) where caching genre data is in scope.
+
 ## [4.2.0] - 2026-05-15
 
 ### Added

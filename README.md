@@ -21,7 +21,16 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 | `discord:read` | Safe | Read the caller's guild membership and roles to gate `/otaku-admin` to server admins (anyone with `Administrator` or `Manage Server`). Used purely for permission checks. |
 | `discord:send_message` | Risky | Post airing notifications to the per-server announcement channel (or the channel each user subscribed in) when AniList reports a new episode is airing. |
 
-No Discord-side write capabilities are requested — the plugin never sends, edits, or deletes channel content directly; everything is an interaction reply.
+The plugin uses one Discord-side write capability — `discord:send_message` — exclusively for posting airing notifications to a server-designated channel. All other Discord interactions are slash command replies.
+
+## Dashboard
+
+A two-page manifest-mode dashboard ships with the plugin. Server admins can view it from the MMO Maid dev portal:
+
+- **Overview** — four stat cards (tracked rows, active users 30d, episodes watched, airing subscriptions), a watch-status bar chart, and a top-5-tracked-anime table.
+- **Settings** — pick the airing-announcement channel without leaving the portal (mirrors `/otaku-admin set-channel`).
+
+All widgets read from the existing SQL tables — no new capability required.
 
 If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 

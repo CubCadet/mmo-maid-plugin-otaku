@@ -1,0 +1,72 @@
+{
+  "pages": [
+    {
+      "id": "overview",
+      "title": "Overview",
+      "widgets": [
+        {
+          "id": "total_tracked",
+          "type": "stat_card",
+          "title": "Tracked rows",
+          "rpc_method": "get_total_tracked"
+        },
+        {
+          "id": "active_users_30d",
+          "type": "stat_card",
+          "title": "Active users (30d)",
+          "rpc_method": "get_active_users_30d"
+        },
+        {
+          "id": "total_episodes",
+          "type": "stat_card",
+          "title": "Episodes watched",
+          "rpc_method": "get_total_episodes"
+        },
+        {
+          "id": "total_subscriptions",
+          "type": "stat_card",
+          "title": "Airing subscriptions",
+          "rpc_method": "get_total_subscriptions"
+        },
+        {
+          "id": "status_distribution",
+          "type": "chart",
+          "chart_type": "bar",
+          "title": "Watch status distribution",
+          "rpc_method": "get_status_distribution"
+        },
+        {
+          "id": "top_tracked",
+          "type": "table",
+          "title": "Top 5 tracked anime",
+          "rpc_method": "get_top_tracked",
+          "columns": [
+            {"key": "title", "label": "Title"},
+            {"key": "trackers", "label": "Trackers"},
+            {"key": "favorites", "label": "Favorites"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "settings",
+      "title": "Settings",
+      "widgets": [
+        {
+          "id": "announce_channel_form",
+          "type": "form",
+          "title": "Airing announcements",
+          "rpc_method": "get_settings",
+          "save_method": "save_settings",
+          "fields": [
+            {
+              "name": "announce_channel_id",
+              "label": "Announcement channel",
+              "type": "channel"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

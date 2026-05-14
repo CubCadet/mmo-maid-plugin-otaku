@@ -696,6 +696,151 @@ def test_list_page_button_malformed_id_replies_ephemerally():
     assert "malformed" in (resp.get("content") or "").lower()
 
 
+# ── v5.0.0 dashboard handlers ───────────────────────────────────────────────
+
+
+def test_dashboard_total_tracked_returns_stat_card_shape():
+    ctx = MockContext()
+    ctx.sql.scalar = lambda sql, params=None: 123  # type: ignore[assignment]
+    result = p.dash_total_tracked(ctx, {})
+    assert result == {"value": 123, "change": ""}
+
+
+def test_dashboard_total_tracked_handles_null():
+    ctx = MockContext()
+    ctx.sql.scalar = lambda sql, params=None: None  # type: ignore[assignment]
+    assert p.dash_total_tracked(ctx, {}) == {"value": 0, "change": ""}
+
+
+def test_dashboard_active_users_30d_uses_interval_filter():
+    ctx = MockContext()
+    captured = {}
+
+    def _scalar(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        return 5
+
+    ctx.sql.scalar = _scalar  # type: ignore[assignment]
+    p.dash_active_users_30d(ctx, {})
+    assert "INTERVAL '30 days'" in captured["sql"]
+    assert "DISTINCT user_id" in captured["sql"]
+
+
+def test_dashboard_total_episodes_sums_episodes_watched():
+    ctx = MockContext()
+    captured = {}
+
+    def _scalar(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        return 240
+
+    ctx.sql.scalar = _scalar  # type: ignore[assignment]
+    result = p.dash_total_episodes(ctx, {})
+    assert "SUM(episodes_watched)" in captured["sql"]
+    assert result["value"] == 240
+
+
+def test_dashboard_total_subscriptions_counts_notifications():
+    ctx = MockContext()
+    captured = {}
+
+    def _scalar(sql, params=None):  # noqa: ANN001
+        captured["sql"] = sql
+        return 11
+
+    ctx.sql.scalar = _scalar  # type: ignore[assignment]
+    result = p.dash_total_subscriptions(ctx, {})
+    assert "otaku_notifications" in captured["sql"]
+    assert result["value"] == 11
+
+
+def test_dashboard_status_distribution_returns_chart_shape():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"status": "watching",  "n": 12},
+        {"status": "completed", "n": 7},
+        {"status": "dropped",   "n": 2},
+    ]
+    result = p.dash_status_distribution(ctx, {})
+    assert "labels" in result and "series" in result
+    # Order must be stable so chart bars don't jump per load.
+    assert result["labels"] == [
+        p.STATUS_LABEL[s] for s in p.VALID_STATUSES
+    ]
+    # Statuses we didn't return zero-fill so the chart stays five-wide.
+    watching_idx = p.VALID_STATUSES.index("watching")
+    completed_idx = p.VALID_STATUSES.index("completed")
+    plan_idx = p.VALID_STATUSES.index("plan")
+    series = result["series"][0]["data"]
+    assert series[watching_idx] == 12
+    assert series[completed_idx] == 7
+    assert series[plan_idx] == 0
+
+
+def test_dashboard_top_tracked_empty_returns_empty_table():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
+    result = p.dash_top_tracked(ctx, {})
+    assert result == {"rows": [], "total": 0}
+
+
+def test_dashboard_top_tracked_fills_titles_from_anilist():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"media_id": 1, "trackers": 10, "favorites": 5},
+        {"media_id": 2, "trackers": 8,  "favorites": 2},
+    ]
+    _mock_anilist(ctx, {"Page": {"media": [
+        _make_other(1, "Top Show"),
+        _make_other(2, "Second"),
+    ]}})
+    result = p.dash_top_tracked(ctx, {})
+    assert result["total"] == 2
+    assert result["rows"][0]["title"] == "Top Show"
+    assert result["rows"][0]["trackers"] == 10
+    assert result["rows"][0]["favorites"] == 5
+
+
+def test_dashboard_top_tracked_falls_back_to_id_when_anilist_misses():
+    ctx = MockContext()
+    ctx.sql.query = lambda sql, params=None: [  # type: ignore[assignment]
+        {"media_id": 999, "trackers": 3, "favorites": 1},
+    ]
+    # AniList returns empty media list.
+    _mock_anilist(ctx, {"Page": {"media": []}})
+    result = p.dash_top_tracked(ctx, {})
+    assert result["rows"][0]["title"] == "#999"
+
+
+def test_dashboard_settings_round_trip():
+    ctx = MockContext()
+    # Empty state.
+    assert p.dash_get_settings(ctx, {}) == {"values": {"announce_channel_id": ""}}
+
+    # Save a channel.
+    save_result = p.dash_save_settings(ctx, {"values": {"announce_channel_id": "ch-777"}})
+    assert save_result == {"ok": True}
+    assert ctx.kv.get(p.NOTIFY_CHANNEL_KV) == "ch-777"
+
+    # Reading after save reflects it.
+    assert p.dash_get_settings(ctx, {}) == {"values": {"announce_channel_id": "ch-777"}}
+
+
+def test_dashboard_save_settings_empty_clears():
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "old-channel")
+    p.dash_save_settings(ctx, {"values": {"announce_channel_id": ""}})
+    assert ctx.kv.get(p.NOTIFY_CHANNEL_KV) is None
+
+
+def test_dashboard_save_settings_missing_values_safe():
+    """Calling with no params doesn't crash; treated as a clear."""
+    ctx = MockContext()
+    ctx.kv.set(p.NOTIFY_CHANNEL_KV, "old-channel")
+    p.dash_save_settings(ctx, {})
+    assert ctx.kv.get(p.NOTIFY_CHANNEL_KV) is None
+
+
 # ── v4.2.0 /season-premieres + seasonal digest ─────────────────────────────
 
 

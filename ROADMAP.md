@@ -607,17 +607,18 @@ Originally "server announcement channel." Shipped as part of v4.0.0 above.
 
 **Goal:** A real plugin dashboard surfaces in the MMO Maid dev portal. Server admins see stats, history, trends.
 
-### v5.0.0 — Manifest-mode dashboard
+### v5.0.0 — Manifest-mode dashboard ✅ shipped 2026-05-15
 
-**New artifact:** `dashboard_manifest.json` populated with widget definitions.
+**New artifact:** ~~`dashboard_manifest.json` populated with widget definitions.~~ Two pages — Overview + Settings.
 
 **Widgets:**
-- Top 5 anime by server installs (across the user table)
-- Mean score by genre
-- Active users in the last 30 days
-- Total episodes tracked
+- ~~Top 5 anime by server installs (across the user table)~~ shipped as a table widget. The "by server installs" framing didn't quite fit — the plugin's data is per-server. Reinterpreted as "top 5 most-tracked anime in this server's collective tracker."
+- **Mean score by genre — deferred to v5.3.x.** Implementing it requires per-media genre data we don't store in SQL (only `media_id`). Per-dashboard-load AniList lookups for ~50 anime would breach the 10s widget budget; needs proper genre caching, which is v5.3.x material.
+- ~~Active users in the last 30 days~~ — stat card based on `MAX(added_at) > NOW() - INTERVAL '30 days'` per user.
+- ~~Total episodes tracked~~ — stat card from `SUM(episodes_watched)`.
+- **Extras:** total subscriptions stat card, status-distribution bar chart, and a Settings page form for the announce channel (mirrors `/otaku-admin set-channel`).
 
-**Capability:** None new — uses existing `storage:sql` for widget data via `@plugin.on_dashboard` handlers.
+**Capability:** ~~None new — uses existing `storage:sql` for widget data via `@plugin.on_dashboard` handlers.~~ Confirmed.
 
 ---
 
