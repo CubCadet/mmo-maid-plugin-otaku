@@ -337,6 +337,66 @@ def test_anime_handles_malformed_response_with_errors_array():
     assert (follow.get("content") or "")  # non-empty error message
 
 
+# ── v1.0.2 caching ──────────────────────────────────────────────────────────
+
+def test_anime_cache_hit_short_circuits_http():
+    """A second /anime with the same query should serve from cache, no new HTTP call."""
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "your name"}, user_id="cache-1"))
+    first_http = len(ctx.http.requests)
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "your name"}, user_id="cache-2"))
+
+    assert len(ctx.http.requests) == first_http, "expected the second /anime to skip HTTP"
+
+
+def test_anime_cache_normalizes_case():
+    """Same query in different case should still hit the cache."""
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Media": SAMPLE_MEDIA})
+
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "Your Name"}, user_id="c-a"))
+    p.cmd_anime(ctx, _slash_event("anime", {"query": "YOUR NAME"}, user_id="c-b"))
+
+    assert len(ctx.http.requests) == 1
+
+
+def test_discover_caches_only_page_one():
+    """Page 1 of /discover is cached; deeper pages re-fetch each time."""
+    ctx = MockContext()
+    _mock_anilist(ctx, {"Page": {
+        "pageInfo": {"hasNextPage": True, "currentPage": 1},
+        "media": [_make_other(i, f"S{i}") for i in range(1, 6)],
+    }})
+
+    p.cmd_discover(ctx, _slash_event("discover", {"genre": "Action"}, user_id="c-d1"))
+    p.cmd_discover(ctx, _slash_event("discover", {"genre": "Action"}, user_id="c-d2"))
+    # Page 1 cached — second call shouldn't add an HTTP request.
+    after_two = len(ctx.http.requests)
+    assert after_two == 1
+
+    # Page 2 (via component) should bypass the cache.
+    p._route_components(
+        ctx,
+        _component_event("otaku:page:Action:popular:2", user_id="c-d3"),
+    )
+    assert len(ctx.http.requests) == after_two + 1
+
+
+def test_similar_is_not_cached():
+    """The roadmap explicitly leaves /similar uncached. A repeat call should re-hit HTTP."""
+    ctx = MockContext()
+    parent = dict(SAMPLE_MEDIA)
+    parent["recommendations"] = {"nodes": [{"mediaRecommendation": _make_other(7, "Rec")}]}
+    _mock_anilist(ctx, {"Media": parent})
+
+    p.cmd_similar(ctx, _slash_event("similar", {"anime": "name"}, user_id="c-s1"))
+    p.cmd_similar(ctx, _slash_event("similar", {"anime": "name"}, user_id="c-s2"))
+
+    assert len(ctx.http.requests) == 2
+
+
 def test_anime_embed_caps_genres_at_five():
     """An anime with 8 genres should display only the first 5."""
     many_genres = ["A", "B", "C", "D", "E", "F", "G", "H"]

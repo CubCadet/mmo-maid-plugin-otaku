@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 
 from mmo_maid_sdk import (
@@ -34,6 +35,8 @@ PER_PAGE = 5
 DESC_MAX = 350
 COOLDOWN_SECONDS = 2
 LAST_ANIME_TTL = 7 * 24 * 60 * 60  # 7 days
+ANILIST_CACHE_TTL = 5 * 60          # 5 minutes — short enough that fresh trends still update
+ANILIST_CACHE_MAX_ENTRIES = 128     # bounded; LRU-ish via insertion-order pop
 SORT_MAP = {
     "popular": "POPULARITY_DESC",
     "trending": "TRENDING_DESC",
@@ -299,13 +302,67 @@ def _on_cooldown(ctx: Context, user_id: str) -> bool:
     return False
 
 
-def _anilist_query(ctx: Context, query: str, variables: dict) -> dict | None:
+# ── In-process AniList response cache ────────────────────────────────────────
+# Tiny TTL'd dict so a popular query (e.g. /trending in a single server) doesn't
+# hammer AniList. The cache is per-worker-process; in pool mode that means it's
+# shared across servers, which is fine since AniList responses are global.
+#
+# `_anilist_query` keys on a stable hash of (query, sorted-vars). Callers opt in
+# with `cache=True`. Per the roadmap, /similar stays uncached.
+_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _cache_key(query: str, variables: dict) -> str:
+    return repr((query, sorted(variables.items())))
+
+
+def _cache_get(key: str) -> dict | None:
+    entry = _CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, data = entry
+    if expires_at < time.monotonic():
+        _CACHE.pop(key, None)
+        return None
+    return data
+
+
+def _cache_clear() -> None:
+    """Drop every cached AniList response. Exposed for tests."""
+    _CACHE.clear()
+
+
+def _cache_put(key: str, data: dict) -> None:
+    if len(_CACHE) >= ANILIST_CACHE_MAX_ENTRIES:
+        # Drop the oldest entry — dict preserves insertion order in 3.7+.
+        try:
+            oldest = next(iter(_CACHE))
+            _CACHE.pop(oldest, None)
+        except StopIteration:
+            pass
+    _CACHE[key] = (time.monotonic() + ANILIST_CACHE_TTL, data)
+
+
+def _anilist_query(
+    ctx: Context,
+    query: str,
+    variables: dict,
+    *,
+    cache: bool = False,
+) -> dict | None:
     """POST to AniList; return parsed JSON `data` on success, or None on any error.
 
     On error this function does NOT reply — callers reply (so they can decide
     between respond/followup depending on whether they've deferred). It does
-    log the failure with ctx.log.
+    log the failure with ctx.log. When `cache=True`, responses are memoized for
+    ANILIST_CACHE_TTL seconds in-process.
     """
+    cache_key = _cache_key(query, variables) if cache else None
+    if cache_key is not None:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     body = json.dumps({"query": query, "variables": variables})
     try:
         resp = ctx.http.post(
@@ -349,7 +406,13 @@ def _anilist_query(ctx: Context, query: str, variables: dict) -> dict | None:
             errors=str(payload["errors"])[:400],
         )
         return None
-    return payload.get("data")
+    data = payload.get("data")
+    if cache_key is not None and data is not None:
+        try:
+            _cache_put(cache_key, data)
+        except Exception:  # noqa: BLE001 — cache must never raise into the caller
+            pass
+    return data
 
 
 def _reply_error(ctx: Context, message: str, *, deferred: bool) -> None:
@@ -372,9 +435,12 @@ def _render_discover(
     ephemeral_reply: bool = False,
 ) -> None:
     sort_const = SORT_MAP.get(sort_key, "POPULARITY_DESC")
-    data = _anilist_query(ctx, QUERY_DISCOVER, {
-        "genre": genre, "sort": [sort_const], "page": page, "perPage": PER_PAGE,
-    })
+    data = _anilist_query(
+        ctx,
+        QUERY_DISCOVER,
+        {"genre": genre, "sort": [sort_const], "page": page, "perPage": PER_PAGE},
+        cache=(page == 1),
+    )
     if data is None:
         _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=deferred)
         return
@@ -404,10 +470,13 @@ def _render_discover(
 
 def _render_trending(ctx: Context, page: int, *, deferred: bool, ephemeral_reply: bool = False) -> None:
     season, year = _current_season()
-    data = _anilist_query(ctx, QUERY_SEASON, {
-        "season": season, "year": year, "sort": ["TRENDING_DESC"],
-        "page": page, "perPage": PER_PAGE,
-    })
+    data = _anilist_query(
+        ctx,
+        QUERY_SEASON,
+        {"season": season, "year": year, "sort": ["TRENDING_DESC"],
+         "page": page, "perPage": PER_PAGE},
+        cache=(page == 1),
+    )
     if data is None:
         _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=deferred)
         return
@@ -471,7 +540,8 @@ def cmd_anime(ctx: Context, event: dict) -> None:
         return
 
     ctx.interaction.defer()
-    data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": query})
+    # Normalize the search key so equivalent queries hit the same cache entry.
+    data = _anilist_query(ctx, QUERY_SEARCH_ONE, {"q": query.lower()}, cache=True)
     if data is None:
         _reply_error(ctx, "AniList didn't answer. Try again in a moment.", deferred=True)
         return

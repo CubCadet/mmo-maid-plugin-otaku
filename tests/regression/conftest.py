@@ -18,3 +18,14 @@ if "plugin_main" not in sys.modules:
     _module = importlib.util.module_from_spec(_spec)
     sys.modules["plugin_main"] = _module
     _spec.loader.exec_module(_module)
+
+import pytest
+from plugin_main import _cache_clear as _plugin_cache_clear
+
+
+@pytest.fixture(autouse=True)
+def _clear_anilist_cache():
+    """The in-process AniList cache is module-level; reset it per test."""
+    _plugin_cache_clear()
+    yield
+    _plugin_cache_clear()

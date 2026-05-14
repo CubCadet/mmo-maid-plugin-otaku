@@ -22,3 +22,13 @@ _spec = importlib.util.spec_from_file_location("plugin_main", _MAIN_PY)
 _module = importlib.util.module_from_spec(_spec)
 sys.modules["plugin_main"] = _module
 _spec.loader.exec_module(_module)
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_anilist_cache():
+    """The in-process AniList cache is module-level; reset it per test."""
+    _module._cache_clear()
+    yield
+    _module._cache_clear()
