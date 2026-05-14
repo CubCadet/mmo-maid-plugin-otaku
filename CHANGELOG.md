@@ -20,6 +20,64 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [7.2.1] - 2026-05-14
+
+### Hygiene pass — clean baseline before Phase 8
+
+Six-lens regression audit (clean-code / functionality / routing / SQL+KV /
+naming / Phase-8 readiness) found zero high-severity bugs. This patch ships
+the risk-free findings; the bigger items (`/recommend` N+1 SQL fan-out, four
+read-then-write upserts, three dup-clusters, custom_id dash-prefix
+normalization) stay deferred per the user's chosen scope.
+
+### Removed
+- Dead-code: `_options_list` (no callers; doc lied about test usage),
+  `_get_user_progress` (v2.2 back-compat shim — `_get_user_tracking` replaced
+  it years ago), `handle_similar_button` (alleged test convenience wrapper,
+  zero references).
+- Orphan `_Strings` constants: `SWL_REMOVE_USAGE`, `POLL_CREATED_HEADER`,
+  `ADMIN_LOOKUP_FAILED` — all defined but never surfaced.
+
+### Changed
+- `WATCH_PARTY_STATUS_LABEL` now references `S.WP_STATUS_ACTIVE` /
+  `_COMPLETED` / `_ABANDONED` constants instead of inlining their values —
+  removes the duplication the audit flagged and keeps the i18n-readiness
+  property the strings table is meant to give us.
+- Two user-facing error strings that were inlined as f-strings (the /watch
+  status-rejection message and the /season-premieres usage hint) now route
+  through `_Strings` (`WATCH_INVALID_STATUS`, `PREMIERES_USAGE`) — every
+  other user-facing string in the plugin already does.
+- Module-level docstring updated from the v1.x "interaction-only, no SQL, no
+  schedules" framing to reflect the current 35-command surface area.
+- `_caller_is_admin` docstring corrected — used to promise it surfaced
+  `ADMIN_LOOKUP_FAILED`, but callers always return `S.ADMIN_DENIED` on
+  failure. Doc now matches behaviour.
+
+### Fixed
+- `_handle_reset_confirm` and `_handle_reset_cancel` now run through
+  `_on_cooldown` like every other component handler. The SQL is idempotent
+  so this wasn't a security or data bug — just consistent rate-limiting
+  hygiene flagged by the routing-audit lens.
+
+### Audit summary (recorded for the v8 session)
+- Six review angles, 392 tests baseline. No 🔴 bugs found.
+- 🟡 deferred to v7.2.2 or v8: collapse `/recommend` per-peer SQL fan-out
+  into a single `WHERE user_id = ANY($1)` query (violates the roadmap's
+  ≤3-SQL-per-command cross-cutting invariant); tighten four read-then-write
+  upserts (`_upsert_review`, AOTW/poll create + vote handlers) to
+  single-statement `INSERT … ON CONFLICT DO UPDATE`; collapse three
+  duplicate sub-option-parsers and the `_top_genre_for_user` /
+  `_user_top_genres` near-duplicate.
+- 🟡 deferred to v8 (would force editing immutable regression tests):
+  rename `otaku:<feature>-<sub>:*` custom_ids to `otaku:<feature>:<sub>:*`
+  for `reset-confirm`, `reset-cancel`, `wp-join`, `aotw-vote`, `poll-vote`,
+  `review-modal`.
+- 🟢 v8-readiness inventory captured: 43 `otaku_user_anime` references to
+  rename, 12 query constants to parameterise on `$mediaType`, PK extension
+  to `(user_id, media_id, media_type)` required to disambiguate cross-type
+  AniList ID collisions. `test_v2_0_0.py:72-73` asserts the literal DDL
+  string — needs a pre-decision before v8 implementation starts.
+
 ## [7.2.0] - 2026-05-14
 
 ### Added — Phase 7 closes

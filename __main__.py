@@ -1,13 +1,20 @@
 """
-Otaku — anime discovery for Discord via AniList.
+Otaku — anime discovery, tracking, and community plugin for Discord via AniList.
 
-Slash commands:
-  /anime <query>             one-shot search; caches the result for 7 days
-  /discover <genre> [sort]   genre browse with prev/next + select-to-expand
-  /trending                  current-season top trending
-  /similar [anime]           recommendations for an anime (or the cached one)
+Surfaces 35 slash commands across discovery (/anime, /discover, /trending,
+/similar, /random, /character, /genres, /mood, /genre-trends), personal
+tracking (/favorite, /favorites, /watch, /list, /rate, /ratings, /progress,
+/import, /stats, /my-stats, /otaku-reset), social/community (/compare, /wp,
+/server-watchlist, /leaderboard, /aotw, /poll, /review, /reviews), and
+airing notifications (/notify, /unnotify, /notify-list, /season-premieres).
+Admin tools live under /otaku-admin.
 
-The plugin is interaction-only — no message events, no schedules, no SQL.
+Backed by Postgres (per-user tracker, reviews, polls, watch parties,
+notifications), KV (last-anime cache + per-server settings), an hourly UTC
+cron for airing pings + seasonal premieres digest, and a manifest-mode
+dashboard. Storage is auto-scoped per (server_id, plugin_id) by the runner.
+
+The full per-phase contract lives in CHANGELOG.md and ROADMAP.md.
 """
 from __future__ import annotations
 
@@ -264,6 +271,7 @@ class _Strings:
     WATCH_NO_CACHE = (
         "You haven't looked up an anime yet. Try `/anime query: <title>` first."
     )
+    WATCH_INVALID_STATUS = "Status must be one of: {choices}"
     WATCH_SET = "Marked **{title}** as **{status}**."
 
     # /list & /favorites.
@@ -308,6 +316,7 @@ class _Strings:
     )
 
     # /season-premieres.
+    PREMIERES_USAGE = "Pick a season from the choices and pass a valid year."
     PREMIERES_HEADER = "🌸 {season} {year} premieres"
     PREMIERES_EMPTY = "No premieres found for {season} {year}."
     PREMIERES_PAGE_MALFORMED = "Premieres button malformed."
@@ -380,7 +389,6 @@ class _Strings:
 
     # /server-watchlist.
     SWL_ADD_USAGE = "Pass an anime with `anime:` — e.g. `/server-watchlist add anime: Frieren`."
-    SWL_REMOVE_USAGE = "Pass an anime title or AniList media ID with `anime:`."
     SWL_ADDED = "📥 Added **{title}** to the server watchlist."
     SWL_ALREADY = "**{title}** is already on the server watchlist."
     SWL_REMOVED = "Removed **{title}** from the server watchlist."
@@ -401,7 +409,6 @@ class _Strings:
     ADMIN_USER_REQUIRED = "Pass a user with `user:` — e.g. `/otaku-admin reset-user user:@them`."
     ADMIN_RESET_DONE = "🗑 Deleted **{rows}** tracked row(s) for <@{user}>."
     ADMIN_RESET_NOTHING = "<@{user}> has no tracked anime on this server. Nothing to delete."
-    ADMIN_LOOKUP_FAILED = "Couldn't look up your roles to verify admin access — try again in a moment."
 
     # /otaku-reset.
     RESET_CONFIRM_PROMPT = (
@@ -501,7 +508,6 @@ class _Strings:
     POLL_USAGE = "Pick a subcommand: `create`, `status`, or `end`."
     POLL_QUESTION_REQUIRED = "Poll needs a question."
     POLL_OPTIONS_REQUIRED = "Poll needs at least 2 options."
-    POLL_CREATED_HEADER = "📊 {question}"
     POLL_STATUS_HEADER = "📊 Poll #{poll_id} — {question}"
     POLL_FOOTER_LIVE = "{n} votes cast · poll #{poll_id}"
     POLL_FOOTER_ENDED = "Closed poll #{poll_id} · {n} votes cast"
@@ -883,15 +889,6 @@ def _option_map(event: dict) -> dict:
     if isinstance(opts, dict):
         return opts
     return {o["name"]: o["value"] for o in opts if isinstance(o, dict) and "name" in o}
-
-
-def _options_list(opts: dict | list | None) -> list:
-    """Same as _option_map but yields the raw list form for tests that prefer it."""
-    if not opts:
-        return []
-    if isinstance(opts, list):
-        return opts
-    return [{"name": k, "value": v} for k, v in opts.items()]
 
 
 def _current_season() -> tuple[str, int]:
@@ -1907,7 +1904,7 @@ def cmd_watch(ctx: Context, event: dict) -> None:
     status = (opts.get("status") or "").strip().lower()
     if status not in VALID_STATUSES:
         ctx.interaction.respond(
-            content=f"Status must be one of: {', '.join(VALID_STATUSES)}",
+            content=S.WATCH_INVALID_STATUS.format(choices=", ".join(VALID_STATUSES)),
             ephemeral=True,
         )
         return
@@ -2185,7 +2182,7 @@ def _caller_is_admin(ctx: Context, user_id: str) -> bool:
 
     The guild owner is always admin. Otherwise we look up the caller's roles
     and check each one's permission bitfield for ADMINISTRATOR or MANAGE_GUILD.
-    A failed lookup returns False (callers should then surface ADMIN_LOOKUP_FAILED).
+    A failed lookup returns False and callers fall through to S.ADMIN_DENIED.
     """
     if not user_id:
         return False
@@ -2664,10 +2661,7 @@ def cmd_season_premieres(ctx: Context, event: dict) -> None:
         except (TypeError, ValueError):
             year = None
         if season is None or year is None:
-            ctx.interaction.respond(
-                content="Pick a season from the choices and pass a valid year.",
-                ephemeral=True,
-            )
+            ctx.interaction.respond(content=S.PREMIERES_USAGE, ephemeral=True)
             return
     else:
         season, year = _next_season()
@@ -2967,9 +2961,9 @@ def cmd_leaderboard(ctx: Context, event: dict) -> None:
 # ── v3.2.0 — /wp (watch parties) ────────────────────────────────────────────
 
 WATCH_PARTY_STATUS_LABEL = {
-    "active":    "▶ Active",
-    "completed": "✅ Completed",
-    "abandoned": "🛑 Abandoned",
+    "active":    S.WP_STATUS_ACTIVE,
+    "completed": S.WP_STATUS_COMPLETED,
+    "abandoned": S.WP_STATUS_ABANDONED,
 }
 
 
@@ -4037,12 +4031,6 @@ def _get_user_tracking(ctx: Context, user_id: str, media_id: int) -> tuple[int, 
     return progress, rating
 
 
-def _get_user_progress(ctx: Context, user_id: str, media_id: int) -> int:
-    """Back-compat shim for v2.2 callers — returns only the progress component."""
-    progress, _ = _get_user_tracking(ctx, user_id, media_id)
-    return progress
-
-
 @plugin.on_slash_command("progress")
 def cmd_progress(ctx: Context, event: dict) -> None:
     user_id = event.get("user_id") or ""
@@ -4299,10 +4287,14 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         return
 
     if cid.startswith("otaku:reset-confirm:"):
+        if _on_cooldown(ctx, user_id):
+            return
         _handle_reset_confirm(ctx, event)
         return
 
     if cid.startswith("otaku:reset-cancel:"):
+        if _on_cooldown(ctx, user_id):
+            return
         _handle_reset_cancel(ctx, event)
         return
 
@@ -4432,12 +4424,6 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:poll-vote:")
     ):
         _component_dispatch(ctx, event)
-
-
-# Convenience wrapper exposed for tests — let tests call the similar handler
-# directly with a media ID without constructing a full event.
-def handle_similar_button(ctx: Context, event: dict) -> None:
-    _component_dispatch(ctx, event)
 
 
 @plugin.on_component("otaku:expand")
