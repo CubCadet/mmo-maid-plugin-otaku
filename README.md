@@ -77,6 +77,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/genre-trends` | Trending anime right now in your top 3 most-tracked genres. Bridges discovery and personalization — anime you already track are filtered out. Ephemeral. |
 | `/review` | Open a modal to write or edit a review of your last `/anime` lookup. Existing review (if any) is pre-filled. One review per user per anime. |
 | `/reviews [anime]` | Browse this server's reviews for an anime. Accepts a title, a numeric AniList ID, or defaults to your last `/anime` lookup. Paginated, sorted by most-recently-edited. |
+| `/aotw start \| status \| end` | Anime-of-the-week voting. Admin starts (top 5 from server watchlist); members vote via numbered buttons; admin ends and winner gets posted in the announcement channel. One active poll per server. |
 
 ### Politeness throttle
 

@@ -772,9 +772,30 @@ both the modal and the SQL upsert.
 
 ---
 
-### v7.1.0 — Anime of the week voting
+### v7.1.0 — Anime of the week voting ✅ shipped 2026-05-14
 
-Server-wide weekly poll. Admins kick off; members vote via buttons. Winner pinned in the announcement channel.
+~~Server-wide weekly poll. Admins kick off; members vote via buttons. Winner pinned in the announcement channel.~~ Shipped as **`/aotw`**
+with three subcommands:
+- `/aotw start` (admin) — pulls top 5 from `otaku_server_watchlist`,
+  creates poll, posts embed with 5 numbered vote buttons. Requires
+  ≥2 entries in the watchlist. One active poll per server.
+- `/aotw status` (public) — live standings.
+- `/aotw end` (admin) — declares winner (max votes; tie-break by
+  lowest media_id), posts to the v4.0 announcement channel (falls
+  back to the run channel).
+
+**No cron auto-end** — the roadmap's "weekly" framing collapsed to
+admin-triggered. Cron-end adds time-tracking that isn't worth it for
+admin-driven flows; can layer onto the v4.0 hourly cron later if
+demand surfaces.
+
+**Schema:** three new tables (`otaku_aotw_polls`,
+`otaku_aotw_candidates`, `otaku_aotw_votes`) wired into
+`_bootstrap_schema`. PK on votes is `(poll_id, user_id)` so changing
+your vote UPDATEs the existing row.
+
+**Capability:** none new — `discord:send_message` from v4.0 carries
+the announcement.
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -456,6 +456,27 @@
           "description": "Anime title or numeric AniList ID (defaults to your last /anime lookup)",
           "type": 3,
           "required": false
+        }
+      ]
+    },
+    {
+      "name": "aotw",
+      "description": "Anime of the week — start a vote (admin), check status, or end the poll.",
+      "options": [
+        {
+          "name": "start",
+          "description": "Start a new anime-of-the-week vote from the server watchlist (admin only).",
+          "type": 1
+        },
+        {
+          "name": "status",
+          "description": "Show the active anime-of-the-week vote and current standings.",
+          "type": 1
+        },
+        {
+          "name": "end",
+          "description": "End the active vote and announce the winner (admin only).",
+          "type": 1
         }
       ]
     },

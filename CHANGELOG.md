@@ -20,6 +20,52 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-05-14
+
+### Added
+- `/aotw` — anime-of-the-week voting, three subcommands:
+  - `/aotw start` (admin only) — pulls the top 5 entries from
+    `otaku_server_watchlist` by recency, creates a poll, posts an
+    embed with 5 numbered vote buttons.
+  - `/aotw status` (public) — shows the active poll's candidates and
+    live vote counts.
+  - `/aotw end` (admin only) — declares the winner, marks the poll
+    `status='ended'`, and posts the winner card to the configured
+    announcement channel (falls back to the channel where the command
+    was run if no announcement channel is set). Ephemeral confirm to
+    the admin either way.
+- Three new SQL tables wired into `_bootstrap_schema`:
+  `otaku_aotw_polls`, `otaku_aotw_candidates`, `otaku_aotw_votes`.
+  `otaku_aotw_votes`'s PK `(poll_id, user_id)` enforces one vote per
+  user — clicking another candidate UPDATEs the existing row.
+- Vote button routing — `otaku:aotw-vote:<poll_id>:<media_id>` runs
+  through the existing `_route_components` dispatcher. Ephemeral
+  confirmation; live counts surface via `/aotw status`.
+- Winner = max votes; tie-break by **lowest media_id** (deterministic,
+  no implicit favoritism).
+- One active poll per server enforced in `start`; a second
+  `/aotw start` while one is open is rejected with a pointer.
+- Regression file `tests/regression/test_v7_1_0.py` (17 tests) freezes
+  the schema bootstrap, the candidate limit, admin gating on start
+  and end (status stays public), the watchlist-min-2 requirement, the
+  insert-vs-update vote routing, the tie-break rule, and the
+  announce-channel posting target.
+
+### Design notes
+- No cron auto-end in v7.1.0. The roadmap mentioned "weekly" but the
+  cron-end mechanic adds time-tracking complexity that isn't worth it
+  if admins are running these manually anyway. A v7.1.x patch could
+  layer it onto the existing v4.0 hourly cron if demand arises.
+- The vote-confirmation message is ephemeral and doesn't edit the
+  original `/aotw start` embed with new counts — message-edit would
+  need to track the message_id of the start embed, which isn't worth
+  the complexity given `/aotw status` exists.
+
+### Capability surface
+- **No new capabilities.** `discord:send_message` was added in v4.0
+  for airing notifications and now also carries the winner
+  announcement.
+
 ## [7.0.0] - 2026-05-14
 
 ### Added — Phase 7 opens

@@ -115,6 +115,33 @@ _SCHEMA_REVIEWS_DDL = (
     "  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),"
     "  PRIMARY KEY (user_id, media_id))"
 )
+# v7.1.0 — anime of the week. One active poll per server (enforced in
+# /aotw start). Candidates are pulled from otaku_server_watchlist; votes
+# are one-per-user-per-poll (PK (poll_id, user_id)); clicking another
+# candidate updates the existing vote rather than adding a new one.
+_SCHEMA_AOTW_POLLS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_aotw_polls ("
+    "  poll_id SERIAL PRIMARY KEY,"
+    "  started_by TEXT NOT NULL,"
+    "  started_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  ended_at TIMESTAMP,"
+    "  winner_id INTEGER,"
+    "  status TEXT NOT NULL DEFAULT 'active')"
+)
+_SCHEMA_AOTW_CANDIDATES_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_aotw_candidates ("
+    "  poll_id INTEGER NOT NULL,"
+    "  media_id INTEGER NOT NULL,"
+    "  PRIMARY KEY (poll_id, media_id))"
+)
+_SCHEMA_AOTW_VOTES_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_aotw_votes ("
+    "  poll_id INTEGER NOT NULL,"
+    "  user_id TEXT NOT NULL,"
+    "  media_id INTEGER NOT NULL,"
+    "  voted_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (poll_id, user_id))"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -437,6 +464,48 @@ class _Strings:
     RECOMMEND_NO_DATA = (
         "You haven't tracked any anime yet. Try `/favorite` or `/rate score: <n>` "
         "after a `/anime` lookup."
+    )
+
+    # /aotw (v7.1.0).
+    AOTW_NOT_ADMIN = (
+        "Only server admins can run `/aotw {action}`. Ask a moderator with "
+        "`Manage Server` or `Administrator`."
+    )
+    AOTW_ALREADY_ACTIVE = (
+        "There's already an active anime-of-the-week vote (#{poll_id}). "
+        "End it first with `/aotw end`, or check `/aotw status` for the "
+        "current standings."
+    )
+    AOTW_NO_CANDIDATES = (
+        "The server watchlist needs at least 2 entries before starting a vote. "
+        "Add some with `/server-watchlist add anime: <title>`."
+    )
+    AOTW_NONE_ACTIVE = (
+        "No anime-of-the-week vote is running right now. An admin can kick "
+        "one off with `/aotw start`."
+    )
+    AOTW_USAGE = "Pick a subcommand: `start`, `status`, or `end`."
+    AOTW_STARTED = "🎬 Anime of the Week — vote!"
+    AOTW_STATUS_HEADER = "🎬 Anime of the Week — standings"
+    AOTW_VOTE_BUTTON_MALFORMED = "Vote button malformed."
+    AOTW_VOTE_POLL_CLOSED = (
+        "That poll is closed — `/aotw status` shows the winner."
+    )
+    AOTW_VOTE_RECORDED = "🗳 Voted for **{title}**."
+    AOTW_VOTE_CHANGED = "🗳 Changed your vote to **{title}**."
+    AOTW_VOTE_NOOP = "You already voted for **{title}**."
+    AOTW_FOOTER_VOTES = "{n} votes cast · poll #{poll_id}"
+    AOTW_ENDED_WINNER = (
+        "🏆 **{title}** wins this week's anime poll (#{poll_id}) with "
+        "{votes} vote(s)!"
+    )
+    AOTW_ENDED_NO_VOTES = (
+        "Poll #{poll_id} closed with no votes — nothing to announce. Start "
+        "a fresh one with `/aotw start`."
+    )
+    AOTW_ANNOUNCE_FAIL = (
+        "Closed poll #{poll_id} but couldn't post the winner announcement. "
+        "Set the announcement channel with `/otaku-admin set-channel`."
     )
 
     # /review and /reviews (v7.0.0).
@@ -1326,6 +1395,10 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_NOTIFICATIONS_DDL)
     # v7.0.0
     ctx.sql.execute(_SCHEMA_REVIEWS_DDL)
+    # v7.1.0
+    ctx.sql.execute(_SCHEMA_AOTW_POLLS_DDL)
+    ctx.sql.execute(_SCHEMA_AOTW_CANDIDATES_DDL)
+    ctx.sql.execute(_SCHEMA_AOTW_VOTES_DDL)
 
 
 @plugin.on_install
@@ -4265,6 +4338,10 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         _render_reviews(ctx, media_id, page=page, deferred=True)
         return
 
+    if cid.startswith("otaku:aotw-vote:"):
+        _handle_aotw_vote(ctx, event)
+        return
+
 
 # Register the dispatcher under every dynamic prefix we use. The SDK matches on
 # exact custom_id, so we hook the raw interaction_create event and filter ourselves.
@@ -4296,6 +4373,7 @@ def _route_components(ctx: Context, event: dict) -> None:
         or cid.startswith("otaku:premieres:")
         or cid.startswith("otaku:mood:")
         or cid.startswith("otaku:reviews:")
+        or cid.startswith("otaku:aotw-vote:")
     ):
         _component_dispatch(ctx, event)
 
@@ -4594,6 +4672,337 @@ def cmd_reviews(ctx: Context, event: dict) -> None:
         media_id = cached
 
     _render_reviews(ctx, media_id, page=1, deferred=True)
+
+
+# ── v7.1.0 — /aotw (anime of the week voting) ────────────────────────────────
+#
+# Candidates come from otaku_server_watchlist (v3.0.0) — top
+# AOTW_CANDIDATE_LIMIT (5) entries by recency. Discord allows 5 buttons in a
+# row, which conveniently caps the candidate count at 5 too. One active poll
+# per server is enforced in /aotw start; concurrent polls would make button
+# routing ambiguous.
+
+AOTW_CANDIDATE_LIMIT = 5
+AOTW_CANDIDATE_NUMBERS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+
+def _aotw_active_poll_id(ctx: Context) -> int | None:
+    rows = ctx.sql.query(
+        "SELECT poll_id FROM otaku_aotw_polls WHERE status = 'active' "
+        "ORDER BY started_at DESC LIMIT 1"
+    ) or []
+    if not rows:
+        return None
+    pid = rows[0].get("poll_id")
+    return int(pid) if pid is not None else None
+
+
+def _aotw_poll_row(ctx: Context, poll_id: int) -> dict | None:
+    rows = ctx.sql.query(
+        "SELECT poll_id, started_by, started_at, ended_at, winner_id, status "
+        "FROM otaku_aotw_polls WHERE poll_id = $1",
+        [poll_id],
+    ) or []
+    return rows[0] if rows else None
+
+
+def _aotw_candidates(ctx: Context, poll_id: int) -> list[int]:
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_aotw_candidates WHERE poll_id = $1 "
+        "ORDER BY media_id ASC",
+        [poll_id],
+    ) or []
+    return [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+
+
+def _aotw_vote_counts(ctx: Context, poll_id: int) -> dict[int, int]:
+    rows = ctx.sql.query(
+        "SELECT media_id, COUNT(*) AS n FROM otaku_aotw_votes "
+        "WHERE poll_id = $1 GROUP BY media_id",
+        [poll_id],
+    ) or []
+    return {int(r["media_id"]): int(r["n"]) for r in rows}
+
+
+def _aotw_existing_vote(ctx: Context, poll_id: int, user_id: str) -> int | None:
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_aotw_votes "
+        "WHERE poll_id = $1 AND user_id = $2",
+        [poll_id, user_id],
+    ) or []
+    if not rows:
+        return None
+    mid = rows[0].get("media_id")
+    return int(mid) if mid is not None else None
+
+
+def _aotw_render_embed(
+    ctx: Context,
+    poll_id: int,
+    candidates: list[int],
+    media_by_id: dict[int, dict],
+    *,
+    header: str,
+) -> dict:
+    counts = _aotw_vote_counts(ctx, poll_id)
+    total_votes = sum(counts.values())
+    lines = []
+    for idx, mid in enumerate(candidates[:AOTW_CANDIDATE_LIMIT]):
+        m = media_by_id.get(mid) or {}
+        title = _format_title(m) if m else f"anime #{mid}"
+        url = m.get("siteUrl") or ""
+        anchor = f"[{title}]({url})" if url else title
+        n = counts.get(mid, 0)
+        suffix = "vote" if n == 1 else "votes"
+        lines.append(f"{AOTW_CANDIDATE_NUMBERS[idx]} {anchor} — **{n}** {suffix}")
+    return {
+        "title": header,
+        "description": "\n".join(lines) if lines else "*(no candidates)*",
+        "color": ANILIST_COLOR,
+        "footer": {
+            "text": S.AOTW_FOOTER_VOTES.format(n=total_votes, poll_id=poll_id)
+        },
+    }
+
+
+def _aotw_vote_buttons(poll_id: int, candidates: list[int]) -> ActionRow:
+    buttons = []
+    for idx, mid in enumerate(candidates[:AOTW_CANDIDATE_LIMIT]):
+        buttons.append(
+            Button(
+                AOTW_CANDIDATE_NUMBERS[idx],
+                custom_id=f"otaku:aotw-vote:{poll_id}:{mid}",
+                style="primary",
+            )
+        )
+    return ActionRow(*buttons)
+
+
+def _aotw_resolve_media(ctx: Context, ids: list[int]) -> dict[int, dict]:
+    if not ids:
+        return {}
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": sorted(ids)}, cache=True)
+    if data is None:
+        return {}
+    out: dict[int, dict] = {}
+    for m in ((data.get("Page") or {}).get("media") or []):
+        mid = m.get("id")
+        if isinstance(mid, int):
+            out[mid] = m
+    return out
+
+
+def _cmd_aotw_start(ctx: Context, user_id: str) -> None:
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.respond(
+            content=S.AOTW_NOT_ADMIN.format(action="start"), ephemeral=True
+        )
+        return
+    ctx.interaction.defer()
+    active = _aotw_active_poll_id(ctx)
+    if active is not None:
+        _reply_error(
+            ctx, S.AOTW_ALREADY_ACTIVE.format(poll_id=active), deferred=True
+        )
+        return
+
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_server_watchlist "
+        "ORDER BY added_at DESC LIMIT $1",
+        [AOTW_CANDIDATE_LIMIT],
+    ) or []
+    candidate_ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
+    if len(candidate_ids) < 2:
+        _reply_error(ctx, S.AOTW_NO_CANDIDATES, deferred=True)
+        return
+
+    ctx.sql.execute(
+        "INSERT INTO otaku_aotw_polls (started_by) VALUES ($1)", [user_id]
+    )
+    poll_rows = ctx.sql.query(
+        "SELECT poll_id FROM otaku_aotw_polls "
+        "WHERE started_by = $1 AND status = 'active' "
+        "ORDER BY started_at DESC LIMIT 1",
+        [user_id],
+    ) or []
+    if not poll_rows or poll_rows[0].get("poll_id") is None:
+        _reply_error(ctx, S.SQL_FAIL, deferred=True)
+        return
+    poll_id = int(poll_rows[0]["poll_id"])
+    for mid in candidate_ids:
+        ctx.sql.execute(
+            "INSERT INTO otaku_aotw_candidates (poll_id, media_id) "
+            "VALUES ($1, $2)",
+            [poll_id, mid],
+        )
+
+    media_by_id = _aotw_resolve_media(ctx, candidate_ids)
+    embed = _aotw_render_embed(
+        ctx, poll_id, candidate_ids, media_by_id, header=S.AOTW_STARTED
+    )
+    ctx.interaction.followup(
+        embeds=[embed],
+        components=[_aotw_vote_buttons(poll_id, candidate_ids)],
+    )
+
+
+def _cmd_aotw_status(ctx: Context) -> None:
+    ctx.interaction.defer()
+    poll_id = _aotw_active_poll_id(ctx)
+    if poll_id is None:
+        _reply_error(ctx, S.AOTW_NONE_ACTIVE, deferred=True)
+        return
+    candidates = _aotw_candidates(ctx, poll_id)
+    media_by_id = _aotw_resolve_media(ctx, candidates)
+    embed = _aotw_render_embed(
+        ctx, poll_id, candidates, media_by_id, header=S.AOTW_STATUS_HEADER
+    )
+    # /aotw status doesn't re-render the vote buttons — the original /aotw
+    # start embed already has them and stays interactive.
+    ctx.interaction.followup(embeds=[embed])
+
+
+def _cmd_aotw_end(ctx: Context, user_id: str, channel_id: str) -> None:
+    if not _caller_is_admin(ctx, user_id):
+        ctx.interaction.respond(
+            content=S.AOTW_NOT_ADMIN.format(action="end"), ephemeral=True
+        )
+        return
+    ctx.interaction.defer(ephemeral=True)
+    poll_id = _aotw_active_poll_id(ctx)
+    if poll_id is None:
+        _reply_error(ctx, S.AOTW_NONE_ACTIVE, deferred=True)
+        return
+
+    counts = _aotw_vote_counts(ctx, poll_id)
+    if not counts:
+        ctx.sql.execute(
+            "UPDATE otaku_aotw_polls SET status = 'ended', ended_at = NOW() "
+            "WHERE poll_id = $1",
+            [poll_id],
+        )
+        ctx.interaction.followup(
+            content=S.AOTW_ENDED_NO_VOTES.format(poll_id=poll_id), ephemeral=True
+        )
+        return
+
+    # Highest count wins; tie-break by lowest media_id (deterministic).
+    winner_id = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+    votes = counts[winner_id]
+    ctx.sql.execute(
+        "UPDATE otaku_aotw_polls SET status = 'ended', ended_at = NOW(), "
+        "winner_id = $1 WHERE poll_id = $2",
+        [winner_id, poll_id],
+    )
+
+    media_by_id = _aotw_resolve_media(ctx, [winner_id])
+    media = media_by_id.get(winner_id) or {}
+    title = _format_title(media) if media else f"anime #{winner_id}"
+
+    target_channel = _resolve_announcement_channel(ctx) or channel_id
+    announcement = S.AOTW_ENDED_WINNER.format(
+        title=title, poll_id=poll_id, votes=votes
+    )
+    embed = {
+        "title": "🏆 Anime of the Week",
+        "description": announcement,
+        "color": ANILIST_COLOR,
+    }
+    cover = (media.get("coverImage") or {}).get("large") if media else None
+    if cover:
+        embed["thumbnail"] = {"url": cover}
+    site_url = media.get("siteUrl") if media else None
+    if site_url:
+        embed["url"] = site_url
+
+    posted = False
+    if target_channel:
+        try:
+            ctx.discord.send_message(channel_id=target_channel, embeds=[embed])
+            posted = True
+        except Exception:  # noqa: BLE001 — fall through to ephemeral confirm
+            posted = False
+
+    if posted:
+        ctx.interaction.followup(content=announcement, ephemeral=True)
+    else:
+        ctx.interaction.followup(
+            content=S.AOTW_ANNOUNCE_FAIL.format(poll_id=poll_id), ephemeral=True
+        )
+
+
+@plugin.on_slash_command("aotw")
+def cmd_aotw(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = event.get("options") or []
+    if not opts or not isinstance(opts, list):
+        ctx.interaction.respond(content=S.AOTW_USAGE, ephemeral=True)
+        return
+    sub = opts[0] if isinstance(opts[0], dict) else {}
+    subcommand = sub.get("name") or ""
+    if subcommand == "start":
+        _cmd_aotw_start(ctx, user_id)
+    elif subcommand == "status":
+        _cmd_aotw_status(ctx)
+    elif subcommand == "end":
+        _cmd_aotw_end(ctx, user_id, channel_id=event.get("channel_id") or "")
+    else:
+        ctx.interaction.respond(content=S.AOTW_USAGE, ephemeral=True)
+
+
+def _handle_aotw_vote(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    cid = event.get("custom_id") or ""
+    parts = cid.split(":", 3)
+    if len(parts) < 4:
+        ctx.interaction.respond(content=S.AOTW_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+    try:
+        poll_id = int(parts[2])
+        media_id = int(parts[3])
+    except ValueError:
+        ctx.interaction.respond(content=S.AOTW_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+
+    poll = _aotw_poll_row(ctx, poll_id)
+    if poll is None or poll.get("status") != "active":
+        ctx.interaction.respond(content=S.AOTW_VOTE_POLL_CLOSED, ephemeral=True)
+        return
+
+    candidates = _aotw_candidates(ctx, poll_id)
+    if media_id not in candidates:
+        ctx.interaction.respond(content=S.AOTW_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        return
+
+    existing = _aotw_existing_vote(ctx, poll_id, user_id)
+    media_by_id = _aotw_resolve_media(ctx, [media_id])
+    media = media_by_id.get(media_id) or {}
+    title = _format_title(media) if media else f"anime #{media_id}"
+
+    if existing == media_id:
+        ctx.interaction.respond(
+            content=S.AOTW_VOTE_NOOP.format(title=title), ephemeral=True
+        )
+        return
+    if existing is None:
+        ctx.sql.execute(
+            "INSERT INTO otaku_aotw_votes (poll_id, user_id, media_id) "
+            "VALUES ($1, $2, $3)",
+            [poll_id, user_id, media_id],
+        )
+        msg = S.AOTW_VOTE_RECORDED.format(title=title)
+    else:
+        ctx.sql.execute(
+            "UPDATE otaku_aotw_votes SET media_id = $1, voted_at = NOW() "
+            "WHERE poll_id = $2 AND user_id = $3",
+            [media_id, poll_id, user_id],
+        )
+        msg = S.AOTW_VOTE_CHANGED.format(title=title)
+    ctx.interaction.respond(content=msg, ephemeral=True)
 
 
 # ── v6.2.0 — /genre-trends (genre-trend recommendations) ────────────────────
