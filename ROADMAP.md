@@ -654,22 +654,35 @@ Originally "server announcement channel." Shipped as part of v4.0.0 above.
 
 **Goal:** Beat AniList's default recommendations using the local watch history.
 
-### v6.0.0 — Personal recommendation engine
+### v6.0.0 — Personal recommendation engine ✅ shipped 2026-05-14
 
 **Algorithm v1:** Collaborative filtering across users in the same server.
 
-- For each user, compute a vector of (media_id, rating).
-- For a target user, find the K most-similar users (cosine similarity over rating vectors).
-- Recommend anime those K users rated highly that the target hasn't watched.
+- ~~For each user, compute a vector of (media_id, rating).~~ Vector is
+  `rating / 2.0` on the 0.5–10.0 scale, built from rows with
+  `rating IS NOT NULL`. Unrated tracked rows are intentionally omitted
+  — they'd dilute the signal that the user actually liked the show.
+- ~~For a target user, find the K most-similar users (cosine similarity over rating vectors).~~ Cosine over media_ids in both vectors. Peers
+  must share **≥ 3 rated titles** with the target to qualify (filters
+  out trivial single-overlap pairings).
+- ~~Recommend anime those K users rated highly that the target hasn't watched.~~ Candidate score = `Σ over qualifying peers of (sim × peer_rating)`. Tie-break: peer count, then media_id asc. Top 5
+  returned, each annotated with how many peers supported it.
 
 **New slash command:**
-- `/recommend` — Returns 5 personalized recommendations.
+- ~~`/recommend` — Returns 5 personalized recommendations.~~ Shipped.
 
-**Implementation hint:** This runs entirely off `otaku_user_anime` data. No external API call required for the algorithm itself — only for fetching display details of the recommended anime.
+**Implementation note:** Runs entirely off `otaku_user_anime`. One
+AniList batch HTTP call resolves display titles for the top 5; nothing
+else hits the network in the CF path.
 
 **Failure modes:**
-- Small server, sparse data — fall back to AniList's `/similar` algorithm.
-- Compute cost — cap the user count for similarity at 50, sample randomly if larger.
+- ~~Small server, sparse data — fall back to AniList's `/similar` algorithm.~~ Triggers when target has <3 ratings OR no peer overlaps
+  ≥3 titles. Fallback seed is the target's highest-rated tracked anime,
+  falling through to newest favorite, then newest tracked.
+- ~~Compute cost — cap the user count for similarity at 50, sample randomly if larger.~~ `RECOMMEND_PEER_CAP = 50`, sampled via
+  `random.sample` when more peers exist.
+
+**Capability:** No new capabilities — `storage:sql` covers everything.
 
 ---
 

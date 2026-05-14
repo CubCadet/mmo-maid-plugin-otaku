@@ -72,6 +72,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/otaku-admin set-channel <#channel>` | Admin-only. Sets where airing pings post. Omit the channel to clear. |
 | `/season-premieres [season] [year]` | Paginated browse of upcoming anime premieres. Defaults to next season. |
 | `/my-stats` | Richer personal view than `/stats` — top rated, top favorites, recently completed, with completion percentage. |
+| `/recommend` | Personalized recommendations via collaborative filtering over this server's rated rows. Cosine similarity across up to 50 peers; peers must share ≥3 rated titles. Falls back to AniList `/similar` (seeded by your top-rated tracked anime) if you have <3 ratings or no peer overlaps enough. |
 
 ### Politeness throttle
 

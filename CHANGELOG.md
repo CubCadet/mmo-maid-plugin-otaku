@@ -20,17 +20,41 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
-### Note — Phase 5 closure
-- Phase 5 closes at v5.1.0. The originally-planned v5.2 (iframe upgrade)
-  and v5.3.x (charts & trends) are **deferred to a future MAJOR bump**:
-  the SDK requires picking ONE dashboard mode, and switching from
-  manifest to iframe breaks the v5.0 regression contract. Per the
-  regression doctrine that's a MAJOR-version change, not a MINOR.
-- The manifest-mode dashboard from v5.0 + the `/my-stats` slash command
-  from v5.1 cover the user-visible value of Phase 5 in the v0.5.x SDK
-  shape. Iframe-only features (sortable tables, time-series charts) will
-  land alongside the dashboard mode switch in v6.0.0 or later, when
-  those features become user-visible priorities.
+## [6.0.0] - 2026-05-14
+
+### Added
+- `/recommend` — personalized anime recommendations driven by
+  collaborative filtering over this server's rated rows. Vector is each
+  user's `rating / 2.0` on the 0.5–10.0 scale; candidate score is
+  `Σ cosine_sim(target, peer) × peer_rating` across peers that share
+  ≥3 rated titles with the target. Peers capped at 50 (random sample
+  when more). Top 5 results shown ephemerally, annotated with the peer
+  count supporting each pick.
+- Fallback to AniList `/similar` (seeded by the target's highest-rated
+  tracked anime, falling through to newest favorite, then newest
+  tracked) when the target has <3 ratings OR no peer overlaps ≥3
+  titles. The reason is surfaced in the embed body so users know why
+  they got the AniList path.
+- Regression file `tests/regression/test_v6_0_0.py` freezes the
+  algorithm constants, the cosine helper, and the candidate-exclusion
+  contract.
+
+### Deviation from the roadmap
+- The roadmap's v5.2 iframe upgrade and v5.3.x charts stay deferred —
+  the same SDK manifest-vs-iframe exclusivity that blocked them at the
+  end of Phase 5 still applies. This MAJOR bump is purely the Phase 6
+  kick-off (collaborative filtering), not the dashboard-mode swap. The
+  swap waits until charts/time-series become user-visible priorities.
+- v6.0 ships with **no new capabilities** — `storage:sql` already
+  covers everything the algorithm needs. That keeps the marketplace
+  review surface area unchanged.
+
+### Note — Phase 5 closure (carried forward from v5.1.0)
+- Phase 5 closes at v5.1.0. v5.2 (iframe upgrade) and v5.3.x (charts &
+  trends) are deferred to a future MAJOR bump: the SDK requires
+  picking ONE dashboard mode, and switching from manifest to iframe
+  breaks the v5.0 regression contract. v6.0.0 does **not** make that
+  switch — see "Deviation from the roadmap" above.
 
 ## [5.1.0] - 2026-05-15
 

@@ -12,6 +12,7 @@ The plugin is interaction-only — no message events, no schedules, no SQL.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
@@ -402,6 +403,27 @@ class _Strings:
         "You haven't rated any anime yet. Try `/rate score: 8` after a `/anime` lookup."
     )
     RATINGS_EMPTY_OTHER = "{who} hasn't rated any anime yet."
+
+    # /recommend (v6.0.0).
+    RECOMMEND_HEADER = "✨ Recommended for you"
+    RECOMMEND_FOOTER_CF = "Collaborative filtering · {peers} similar viewer(s) in this server"
+    RECOMMEND_FALLBACK_HEADER = "✨ Like **{title}**"
+    RECOMMEND_FALLBACK_FEW_RATINGS = (
+        "Rate a few more anime with `/rate` and I'll mix in this server's taste. "
+        "For now, here are AniList's picks based on your top-rated tracked anime:"
+    )
+    RECOMMEND_FALLBACK_NO_PEERS = (
+        "Nobody else on this server has rated enough anime in common with you yet. "
+        "Here are AniList's picks based on your top-rated tracked anime:"
+    )
+    RECOMMEND_FALLBACK_EMPTY = (
+        "AniList doesn't have any unseen similar anime for your top pick — "
+        "try `/similar` on something else."
+    )
+    RECOMMEND_NO_DATA = (
+        "You haven't tracked any anime yet. Try `/favorite` or `/rate score: <n>` "
+        "after a `/anime` lookup."
+    )
 
 
 S = _Strings
@@ -4164,6 +4186,224 @@ def comp_expand(ctx: Context, event: dict) -> None:
     if site_url:
         buttons.append(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))
     ctx.interaction.followup(embeds=[embed], components=[ActionRow(*buttons)], ephemeral=True)
+
+
+# ── v6.0.0 — /recommend (collaborative filtering) ───────────────────────────
+#
+# Algorithm: cosine similarity over per-user rating vectors scoped to this
+# server (ctx.sql is already per-(plugin, server) so no explicit server_id
+# filter is needed). For the target user we score each candidate as
+#   score(media) = Σ over qualifying peers of (cosine_sim × peer_rating)
+# Peers must share ≥ RECOMMEND_MIN_SHARED_TITLES rated anime to qualify
+# (filters out trivial "we both rated one Pokémon movie" overlaps). Up to
+# RECOMMEND_PEER_CAP peers are scanned, sampled randomly if more. Anime the
+# target already tracks (any status) are excluded from candidates. Fallback
+# to AniList /similar (seeded by the target's highest-rated tracked anime)
+# triggers when the target has < RECOMMEND_MIN_SELF_RATINGS ratings OR no
+# peer qualifies.
+
+RECOMMEND_PEER_CAP = 50
+RECOMMEND_MIN_SELF_RATINGS = 3
+RECOMMEND_MIN_SHARED_TITLES = 3
+RECOMMEND_RESULT_LIMIT = 5
+
+
+def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
+    """media_id → user's rating on a 0.5..10.0 scale. Unrated rows are omitted."""
+    rows = ctx.sql.query(
+        "SELECT media_id, rating FROM otaku_user_anime "
+        "WHERE user_id = $1 AND rating IS NOT NULL",
+        [user_id],
+    ) or []
+    vec: dict[int, float] = {}
+    for r in rows:
+        mid = r.get("media_id")
+        rating = r.get("rating")
+        if mid is None or rating is None:
+            continue
+        vec[int(mid)] = float(rating) / 2.0
+    return vec
+
+
+def _recommend_tracked_ids(ctx: Context, user_id: str) -> set[int]:
+    """All media_ids the user has tracked in any status — excluded from candidates."""
+    rows = ctx.sql.query(
+        "SELECT media_id FROM otaku_user_anime WHERE user_id = $1",
+        [user_id],
+    ) or []
+    return {int(r["media_id"]) for r in rows if r.get("media_id") is not None}
+
+
+def _recommend_peer_ids(ctx: Context, target_id: str) -> list[str]:
+    """Other users on this server with at least one rating."""
+    rows = ctx.sql.query(
+        "SELECT DISTINCT user_id FROM otaku_user_anime "
+        "WHERE rating IS NOT NULL AND user_id != $1",
+        [target_id],
+    ) or []
+    return [str(r["user_id"]) for r in rows if r.get("user_id") is not None]
+
+
+def _cosine_similarity(
+    target: dict[int, float], peer: dict[int, float]
+) -> tuple[float, int]:
+    """Cosine over shared media_ids. Returns (similarity, shared_count)."""
+    shared = target.keys() & peer.keys()
+    if not shared:
+        return 0.0, 0
+    dot = sum(target[m] * peer[m] for m in shared)
+    norm_t = math.sqrt(sum(v * v for v in target.values()))
+    norm_p = math.sqrt(sum(v * v for v in peer.values()))
+    if norm_t == 0.0 or norm_p == 0.0:
+        return 0.0, len(shared)
+    return dot / (norm_t * norm_p), len(shared)
+
+
+def _recommend_candidates(
+    ctx: Context, target_id: str, target_vector: dict[int, float]
+) -> tuple[list[dict], int]:
+    """Score CF candidates. Returns (sorted_candidates, qualifying_peer_count).
+
+    Each candidate dict: {media_id, score, peer_count}.
+    """
+    excluded = _recommend_tracked_ids(ctx, target_id) | set(target_vector.keys())
+    peer_ids = _recommend_peer_ids(ctx, target_id)
+    if len(peer_ids) > RECOMMEND_PEER_CAP:
+        peer_ids = random.sample(peer_ids, RECOMMEND_PEER_CAP)
+
+    candidates: dict[int, dict] = {}
+    peers_kept = 0
+    for pid in peer_ids:
+        peer_vec = _recommend_user_vector(ctx, pid)
+        sim, shared = _cosine_similarity(target_vector, peer_vec)
+        if shared < RECOMMEND_MIN_SHARED_TITLES or sim <= 0.0:
+            continue
+        peers_kept += 1
+        for mid, peer_rating in peer_vec.items():
+            if mid in excluded:
+                continue
+            entry = candidates.setdefault(
+                mid, {"media_id": mid, "score": 0.0, "peer_count": 0}
+            )
+            entry["score"] += sim * peer_rating
+            entry["peer_count"] += 1
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda c: (-c["score"], -c["peer_count"], c["media_id"]),
+    )
+    return ordered, peers_kept
+
+
+def _recommend_fallback_seed_id(ctx: Context, user_id: str) -> int | None:
+    """Pick what to seed AniList /similar with: top-rated → newest favorite → newest tracked."""
+    for sql in (
+        "SELECT media_id FROM otaku_user_anime "
+        "WHERE user_id = $1 AND rating IS NOT NULL "
+        "ORDER BY rating DESC, added_at DESC LIMIT 1",
+        "SELECT media_id FROM otaku_user_anime "
+        "WHERE user_id = $1 AND is_favorite = TRUE "
+        "ORDER BY added_at DESC LIMIT 1",
+        "SELECT media_id FROM otaku_user_anime "
+        "WHERE user_id = $1 ORDER BY added_at DESC LIMIT 1",
+    ):
+        rows = ctx.sql.query(sql, [user_id]) or []
+        if rows and rows[0].get("media_id") is not None:
+            return int(rows[0]["media_id"])
+    return None
+
+
+def _recommend_via_anilist_fallback(
+    ctx: Context, user_id: str, *, reason: str
+) -> None:
+    seed_id = _recommend_fallback_seed_id(ctx, user_id)
+    if seed_id is None:
+        _reply_error(ctx, S.RECOMMEND_NO_DATA, deferred=True)
+        return
+    data = _anilist_query(ctx, QUERY_SIMILAR_BY_ID, {"id": seed_id})
+    if data is None or not data.get("Media"):
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    media = data["Media"]
+    nodes = ((media.get("recommendations") or {}).get("nodes")) or []
+    excluded = _recommend_tracked_ids(ctx, user_id)
+    recs = [
+        n["mediaRecommendation"]
+        for n in nodes
+        if n and n.get("mediaRecommendation")
+        and n["mediaRecommendation"].get("id") not in excluded
+    ][:RECOMMEND_RESULT_LIMIT]
+    if not recs:
+        _reply_error(ctx, S.RECOMMEND_FALLBACK_EMPTY, deferred=True)
+        return
+
+    parent_title = _format_title(media)
+    lines = []
+    for r in recs:
+        title = _format_title(r)
+        url = r.get("siteUrl") or ""
+        anchor = f"[{title}]({url})" if url else title
+        lines.append(f"• {anchor}")
+    embed = {
+        "title": S.RECOMMEND_FALLBACK_HEADER.format(title=parent_title),
+        "description": f"{reason}\n\n" + "\n".join(lines),
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.FOOTER_ANILIST},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
+
+
+@plugin.on_slash_command("recommend")
+def cmd_recommend(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    ctx.interaction.defer(ephemeral=True)
+
+    target_vector = _recommend_user_vector(ctx, user_id)
+    if len(target_vector) < RECOMMEND_MIN_SELF_RATINGS:
+        _recommend_via_anilist_fallback(
+            ctx, user_id, reason=S.RECOMMEND_FALLBACK_FEW_RATINGS
+        )
+        return
+
+    candidates, peers_kept = _recommend_candidates(ctx, user_id, target_vector)
+    if peers_kept == 0 or not candidates:
+        _recommend_via_anilist_fallback(
+            ctx, user_id, reason=S.RECOMMEND_FALLBACK_NO_PEERS
+        )
+        return
+
+    top = candidates[:RECOMMEND_RESULT_LIMIT]
+    media_ids = [c["media_id"] for c in top]
+    data = _anilist_query(ctx, QUERY_MEDIA_BATCH, {"ids": sorted(media_ids)}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    media_by_id: dict[int, dict] = {}
+    for m in ((data.get("Page") or {}).get("media") or []):
+        mid = m.get("id")
+        if isinstance(mid, int):
+            media_by_id[mid] = m
+
+    lines = []
+    for c in top:
+        mid = c["media_id"]
+        m = media_by_id.get(mid)
+        title = _format_title(m) if m else f"#{mid}"
+        url = (m or {}).get("siteUrl") or ""
+        anchor = f"[{title}]({url})" if url else title
+        peers = c["peer_count"]
+        viewers = "viewer" if peers == 1 else "viewers"
+        lines.append(f"• {anchor} — recommended by {peers} {viewers}")
+
+    embed = {
+        "title": S.RECOMMEND_HEADER,
+        "description": "\n".join(lines),
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.RECOMMEND_FOOTER_CF.format(peers=peers_kept)},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
