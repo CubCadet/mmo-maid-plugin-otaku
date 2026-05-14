@@ -20,6 +20,24 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-14
+
+### Changed
+- `plugin.run()` is now the unconditional last line of `__main__.py`, matching
+  the mmo-maid-plugins skill's non-negotiable rule #1. Tests set
+  `OTAKU_SKIP_RUN=1` before importing to avoid blocking on the RPC loop.
+
+### Fixed
+- LICENSE file: filled in the MIT template placeholders (`<YEAR>`,
+  `<COPYRIGHT HOLDER>`) so the notice is valid.
+
+### Added
+- Regression test suite (`tests/regression/test_v1_0_0.py`) — the immutable
+  v1.0.0 behavior contract.
+- Hardening tests for `/anime`: ephemeral error on `RpcTimeoutError`,
+  graceful handling of AniList `{errors:[...]}` payloads, and an explicit
+  cap of 5 genres on the anime card.
+
 ## [1.0.0] - 2026-05-14
 
 ### Added
