@@ -877,9 +877,23 @@ by POPULARITY_DESC) for /staff. First-match-only, mirrors /character.
 
 ---
 
-### v8.2.0 — Studios
+### v8.2.0 — Studios ✅ shipped 2026-05-14
 
-`/studio <name>` — Studio profile, popular works, current season's releases.
+~~`/studio <name>` — Studio profile, popular works, current season's releases.~~
+
+Shipped. Embed splits the studio's top-10 popular main-credit works into
+**Recent (≤ 2 years)** and **Popular works** sections (≤ 5 entries each).
+Header emoji toggles 🎬 vs 🏢 based on `isAnimationStudio`. The `isMain:
+true` filter on the AniList `media` connection keeps distribution and
+licensing credits out of the embed — only production credits surface.
+
+Deviation: "current season's releases" landed as "last 2 years" instead
+— AniList's `Studio.media` doesn't support a `season:`/`seasonYear:`
+filter, so we filter client-side by year in the embed builder. 2y is
+wide enough to catch anything from the current AND the previous season
+without requiring a second AniList round-trip.
+
+**Capability:** no new capabilities.
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "8.1.0",
+  "version": "8.2.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -162,6 +162,18 @@
         {
           "name": "query",
           "description": "Staff person's name",
+          "type": 3,
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "studio",
+      "description": "Look up an animation studio's popular works and recent releases.",
+      "options": [
+        {
+          "name": "query",
+          "description": "Studio name (e.g. Trigger, MAPPA, Kyoto Animation)",
           "type": 3,
           "required": true
         }

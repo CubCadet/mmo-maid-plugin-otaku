@@ -20,6 +20,40 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [8.2.0] - 2026-05-14
+
+### Added
+- `/studio query:<name>` — look up an animation studio. Renders the
+  studio's popular works split into two sections:
+  - **Recent (≤ 2y)** — works with `seasonYear` within the last 2 years.
+  - **Popular works** — older popular works from the studio's catalog.
+  Each line shows the title + linked AniList URL + `(year)` suffix when
+  available. Up to 5 entries per section.
+- New AniList query `QUERY_STUDIO` — `Studio(search: $q)` with
+  `media(perPage: 10, sort: POPULARITY_DESC, isMain: true)`. The
+  `isMain: true` filter keeps non-production credits (distribution,
+  licensing) out of the embed.
+- Embed builder `_make_studio_embed` — toggles the header prefix between
+  🎬 (animation studio) and 🏢 (other production org) based on AniList's
+  `isAnimationStudio` flag. Empty-works case shows a `*(no main-work
+  credits on AniList)*` state.
+- Open-on-AniList link button when `siteUrl` is present.
+- Constant `STUDIO_RECENT_WITHIN_YEARS = 2` — frozen so future timeline
+  changes are explicit.
+
+### Tests
+- New regression file `tests/regression/test_v8_2_0.py` (15 tests):
+  manifest entry, recency-cutoff constant, QUERY_STUDIO field shape
+  (must request `isMain: true`, `isAnimationStudio`, perPage:10,
+  popularity sort), empty-query short-circuit (no AniList call),
+  not-found error path, header-emoji toggle for animation vs other,
+  recent/catalog split with current year, no-works graceful empty
+  state, year-suffix rendering, Open-on-AniList button.
+
+### Capability surface
+- **No new capabilities.** Read-only AniList lookup; reuses
+  `proxy:http` + `interaction:respond`.
+
 ## [8.1.0] - 2026-05-14
 
 ### Added

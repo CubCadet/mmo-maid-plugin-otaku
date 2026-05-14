@@ -279,6 +279,14 @@ class _Strings:
     STAFF_NO_DESCRIPTION = "*(no bio on AniList)*"
     STAFF_NO_CREDITS = "*(no production credits on AniList)*"
 
+    # /studio (v8.2.0).
+    STUDIO_USAGE = "Usage: `/studio query: <name>`"
+    STUDIO_NOT_FOUND = "No studio found matching **{query}**."
+    STUDIO_NO_WORKS = "*(no main-work credits on AniList)*"
+    STUDIO_HEADER_ANIM = "🎬 {name}"
+    STUDIO_HEADER_OTHER = "🏢 {name}"
+    STUDIO_FOOTER = "Data from AniList · main-credit works only"
+
     # /genres.
     GENRES_FETCH_FAIL = "Couldn't fetch AniList's genre list — try again in a moment."
     GENRES_EMPTY = "*(no genres returned)*"
@@ -959,6 +967,33 @@ QUERY_CHARACTER = (
     "}"
 )
 
+# v8.2.0 — studio lookup. AniList's `Studio` type carries a name and a
+# `media` connection sorted by popularity. We fetch the top 10 popular works
+# in a single query; the embed renders both popular works AND splits out
+# any from the current/recent year as a separate "recent" section.
+QUERY_STUDIO = (
+    "query ($q: String) {"
+    "  Studio(search: $q) {"
+    "    id"
+    "    name"
+    "    isAnimationStudio"
+    "    siteUrl"
+    "    media(perPage: 10, sort: POPULARITY_DESC, isMain: true) {"
+    "      nodes {"
+    "        id"
+    "        title { romaji english }"
+    "        format"
+    "        season"
+    "        seasonYear"
+    "        status"
+    "        episodes"
+    "        siteUrl"
+    "      }"
+    "    }"
+    "  }"
+    "}"
+)
+
 # v8.1.0 — staff lookups. AniList's `Staff` type covers both voice actors
 # AND production staff (directors, writers, composers). The same query
 # powers /voice-actor and /staff; the embed builders pull different fields:
@@ -1312,6 +1347,74 @@ def _make_staff_embed(staff: dict) -> dict:
 
     embed["fields"] = fields
     return embed
+
+
+# v8.2.0 — recency cutoff for the studio embed's "Recent works" split.
+# Anything with seasonYear >= (current_year - STUDIO_RECENT_WITHIN_YEARS)
+# qualifies; older popular works go in the catalog section.
+STUDIO_RECENT_WITHIN_YEARS = 2
+
+
+def _make_studio_embed(studio: dict) -> dict:
+    """Studio card — name + popular works, with a "recent" split (last 2 years)
+    when the studio has fresh releases. `isAnimationStudio` switches the
+    title prefix between 🎬 (animation house) and 🏢 (other production org)."""
+    name = (studio.get("name") or "").strip() or "Unknown studio"
+    is_anim = bool(studio.get("isAnimationStudio"))
+    header = (
+        S.STUDIO_HEADER_ANIM.format(name=name)
+        if is_anim
+        else S.STUDIO_HEADER_OTHER.format(name=name)
+    )
+    site_url = studio.get("siteUrl") or None
+
+    media_nodes = ((studio.get("media") or {}).get("nodes")) or []
+    current_year = datetime.now(timezone.utc).year
+    recent_cutoff = current_year - STUDIO_RECENT_WITHIN_YEARS
+
+    recent: list[dict] = []
+    catalog: list[dict] = []
+    for m in media_nodes:
+        year = m.get("seasonYear")
+        if isinstance(year, int) and year >= recent_cutoff:
+            recent.append(m)
+        else:
+            catalog.append(m)
+
+    def _line(m: dict) -> str:
+        title = _format_title(m)
+        url = m.get("siteUrl") or ""
+        year = m.get("seasonYear")
+        suffix = f" ({year})" if isinstance(year, int) else ""
+        return f"• [{title}]({url}){suffix}" if url else f"• {title}{suffix}"
+
+    fields: list[dict] = []
+    if recent:
+        fields.append({
+            "name": f"Recent (≤ {STUDIO_RECENT_WITHIN_YEARS}y)",
+            "value": "\n".join(_line(m) for m in recent[:5]),
+            "inline": False,
+        })
+    if catalog:
+        fields.append({
+            "name": "Popular works",
+            "value": "\n".join(_line(m) for m in catalog[:5]),
+            "inline": False,
+        })
+    if not fields:
+        fields.append({
+            "name": "Works",
+            "value": S.STUDIO_NO_WORKS,
+            "inline": False,
+        })
+
+    return {
+        "title": header,
+        "url": site_url,
+        "color": ANILIST_COLOR,
+        "fields": fields,
+        "footer": {"text": S.STUDIO_FOOTER},
+    }
 
 
 def _make_list_embed(media_list: list[dict], header: str, page: int = 1, has_next: bool = False) -> dict:
@@ -2181,6 +2284,38 @@ def cmd_staff(ctx: Context, event: dict) -> None:
     ctx.interaction.followup(embeds=[embed], components=components)
 
 
+# ── v8.2.0 — /studio ─────────────────────────────────────────────────────────
+
+
+@plugin.on_slash_command("studio")
+def cmd_studio(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    query = (opts.get("query") or "").strip()
+    if not query:
+        ctx.interaction.respond(content=S.STUDIO_USAGE, ephemeral=True)
+        return
+
+    ctx.interaction.defer()
+    data = _anilist_query(ctx, QUERY_STUDIO, {"q": query.lower()}, cache=True)
+    if data is None:
+        _reply_anilist_failure(ctx, deferred=True)
+        return
+    studio = data.get("Studio")
+    if not studio:
+        _reply_error(ctx, S.STUDIO_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
+        return
+
+    embed = _make_studio_embed(studio)
+    components = None
+    site_url = studio.get("siteUrl")
+    if site_url:
+        components = [ActionRow(Button("Open on AniList", url=site_url, style="link", emoji="🌐"))]
+    ctx.interaction.followup(embeds=[embed], components=components)
+
+
 # Static usage examples — one per command. The /help embed merges these with the
 # descriptions in manifest.json so the help text never drifts behind a new
 # slash command being declared.
@@ -2193,6 +2328,7 @@ _HELP_EXAMPLES = {
     "character":     "`/character query: Edward Elric`",
     "voice-actor":   "`/voice-actor query: Aoi Yuuki`",
     "staff":         "`/staff query: Hayao Miyazaki`",
+    "studio":        "`/studio query: Trigger`",
     "help":      "`/help`",
     "genres":    "`/genres`",
 }
