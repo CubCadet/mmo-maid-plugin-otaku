@@ -239,7 +239,7 @@ _FAV_SAMPLE = {
 # contained `is_favorite = EXCLUDED.is_favorite` / `status = EXCLUDED.status`
 # as anchor strings, defending against regressions that drop the column from
 # the update path. v10.0.5 rewrote `_upsert_user_media` to use COALESCE
-# (`is_favorite = COALESCE($7, ...)`, `status = COALESCE($6, ...)`) because
+# (`is_favorite = COALESCE(%s, ...)`, `status = COALESCE(%s, ...)`) because
 # the prior f-string SET-clause builder was banned by the SDK's "no f-string
 # SQL" rule. The same anti-regression intent is preserved: the assertions
 # now look for the COALESCE shape on the corresponding column.

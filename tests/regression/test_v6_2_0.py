@@ -129,7 +129,7 @@ def test_filters_out_tracked_media_from_trending(monkeypatch):
         if "ORDER BY added_at DESC" in sql:
             return [{"media_id": 7}]
         # tracked-ids SELECT
-        if "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql:
+        if "SELECT media_id FROM otaku_user_media WHERE user_id = %s" in sql:
             return [{"media_id": 7}]
         return []
 
@@ -165,7 +165,7 @@ def test_no_fresh_results_after_filter_shows_helpful_pointer(monkeypatch):
             return [{"n": 1}]
         if "ORDER BY added_at DESC" in sql:
             return [{"media_id": 7}]
-        if "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql:
+        if "SELECT media_id FROM otaku_user_media WHERE user_id = %s" in sql:
             return [{"media_id": 7}, {"media_id": 8}]
         return []
 

@@ -39,7 +39,7 @@ def test_scope_clears_on_exit_thread_local():
         [{"total": 1, "favorites": 0, "completed": 0, "rated": 0}]
         if "FROM otaku_user_media" in sql and "FILTER" in sql
         else [{"reviews": 0, "subs": 0}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql
         else []
     )
     assert p._ach_stats_current() is None
@@ -62,7 +62,7 @@ def test_scope_cache_is_thread_local():
             if "FROM otaku_user_media" in sql and "FILTER" in sql:
                 return [{"total": user_total, "favorites": 0,
                          "completed": user_total, "rated": 0}]
-            if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+            if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql:
                 return [{"reviews": 0, "subs": 0}]
             return []
         return _q
@@ -110,7 +110,7 @@ def test_outer_thread_cache_invisible_to_new_thread():
         [{"total": 99, "favorites": 0, "completed": 0, "rated": 0}]
         if "FROM otaku_user_media" in sql and "FILTER" in sql
         else [{"reviews": 0, "subs": 0}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql
         else []
     )
     seen_from_child: list = []

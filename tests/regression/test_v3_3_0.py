@@ -74,7 +74,7 @@ def test_leaderboard_score_query_uses_having_threshold():
 
     ctx.sql.query = _q
     p.cmd_leaderboard(ctx, _slash("leaderboard", {"metric": "score"}, user_id="u"))
-    assert "HAVING COUNT(*) >= $1" in captured["sql"]
+    assert "HAVING COUNT(*) >= %s" in captured["sql"]
     # First param is the min-rated threshold.
     assert captured["params"][0] == p.LEADERBOARD_SCORE_MIN_RATED
 

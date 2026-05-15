@@ -109,8 +109,8 @@ def test_recommend_peer_vectors_batch_uses_row_number_window():
     assert "ROW_NUMBER()" in sql
     assert "PARTITION BY user_id" in sql
     assert "ORDER BY rating DESC" in sql
-    # The cap value lives in $2 so it can be re-tuned without touching SQL.
-    assert "rn <= $2" in sql
+    # The cap value lives in %s so it can be re-tuned without touching SQL.
+    assert "rn <= %s" in sql
     # Params: [peer_ids_array, cap].
     assert params == [["a", "b", "c"], p.RECOMMEND_PEER_RATING_CAP]
 
@@ -151,7 +151,7 @@ def test_poll_options_insert_uses_unnest_not_fstring(monkeypatch):
     monkeypatch.setattr(p, "_caller_is_admin", lambda c, u: True)
 
     def _q(sql, params=None):
-        if "WHERE started_by = $1 AND question = $2" in sql:
+        if "WHERE started_by = %s AND question = %s" in sql:
             return [{"poll_id": 5}]
         if "FROM otaku_polls WHERE poll_id" in sql:
             return [{"poll_id": 5, "started_by": "u", "question": "q",
@@ -177,9 +177,9 @@ def test_poll_options_insert_uses_unnest_not_fstring(monkeypatch):
     inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_poll_options" in c["sql"]]
     assert len(inserts) == 1
     sql = inserts[0]["sql"]
-    assert "UNNEST($2::TEXT[], $3::TEXT[])" in sql
+    assert "UNNEST(%s::TEXT[], %s::TEXT[])" in sql
     # No f-string-style `($N, $N, $N)` repeats.
-    assert "($1, $2, $3), ($4, $5, $6)" not in sql
+    assert "(%s, %s, %s), (%s, %s, %s)" not in sql
 
 
 def test_aotw_candidates_insert_uses_unnest_not_fstring(monkeypatch):
@@ -200,7 +200,7 @@ def test_aotw_candidates_insert_uses_unnest_not_fstring(monkeypatch):
             return []
         if "FROM otaku_server_watchlist" in sql:
             return [{"media_id": 1}, {"media_id": 2}, {"media_id": 3}]
-        if "WHERE started_by = $1 AND status = 'active'" in sql:
+        if "WHERE started_by = %s AND status = 'active'" in sql:
             return [{"poll_id": 9}]
         return []
 
@@ -216,8 +216,8 @@ def test_aotw_candidates_insert_uses_unnest_not_fstring(monkeypatch):
     inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_aotw_candidates" in c["sql"]]
     assert len(inserts) == 1
     sql = inserts[0]["sql"]
-    assert "UNNEST($2::INT[])" in sql
-    assert "($1, $2), ($3, $4)" not in sql
+    assert "UNNEST(%s::INT[])" in sql
+    assert "(%s, %s), (%s, %s)" not in sql
 
 
 # ── COALESCE replaces f-string ON CONFLICT in _upsert_user_media ───────────
@@ -231,9 +231,9 @@ def test_upsert_user_media_uses_coalesce_static_sql():
     inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts, "expected one INSERT"
     sql = inserts[-1]["sql"]
-    assert "COALESCE($6, otaku_user_media.status)" in sql
-    assert "COALESCE($7, otaku_user_media.is_favorite)" in sql
-    # Params: 7 slots — status passed → $6 = "watching"; is_favorite default → $7 = None.
+    assert "COALESCE(%s, otaku_user_media.status)" in sql
+    assert "COALESCE(%s, otaku_user_media.is_favorite)" in sql
+    # Params: 7 slots — status passed → %s = "watching"; is_favorite default → %s = None.
     params = inserts[-1]["params"]
     assert len(params) == 7
     assert params[5] == "watching"

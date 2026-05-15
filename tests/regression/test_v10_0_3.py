@@ -70,7 +70,7 @@ def test_recommend_candidates_computes_target_norm_once():
 
     def _q(sql, params=None):
         if (
-            "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
+            "SELECT media_id FROM otaku_user_media WHERE user_id = %s" in sql
             and "rating" not in sql
             and "is_favorite" not in sql
             and "status" not in sql
@@ -78,7 +78,7 @@ def test_recommend_candidates_computes_target_norm_once():
             return []
         if "SELECT DISTINCT user_id" in sql:
             return [{"user_id": "p1"}, {"user_id": "p2"}, {"user_id": "p3"}]
-        if "ANY($1::TEXT[])" in sql:
+        if "ANY(%s::TEXT[])" in sql:
             return [
                 {"user_id": "p1", "media_id": 1, "rating": 18},
                 {"user_id": "p1", "media_id": 2, "rating": 16},
@@ -109,7 +109,7 @@ def test_recommend_candidates_computes_target_norm_once():
 # regression-fix (v10.0.5): v10.0.3 built the multi-row VALUES (...) clause
 # via an f-string generator. The SDK's upload reviewer auto-rejects
 # f-string SQL composition. v10.0.5 replaced the f-string builder with
-# static `UNNEST($2::TEXT[], $3::TEXT[])` SQL — same atomic INSERT, same
+# static `UNNEST(%s::TEXT[], %s::TEXT[])` SQL — same atomic INSERT, same
 # row count, only 3 params now (poll_id + two parallel arrays). Original
 # intent (one INSERT, all options in declaration order) is preserved.
 def test_poll_options_use_single_multi_row_insert(monkeypatch):
@@ -118,7 +118,7 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
     monkeypatch.setattr(p, "_caller_is_admin", lambda c, u: True)
 
     def _q(sql, params=None):
-        if "WHERE started_by = $1 AND question = $2" in sql:
+        if "WHERE started_by = %s AND question = %s" in sql:
             return [{"poll_id": 7}]
         if "FROM otaku_polls WHERE poll_id" in sql:
             return [{"poll_id": 7, "started_by": "u", "question": "q",
@@ -151,16 +151,16 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
     # v10.0.5: SQL is now static UNNEST with 3 params: poll_id (scalar)
     # + key array + text array.
     sql = option_inserts[0]["sql"]
-    assert "UNNEST($2::TEXT[], $3::TEXT[])" in sql
+    assert "UNNEST(%s::TEXT[], %s::TEXT[])" in sql
     params = option_inserts[0]["params"]
     assert len(params) == 3
     poll_id, keys_arr, texts_arr = params
     assert isinstance(poll_id, int)
     assert keys_arr == ["a", "b", "c"]
     assert texts_arr == ["opt-a", "opt-b", "opt-c"]
-    # Whitespace-agnostic placeholder check (count distinct $N).
-    placeholders = set(re.findall(r"\$\d+", sql))
-    assert placeholders == {"$1", "$2", "$3"}
+    # regression-fix (v10.0.9): $N placeholders converted to %s.
+    # Count occurrences (no longer distinguishable by index).
+    assert sql.count("%s") == 3
 
 
 # ── Multi-row INSERT for AOTW candidates ───────────────────────────────────
@@ -187,7 +187,7 @@ def test_aotw_candidates_use_single_multi_row_insert(monkeypatch):
         if "FROM otaku_server_watchlist" in sql:
             return [{"media_id": 10}, {"media_id": 20},
                     {"media_id": 30}, {"media_id": 40}]
-        if "WHERE started_by = $1 AND status = 'active'" in sql:
+        if "WHERE started_by = %s AND status = 'active'" in sql:
             return [{"poll_id": 88}]
         if "FROM otaku_aotw_votes" in sql:
             return []
@@ -209,14 +209,14 @@ def test_aotw_candidates_use_single_multi_row_insert(monkeypatch):
     # test_poll_options_use_single_multi_row_insert. SQL is now static
     # UNNEST with 2 params: poll_id (scalar) + media_id array.
     sql = candidate_inserts[0]["sql"]
-    assert "UNNEST($2::INT[])" in sql
+    assert "UNNEST(%s::INT[])" in sql
     params = candidate_inserts[0]["params"]
     assert len(params) == 2
     poll_id, mids_arr = params
     assert isinstance(poll_id, int)
     assert mids_arr == [10, 20, 30, 40]
-    placeholders = set(re.findall(r"\$\d+", sql))
-    assert placeholders == {"$1", "$2"}
+    # regression-fix (v10.0.9): $N → %s; count instead of position-set.
+    assert sql.count("%s") == 2
 
 
 # ── FIND_PAGE_MALFORMED removal ────────────────────────────────────────────

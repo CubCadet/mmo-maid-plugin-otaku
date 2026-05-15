@@ -656,7 +656,7 @@ def test_list_filters_by_status():
 
     p.cmd_list(ctx, _list_event({"status": "completed"}, user_id="l-stat"))
 
-    assert "AND status = $2" in captured["sql"]
+    assert "AND status = %s" in captured["sql"]
     assert captured["params"][1] == "completed"
 
 
@@ -1345,7 +1345,7 @@ def test_leaderboard_score_metric_has_min_rated_filter():
     ctx.sql.query = _q  # type: ignore[assignment]
     p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "score"}, user_id="anyone"))
 
-    assert "HAVING COUNT(*) >= $1" in captured["sql"]
+    assert "HAVING COUNT(*) >= %s" in captured["sql"]
     assert "AVG(rating)" in captured["sql"]
     follow = ctx.interaction.followups[-1]
     assert "9.0/10" in follow["embeds"][0]["description"]

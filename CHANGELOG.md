@@ -20,6 +20,74 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.9] - 2026-05-14
+
+### Root cause identified: `$N` placeholders rejected; global conversion to `%s`
+
+The 2026-05-14 23:39 log under v10.0.8 was diagnostically conclusive:
+- `_recommend_user_vector` diagnostic (added at v10.0.8) captured the
+  exception from the simple `WHERE user_id = $1` SELECT. Same generic
+  error as `_aggregate_user_stats` and `_recommend_fallback_seed_id`.
+- Every parameterized SQL query in the entire session has failed.
+  Every parameter-free query (`to_regclass(...)`, `pg_advisory_xact_lock`,
+  all DDLs) has succeeded.
+
+The live host doesn't accept `$N`-style placeholders. The SDK
+docstring in `_context.py` documents `%s`; the skill reference had
+claimed both worked but empirically only `%s` does on this tenant.
+
+### Fixed
+- **Global `$N` → `%s` conversion in `__main__.py`.** 165 placeholder
+  occurrences rewritten mechanically. One semantic gotcha:
+  `_ach_load_stats`'s subquery pair referenced `$1` twice (PostgreSQL
+  $-placeholders allow reuse); with `%s` (strictly positional) the
+  fix was to pass `user_id` twice in the params list.
+- All 88 test-side `$N` references converted to `%s` in 14 test files
+  (`tests/regression/test_v6_0_0.py`, `test_v6_2_0.py`, `test_v7_1_0.py`,
+  `test_v7_2_0.py`, `test_v8_0_1.py`, `test_v10_0_0.py`,
+  `test_v10_0_1.py`, `test_v10_0_2.py`, `test_v10_0_3.py`,
+  `test_v10_0_4.py`, `test_v10_0_5.py`, `test_v3_3_0.py`,
+  `test_v2_5_0.py`, `test_plugin.py`).
+- v10.0.4's `test_v10_0_3_uses_whitespace_agnostic_placeholder_check`
+  was reshaped: `%s` tokens aren't distinguishable by index, so the
+  `re.findall(r"\$\d+", sql)` approach is replaced with
+  `sql.count("%s") == N`. Same anti-regression intent (verify
+  placeholder count without depending on exact whitespace); only the
+  syntax changed.
+
+### No behavior change
+- Output dicts, mutation semantics, ON CONFLICT clauses, JOIN shapes,
+  UNNEST array bindings, RETURNING clauses, all aggregation paths —
+  preserved verbatim. v10.0.9 is a pure syntactic conversion.
+
+### Doctrine carve-outs
+- Every regression test that pinned `$N` as part of a SQL substring
+  assertion was rewritten to assert against `%s` instead. Same
+  anti-regression intent (verify the query targets specific columns
+  with specific parameter positions); only the placeholder shape
+  changed.
+- The v8.0.1 "param shape preserved on UNNEST" tests now assert on
+  `%s::TEXT[]` / `%s::INT[]` rather than `$2::TEXT[]` / `$2::INT[]`.
+
+### Tests
+- 8 new immutable contracts in `tests/regression/test_v10_0_9.py`:
+  - Source-scan rejects any future `$N` placeholder in production SQL.
+  - `_recommend_user_vector` SQL uses `%s` (not `$1`).
+  - `_aggregate_user_stats` SQL uses `%s` (not `$1`).
+  - `_ach_load_stats` passes `user_id` twice to fill its two `%s`
+    positions (the reuse-via-$1 case the conversion uncovered).
+  - `_upsert_user_media` has 7 `%s` and 7 params (was $1..$5, $6, $7).
+  - COALESCE clauses still anchor on `status` / `is_favorite` columns.
+  - Roundtrip `_recommend_user_vector` produces correct vector shape
+    with `%s` placeholders.
+  - Migration ADD CONSTRAINT emits the wide PK with NO placeholders.
+
+### Known unresolved
+- None from the live-host trail. /stats and /recommend should now
+  succeed on the live host (assuming the diagnosis is correct — if
+  `%s` ALSO fails for any reason, the v10.0.9 source-scan test makes
+  it easy to spot and pivot to an alternative).
+
 ## [10.0.8] - 2026-05-14
 
 ### Third-launch environment patch

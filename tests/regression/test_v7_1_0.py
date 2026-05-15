@@ -178,7 +178,7 @@ def test_start_inserts_candidates_and_posts_buttons(monkeypatch):
             return []
         if "FROM otaku_server_watchlist" in sql:
             return [{"media_id": 1}, {"media_id": 2}, {"media_id": 3}]
-        if "WHERE started_by = $1 AND status = 'active'" in sql:
+        if "WHERE started_by = %s AND status = 'active'" in sql:
             return [{"poll_id": 99}]
         if "FROM otaku_aotw_votes" in sql:
             return []
@@ -190,7 +190,7 @@ def test_start_inserts_candidates_and_posts_buttons(monkeypatch):
     # regression-fix (v10.0.3, updated v10.0.5): the v7.1 doctrine inserted
     # candidates one row at a time (N INSERTs). v10.0.3 collapsed them into a
     # single multi-row VALUES (...) INSERT; v10.0.5 then replaced the
-    # f-string VALUES builder with static `UNNEST($2::INT[])` SQL to comply
+    # f-string VALUES builder with static `UNNEST(%s::INT[])` SQL to comply
     # with the SDK's "no f-string SQL" rule. Original intent (all candidates
     # inserted, in declaration order) is now expressed as: one INSERT
     # statement, two params (poll_id + media_id array).
@@ -367,7 +367,7 @@ def test_end_winner_uses_lowest_media_id_on_tie(monkeypatch):
 
     update_with_winner = [
         (sql, params) for sql, params in captured["execs"]
-        if "winner_id = $1" in sql
+        if "winner_id = %s" in sql
     ]
     assert len(update_with_winner) == 1
     assert update_with_winner[0][1][0] == 2  # lower media_id wins the tie

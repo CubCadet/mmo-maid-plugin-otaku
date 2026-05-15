@@ -16,12 +16,12 @@ DEFENSIVE LIMIT ON _recommend_user_vector
 
 HARDENED MULTI-ROW INSERT TEST ASSERTIONS
 - `tests/regression/test_v10_0_3.py` previously asserted literal
-  `"($1, $2, $3)"` and `"($7, $8, $9)"` substrings in the SQL. A future
+  `"(%s, %s, %s)"` and `"(%s, %s, %s)"` substrings in the SQL. A future
   formatter change (compact spacing, line wrap) would silently break
   the assertion without breaking functionality.
 - v10.0.4 swapped those for a whitespace-agnostic regex check that
   counts distinct `$N` placeholders. The contract is "9 placeholders
-  for 9 params, ordered $1..$9," not "the SQL has these exact substrings".
+  for 9 params, ordered %s..%s," not "the SQL has these exact substrings".
 """
 from __future__ import annotations
 
@@ -100,20 +100,22 @@ def test_recommend_user_vector_respects_limit_in_practice():
 # ── Hardened test_v10_0_3.py assertion shape ───────────────────────────────
 
 
+# regression-fix (v10.0.9): v10.0.4 used a `re.findall(r"\$\d+", sql)`
+# regex to count placeholder positions. With v10.0.9 converting $N → %s
+# (positional, not numbered), distinct-position counting via regex no
+# longer makes sense — multiple %s in one SQL are indistinguishable
+# tokens. The intent (verify placeholder count without depending on
+# exact whitespace) is preserved through `sql.count("%s") == N`.
 def test_v10_0_3_uses_whitespace_agnostic_placeholder_check():
-    """v10.0.4 swapped literal "($1, $2, $3)" substring assertions in
-    test_v10_0_3.py for a regex-based check. The new assertion survives
-    any SQL formatter change as long as the placeholder count + ordering
-    are preserved."""
+    """The v10.0.3 contract: poll/aotw INSERTs assert placeholder count
+    without depending on SQL whitespace. v10.0.9 expresses this via
+    `sql.count("%s") == N` (was `re.findall` on $N pre-conversion)."""
     import inspect
 
     from tests.regression import test_v10_0_3
     src_poll = inspect.getsource(test_v10_0_3.test_poll_options_use_single_multi_row_insert)
     src_aotw = inspect.getsource(test_v10_0_3.test_aotw_candidates_use_single_multi_row_insert)
-    # Both tests should now go through re.findall on \$\d+ rather than
-    # asserting literal substrings.
-    assert "re.findall" in src_poll
-    assert "re.findall" in src_aotw
-    # And the brittle literal assertions are gone.
-    assert '"($1, $2, $3)" in sql' not in src_poll
-    assert '"($1, $2)" in sql' not in src_aotw
+    # Both tests should count %s placeholders rather than asserting
+    # literal substrings.
+    assert 'sql.count("%s")' in src_poll
+    assert 'sql.count("%s")' in src_aotw

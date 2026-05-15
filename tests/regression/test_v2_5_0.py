@@ -65,7 +65,7 @@ def test_reset_confirm_runs_delete_for_caller_only():
     ctx = MockContext()
     p._route_components(ctx, _component("otaku:reset-confirm:reg-r2", user_id="reg-r2"))
     assert any(
-        c["sql"] == "DELETE FROM otaku_user_media WHERE user_id = $1" and c["params"] == ["reg-r2"]
+        c["sql"] == "DELETE FROM otaku_user_media WHERE user_id = %s" and c["params"] == ["reg-r2"]
         for c in ctx.sql.executed
     )
 

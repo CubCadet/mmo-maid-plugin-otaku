@@ -157,7 +157,7 @@ def test_check_and_award_inserts_only_newly_met_achievements():
             return []  # no prior awards
         if "FROM otaku_user_media" in sql and "FILTER" in sql:
             return [{"total": 12, "favorites": 0, "completed": 12, "rated": 0}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql:
             return [{"reviews": 0, "subs": 0}]
         return [{"n": 0}]
 
@@ -200,7 +200,7 @@ def test_check_and_award_uses_idempotent_insert():
             return []
         if "FROM otaku_user_media" in sql and "FILTER" in sql:
             return [{"total": 5, "favorites": 5, "completed": 5, "rated": 5}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql:
             return [{"reviews": 5, "subs": 5}]
         return [{"n": 5}]
 

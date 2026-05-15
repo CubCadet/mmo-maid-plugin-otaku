@@ -134,7 +134,7 @@ def test_cosine_uses_shared_keys_only_for_dot_but_full_norm():
 
 
 # regression-fix (v10.0.1): _recommend_candidates now batches all peer
-# vectors via `WHERE user_id = ANY($1::TEXT[])` instead of one SELECT per
+# vectors via `WHERE user_id = ANY(%s::TEXT[])` instead of one SELECT per
 # peer. The mock shape changed from a per-call iterator returning a flat
 # row list to a single response carrying every peer's rows tagged with
 # `user_id`. Original assertion (peers_kept + candidate set) is preserved
@@ -149,7 +149,7 @@ def test_candidates_excludes_target_tracked_ids():
     def _q(sql, params=None):
         queries.append(sql)
         if (
-            "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
+            "SELECT media_id FROM otaku_user_media WHERE user_id = %s" in sql
             and "rating" not in sql
             and "is_favorite" not in sql
             and "status" not in sql
@@ -185,7 +185,7 @@ def test_candidates_drop_peers_below_min_shared():
 
     def _q(sql, params=None):
         if (
-            "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
+            "SELECT media_id FROM otaku_user_media WHERE user_id = %s" in sql
             and "rating" not in sql
             and "is_favorite" not in sql
             and "status" not in sql

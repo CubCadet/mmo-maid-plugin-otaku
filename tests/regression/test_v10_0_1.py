@@ -15,7 +15,7 @@ REVIEW UPSERT (TOCTOU fix)
 RECOMMEND PEER VECTORS (N+1 fix)
 - `_recommend_peer_vectors_batch(ctx, peer_ids)` MUST exist and hydrate
   every peer's rating vector via a single
-  `WHERE user_id = ANY($1::TEXT[])` query. Empty `peer_ids` returns `{}`
+  `WHERE user_id = ANY(%s::TEXT[])` query. Empty `peer_ids` returns `{}`
   without hitting SQL.
 - `_recommend_candidates` MUST call the batch helper exactly once per
   invocation (replacing the 50-peer fan-out loop).
@@ -124,9 +124,9 @@ def test_upsert_review_does_not_execute_separate_update():
 # losing ~60% of peer data arbitrarily. v10.0.5 added a ROW_NUMBER window
 # capped at RECOMMEND_PEER_RATING_CAP per peer so 50 × 20 = 1000 rows is
 # the deterministic upper bound. The batch is still one query — only the
-# SQL shape and params changed (now includes $2 for the per-peer cap).
+# SQL shape and params changed (now includes %s for the per-peer cap).
 def test_recommend_peer_vectors_batch_uses_array_param():
-    """One query with WHERE user_id = ANY($1::TEXT[]) and a per-peer cap."""
+    """One query with WHERE user_id = ANY(%s::TEXT[]) and a per-peer cap."""
     ctx = MockContext()
     queries: list = []
 
@@ -142,8 +142,8 @@ def test_recommend_peer_vectors_batch_uses_array_param():
     out = p._recommend_peer_vectors_batch(ctx, ["a", "b"])
     assert len(queries) == 1
     sql, params = queries[0]
-    assert "ANY($1::TEXT[])" in sql
-    # v10.0.5: per-peer cap via ROW_NUMBER, with the cap passed as $2.
+    assert "ANY(%s::TEXT[])" in sql
+    # v10.0.5: per-peer cap via ROW_NUMBER, with the cap passed as %s.
     assert "ROW_NUMBER()" in sql
     assert "PARTITION BY user_id" in sql
     assert params == [["a", "b"], p.RECOMMEND_PEER_RATING_CAP]
@@ -170,7 +170,7 @@ def test_recommend_candidates_calls_batch_exactly_once():
     def _q(sql, params=None):
         # tracked_ids
         if (
-            "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
+            "SELECT media_id FROM otaku_user_media WHERE user_id = %s" in sql
             and "rating" not in sql
             and "is_favorite" not in sql
             and "status" not in sql
@@ -180,7 +180,7 @@ def test_recommend_candidates_calls_batch_exactly_once():
         if "SELECT DISTINCT user_id" in sql:
             return [{"user_id": "p1"}, {"user_id": "p2"}]
         # batch peer vectors
-        if "ANY($1::TEXT[])" in sql:
+        if "ANY(%s::TEXT[])" in sql:
             batch_calls.append(params)
             return [
                 {"user_id": "p1", "media_id": 1, "rating": 18},
@@ -209,7 +209,7 @@ def test_ach_load_stats_uses_filter_aggregate():
         sqls.append(sql)
         if "FROM otaku_user_media" in sql and "FILTER" in sql:
             return [{"total": 12, "favorites": 1, "completed": 10, "rated": 5}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql:
             return [{"reviews": 2, "subs": 3}]
         return []
 
@@ -247,7 +247,7 @@ def test_ach_stats_scope_caches_within_block():
         sql_calls.append(sql)
         if "FROM otaku_user_media" in sql and "FILTER" in sql:
             return [{"total": 7, "favorites": 0, "completed": 5, "rated": 0}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql:
             return [{"reviews": 0, "subs": 0}]
         return [{"n": 0}]
 
@@ -272,7 +272,7 @@ def test_ach_stats_scope_is_reentrant():
         if "FROM otaku_user_media" in sql and "FILTER" in sql:
             load_count[0] += 1
             return [{"total": 1, "favorites": 0, "completed": 0, "rated": 0}]
-        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+        if "FROM otaku_reviews WHERE user_id = %s" in sql and "FROM otaku_notifications" in sql:
             return [{"reviews": 0, "subs": 0}]
         return []
 

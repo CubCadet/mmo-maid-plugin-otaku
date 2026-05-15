@@ -2870,7 +2870,7 @@ def _upsert_user_media(
     insert_status = status if status is not None else "watching"
     insert_favorite = bool(is_favorite) if is_favorite is not None else False
     # v10.0.5 — replaced the prior `f"ON CONFLICT ... SET {update_sql}"`
-    # builder with static SQL + COALESCE. $6/$7 are NULL when the caller
+    # builder with static SQL + COALESCE. %s/%s are NULL when the caller
     # didn't pass that field, so COALESCE preserves the existing row's
     # value; otherwise it overwrites with the caller's value. Matches
     # the SDK's "no f-string SQL" rule without changing observable behavior.
@@ -2879,10 +2879,10 @@ def _upsert_user_media(
 
     ctx.sql.execute(
         "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, is_favorite) "
-        "VALUES ($1, $2, $3, $4, $5) "
+        "VALUES (%s, %s, %s, %s, %s) "
         "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET "
-        "  status = COALESCE($6, otaku_user_media.status), "
-        "  is_favorite = COALESCE($7, otaku_user_media.is_favorite)",
+        "  status = COALESCE(%s, otaku_user_media.status), "
+        "  is_favorite = COALESCE(%s, otaku_user_media.is_favorite)",
         [user_id, media_id, media_type, insert_status, insert_favorite,
          update_status, update_favorite],
     )
@@ -2896,7 +2896,7 @@ _upsert_user_anime = _upsert_user_media
 def _is_favorite(ctx: Context, user_id: str, media_id: int, *, media_type: str = "anime") -> bool:
     row = ctx.sql.query_one(
         "SELECT is_favorite FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_id = $2 AND media_type = $3",
+        "WHERE user_id = %s AND media_id = %s AND media_type = %s",
         [user_id, media_id, media_type],
     )
     return bool(row and row.get("is_favorite"))
@@ -3562,8 +3562,8 @@ def _render_manga_favorites(
 ) -> None:
     rows = ctx.sql.query(
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'manga' AND is_favorite = TRUE "
-        "ORDER BY added_at DESC LIMIT $2",
+        "WHERE user_id = %s AND media_type = 'manga' AND is_favorite = TRUE "
+        "ORDER BY added_at DESC LIMIT %s",
         [target_user_id, PER_PAGE],
     ) or []
     if not rows:
@@ -3834,22 +3834,22 @@ def _select_user_anime(
     if scope == "favorites":
         sql = (
             "SELECT media_id, status, is_favorite FROM otaku_user_media "
-            "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE "
-            "ORDER BY added_at DESC LIMIT $2 OFFSET $3"
+            "WHERE user_id = %s AND media_type = 'anime' AND is_favorite = TRUE "
+            "ORDER BY added_at DESC LIMIT %s OFFSET %s"
         )
         params = [target_user_id, limit, offset]
     elif scope == "all":
         sql = (
             "SELECT media_id, status, is_favorite FROM otaku_user_media "
-            "WHERE user_id = $1 AND media_type = 'anime' "
-            "ORDER BY added_at DESC LIMIT $2 OFFSET $3"
+            "WHERE user_id = %s AND media_type = 'anime' "
+            "ORDER BY added_at DESC LIMIT %s OFFSET %s"
         )
         params = [target_user_id, limit, offset]
     else:
         sql = (
             "SELECT media_id, status, is_favorite FROM otaku_user_media "
-            "WHERE user_id = $1 AND media_type = 'anime' AND status = $2 "
-            "ORDER BY added_at DESC LIMIT $3 OFFSET $4"
+            "WHERE user_id = %s AND media_type = 'anime' AND status = %s "
+            "ORDER BY added_at DESC LIMIT %s OFFSET %s"
         )
         params = [target_user_id, scope, limit, offset]
 
@@ -4012,7 +4012,7 @@ def _handle_reset_confirm(ctx: Context, event: dict) -> None:
         ctx.interaction.respond(content=S.RESET_CANCELLED, ephemeral=True)
         return
     rows_affected = ctx.sql.execute(
-        "DELETE FROM otaku_user_media WHERE user_id = $1",
+        "DELETE FROM otaku_user_media WHERE user_id = %s",
         [caller_id],
     )
     if rows_affected and isinstance(rows_affected, int) and rows_affected > 0:
@@ -4112,7 +4112,7 @@ def _otaku_admin_reset_user(ctx: Context, user_id: str, sub_opts: dict) -> None:
         return
 
     rows_affected = ctx.sql.execute(
-        "DELETE FROM otaku_user_media WHERE user_id = $1",
+        "DELETE FROM otaku_user_media WHERE user_id = %s",
         [target_user],
     )
     if rows_affected and isinstance(rows_affected, int) and rows_affected > 0:
@@ -4238,7 +4238,7 @@ def cmd_notify(ctx: Context, event: dict) -> None:
     title = _format_title(media)
 
     existing = ctx.sql.query_one(
-        "SELECT 1 FROM otaku_notifications WHERE user_id = $1 AND media_id = $2",
+        "SELECT 1 FROM otaku_notifications WHERE user_id = %s AND media_id = %s",
         [user_id, media_id],
     )
     if existing:
@@ -4247,7 +4247,7 @@ def cmd_notify(ctx: Context, event: dict) -> None:
 
     ctx.sql.execute(
         "INSERT INTO otaku_notifications (user_id, media_id, channel_id) "
-        "VALUES ($1, $2, $3) "
+        "VALUES (%s, %s, %s) "
         "ON CONFLICT (user_id, media_id) DO UPDATE SET channel_id = EXCLUDED.channel_id",
         [user_id, media_id, channel_id or None],
     )
@@ -4281,7 +4281,7 @@ def cmd_unnotify(ctx: Context, event: dict) -> None:
     title = _format_title(media)
 
     existing = ctx.sql.query_one(
-        "SELECT 1 FROM otaku_notifications WHERE user_id = $1 AND media_id = $2",
+        "SELECT 1 FROM otaku_notifications WHERE user_id = %s AND media_id = %s",
         [user_id, media_id],
     )
     if not existing:
@@ -4289,7 +4289,7 @@ def cmd_unnotify(ctx: Context, event: dict) -> None:
         return
 
     ctx.sql.execute(
-        "DELETE FROM otaku_notifications WHERE user_id = $1 AND media_id = $2",
+        "DELETE FROM otaku_notifications WHERE user_id = %s AND media_id = %s",
         [user_id, media_id],
     )
     ctx.interaction.followup(content=S.NOTIFY_REMOVED.format(title=title), ephemeral=True)
@@ -4303,7 +4303,7 @@ def cmd_notify_list(ctx: Context, event: dict) -> None:
     ctx.interaction.defer(ephemeral=True)
 
     rows = ctx.sql.query(
-        "SELECT media_id FROM otaku_notifications WHERE user_id = $1 "
+        "SELECT media_id FROM otaku_notifications WHERE user_id = %s "
         "ORDER BY added_at DESC LIMIT 25",
         [user_id],
     ) or []
@@ -4412,7 +4412,7 @@ def _dispatch_airing_announcements(ctx: Context) -> int:
             pass
 
         subs = ctx.sql.query(
-            "SELECT user_id, channel_id FROM otaku_notifications WHERE media_id = $1",
+            "SELECT user_id, channel_id FROM otaku_notifications WHERE media_id = %s",
             [media_id],
         ) or []
         if not subs:
@@ -4702,7 +4702,7 @@ def dash_top_tracked(ctx: Context, params: dict) -> dict:
         "WHERE media_type = 'anime' "
         "GROUP BY media_id "
         "ORDER BY trackers DESC, favorites DESC "
-        "LIMIT $1",
+        "LIMIT %s",
         [DASHBOARD_TOP_TRACKED_LIMIT],
     ) or []
     if not rows:
@@ -4764,7 +4764,7 @@ def _leaderboard_completed(ctx: Context) -> list[dict]:
     return ctx.sql.query(
         "SELECT user_id, COUNT(*) AS n FROM otaku_user_media "
         "WHERE media_type = 'anime' AND status = 'completed' "
-        "GROUP BY user_id ORDER BY n DESC LIMIT $1",
+        "GROUP BY user_id ORDER BY n DESC LIMIT %s",
         [LEADERBOARD_TOP_N],
     ) or []
 
@@ -4774,8 +4774,8 @@ def _leaderboard_score(ctx: Context) -> list[dict]:
     return ctx.sql.query(
         "SELECT user_id, AVG(rating) AS avg_rating, COUNT(*) AS rated "
         "FROM otaku_user_media WHERE media_type = 'anime' AND rating IS NOT NULL "
-        "GROUP BY user_id HAVING COUNT(*) >= $1 "
-        "ORDER BY avg_rating DESC, rated DESC LIMIT $2",
+        "GROUP BY user_id HAVING COUNT(*) >= %s "
+        "ORDER BY avg_rating DESC, rated DESC LIMIT %s",
         [LEADERBOARD_SCORE_MIN_RATED, LEADERBOARD_TOP_N],
     ) or []
 
@@ -4787,7 +4787,7 @@ def _leaderboard_hours(ctx: Context) -> list[dict]:
         "FROM otaku_user_media "
         "WHERE media_type = 'anime' "
         "GROUP BY user_id HAVING COALESCE(SUM(episodes_watched), 0) > 0 "
-        "ORDER BY episodes DESC LIMIT $1",
+        "ORDER BY episodes DESC LIMIT %s",
         [LEADERBOARD_TOP_N],
     ) or []
 
@@ -4882,7 +4882,7 @@ def _get_watch_party(ctx: Context, party_id: int) -> dict | None:
         return None
     row = ctx.sql.query_one(
         "SELECT party_id, media_id, created_by, status FROM otaku_watch_parties "
-        "WHERE party_id = $1",
+        "WHERE party_id = %s",
         [party_id],
     )
     return row or None
@@ -4891,7 +4891,7 @@ def _get_watch_party(ctx: Context, party_id: int) -> dict | None:
 def _get_party_member(ctx: Context, party_id: int, user_id: str) -> dict | None:
     row = ctx.sql.query_one(
         "SELECT episodes_watched FROM otaku_watch_party_members "
-        "WHERE party_id = $1 AND user_id = $2",
+        "WHERE party_id = %s AND user_id = %s",
         [party_id, user_id],
     )
     return row or None
@@ -4937,7 +4937,7 @@ def _wp_create(ctx: Context, event: dict, opts: dict) -> None:
     # INSERT ... RETURNING is the canonical "give me the new party_id" path.
     new_party = ctx.sql.query_one(
         "INSERT INTO otaku_watch_parties (media_id, created_by, status) "
-        "VALUES ($1, $2, 'active') RETURNING party_id",
+        "VALUES (%s, %s, 'active') RETURNING party_id",
         [media_id, user_id],
     )
     party_id = 0
@@ -4950,7 +4950,7 @@ def _wp_create(ctx: Context, event: dict, opts: dict) -> None:
     # Auto-add the creator as a member.
     ctx.sql.execute(
         "INSERT INTO otaku_watch_party_members (party_id, user_id, episodes_watched) "
-        "VALUES ($1, $2, 0) "
+        "VALUES (%s, %s, 0) "
         "ON CONFLICT (party_id, user_id) DO NOTHING",
         [party_id, user_id],
     )
@@ -4971,7 +4971,7 @@ def _wp_join_internal(ctx: Context, party_id: int, user_id: str, *, deferred: bo
         return
     ctx.sql.execute(
         "INSERT INTO otaku_watch_party_members (party_id, user_id, episodes_watched) "
-        "VALUES ($1, $2, 0) "
+        "VALUES (%s, %s, 0) "
         "ON CONFLICT (party_id, user_id) DO NOTHING",
         [party_id, user_id],
     )
@@ -5011,7 +5011,7 @@ def _wp_status(ctx: Context, event: dict, opts: dict) -> None:
 
     members = ctx.sql.query(
         "SELECT user_id, episodes_watched FROM otaku_watch_party_members "
-        "WHERE party_id = $1 ORDER BY episodes_watched DESC, joined_at ASC",
+        "WHERE party_id = %s ORDER BY episodes_watched DESC, joined_at ASC",
         [party_id],
     ) or []
 
@@ -5085,15 +5085,15 @@ def _wp_progress(ctx: Context, event: dict, opts: dict) -> None:
         cap_warning = S.WP_PROGRESS_OVER_TOTAL.format(total=total)
 
     ctx.sql.execute(
-        "UPDATE otaku_watch_party_members SET episodes_watched = $1 "
-        "WHERE party_id = $2 AND user_id = $3",
+        "UPDATE otaku_watch_party_members SET episodes_watched = %s "
+        "WHERE party_id = %s AND user_id = %s",
         [capped, party_id, user_id],
     )
 
     # If everyone is at the same episode (and the party still has more than one
     # member), announce. If everyone has hit `total`, promote to completed.
     members_now = ctx.sql.query(
-        "SELECT episodes_watched FROM otaku_watch_party_members WHERE party_id = $1",
+        "SELECT episodes_watched FROM otaku_watch_party_members WHERE party_id = %s",
         [party_id],
     ) or []
     sync_announce = None
@@ -5105,7 +5105,7 @@ def _wp_progress(ctx: Context, event: dict, opts: dict) -> None:
         # Mark the party completed if every member is at total.
         if all(int(r.get("episodes_watched") or 0) >= total for r in members_now):
             ctx.sql.execute(
-                "UPDATE otaku_watch_parties SET status = 'completed' WHERE party_id = $1",
+                "UPDATE otaku_watch_parties SET status = 'completed' WHERE party_id = %s",
                 [party_id],
             )
 
@@ -5152,7 +5152,7 @@ def _user_rows_keyed_by_media(ctx: Context, user_id: str) -> dict[int, dict]:
     """Return {media_id: {status, is_favorite, rating}} for every anime row a user has."""
     rows = ctx.sql.query(
         "SELECT media_id, status, is_favorite, rating FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime'",
+        "WHERE user_id = %s AND media_type = 'anime'",
         [user_id],
     ) or []
     return {
@@ -5384,7 +5384,7 @@ def _swl_add(ctx: Context, event: dict, opts: dict) -> None:
 
     # Check existence so we can give a clean "already on the watchlist" message.
     existing = ctx.sql.query_one(
-        "SELECT 1 FROM otaku_server_watchlist WHERE media_id = $1",
+        "SELECT 1 FROM otaku_server_watchlist WHERE media_id = %s",
         [media_id],
     )
     if existing:
@@ -5393,7 +5393,7 @@ def _swl_add(ctx: Context, event: dict, opts: dict) -> None:
 
     ctx.sql.execute(
         "INSERT INTO otaku_server_watchlist (media_id, added_by, note) "
-        "VALUES ($1, $2, $3) "
+        "VALUES (%s, %s, %s) "
         "ON CONFLICT (media_id) DO NOTHING",
         [media_id, user_id, note],
     )
@@ -5419,7 +5419,7 @@ def _swl_remove(ctx: Context, event: dict, opts: dict) -> None:
     title = _format_title(media)
 
     existing = ctx.sql.query_one(
-        "SELECT 1 FROM otaku_server_watchlist WHERE media_id = $1",
+        "SELECT 1 FROM otaku_server_watchlist WHERE media_id = %s",
         [media_id],
     )
     if not existing:
@@ -5427,7 +5427,7 @@ def _swl_remove(ctx: Context, event: dict, opts: dict) -> None:
         return
 
     ctx.sql.execute(
-        "DELETE FROM otaku_server_watchlist WHERE media_id = $1",
+        "DELETE FROM otaku_server_watchlist WHERE media_id = %s",
         [media_id],
     )
     ctx.interaction.followup(content=S.SWL_REMOVED.format(title=title), ephemeral=True)
@@ -5439,7 +5439,7 @@ def _render_server_watchlist(ctx: Context, *, page: int, deferred: bool) -> None
     limit = SWL_PAGE_SIZE + 1
     rows = ctx.sql.query(
         "SELECT media_id, added_by, note FROM otaku_server_watchlist "
-        "ORDER BY added_at DESC LIMIT $1 OFFSET $2",
+        "ORDER BY added_at DESC LIMIT %s OFFSET %s",
         [limit, offset],
     ) or []
     has_next = len(rows) > SWL_PAGE_SIZE
@@ -5604,14 +5604,14 @@ def cmd_import(ctx: Context, event: dict) -> None:
             # parallel manga importer if AniList ever exposes manga lists.
             existing = ctx.sql.query_one(
                 "SELECT 1 FROM otaku_user_media "
-                "WHERE user_id = $1 AND media_id = $2 AND media_type = 'anime'",
+                "WHERE user_id = %s AND media_id = %s AND media_type = 'anime'",
                 [user_id, media_id],
             )
 
             # We only touch the columns the import provides. is_favorite is left alone.
             ctx.sql.execute(
                 "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, episodes_watched, rating) "
-                "VALUES ($1, $2, 'anime', $3, $4, $5) "
+                "VALUES (%s, %s, 'anime', %s, %s, %s) "
                 "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET "
                 "  status = EXCLUDED.status, "
                 "  episodes_watched = EXCLUDED.episodes_watched, "
@@ -5656,8 +5656,8 @@ MY_STATS_RECENT_COMPLETED_LIMIT = 5
 def _my_stats_top_rated(ctx: Context, user_id: str) -> list[dict]:
     return ctx.sql.query(
         "SELECT media_id, rating FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
-        "ORDER BY rating DESC, added_at DESC LIMIT $2",
+        "WHERE user_id = %s AND media_type = 'anime' AND rating IS NOT NULL "
+        "ORDER BY rating DESC, added_at DESC LIMIT %s",
         [user_id, MY_STATS_TOP_RATED_LIMIT],
     ) or []
 
@@ -5665,8 +5665,8 @@ def _my_stats_top_rated(ctx: Context, user_id: str) -> list[dict]:
 def _my_stats_top_favorites(ctx: Context, user_id: str) -> list[dict]:
     return ctx.sql.query(
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE "
-        "ORDER BY added_at DESC LIMIT $2",
+        "WHERE user_id = %s AND media_type = 'anime' AND is_favorite = TRUE "
+        "ORDER BY added_at DESC LIMIT %s",
         [user_id, MY_STATS_TOP_FAVORITES_LIMIT],
     ) or []
 
@@ -5674,8 +5674,8 @@ def _my_stats_top_favorites(ctx: Context, user_id: str) -> list[dict]:
 def _my_stats_recently_completed(ctx: Context, user_id: str) -> list[dict]:
     return ctx.sql.query(
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND status = 'completed' "
-        "ORDER BY added_at DESC LIMIT $2",
+        "WHERE user_id = %s AND media_type = 'anime' AND status = 'completed' "
+        "ORDER BY added_at DESC LIMIT %s",
         [user_id, MY_STATS_RECENT_COMPLETED_LIMIT],
     ) or []
 
@@ -5802,7 +5802,7 @@ def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
     """
     rows = ctx.sql.query(
         "SELECT status, episodes_watched, rating "
-        "FROM otaku_user_media WHERE user_id = $1 AND media_type = 'anime'",
+        "FROM otaku_user_media WHERE user_id = %s AND media_type = 'anime'",
         [user_id],
     ) or []
     if not rows:
@@ -5840,8 +5840,8 @@ def _top_genre_for_user(ctx: Context, user_id: str) -> str | None:
     """Look up the user's most-recent N anime on AniList and return their top genre."""
     rows = ctx.sql.query(
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' "
-        "ORDER BY added_at DESC LIMIT $2",
+        "WHERE user_id = %s AND media_type = 'anime' "
+        "ORDER BY added_at DESC LIMIT %s",
         [user_id, STATS_TOP_GENRE_SAMPLE],
     ) or []
     if not rows:
@@ -5926,7 +5926,7 @@ def _get_user_tracking(
         return 0, None
     row = ctx.sql.query_one(
         "SELECT episodes_watched, rating FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_id = $2 AND media_type = $3",
+        "WHERE user_id = %s AND media_id = %s AND media_type = %s",
         [user_id, media_id, media_type],
     )
     if not row:
@@ -5987,7 +5987,7 @@ def cmd_progress(ctx: Context, event: dict) -> None:
     # manga chapters (the column is generic enough).
     ctx.sql.execute(
         "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, episodes_watched) "
-        "VALUES ($1, $2, 'anime', $3, $4) "
+        "VALUES (%s, %s, 'anime', %s, %s) "
         "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET "
         "  episodes_watched = EXCLUDED.episodes_watched, "
         "  status = CASE WHEN EXCLUDED.status = 'completed' THEN 'completed' "
@@ -6048,7 +6048,7 @@ def cmd_rate(ctx: Context, event: dict) -> None:
     # /rate is anime-only in v8.0; v8.x patches can layer a manga variant.
     ctx.sql.execute(
         "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, rating) "
-        "VALUES ($1, $2, 'anime', $3, $4) "
+        "VALUES (%s, %s, 'anime', %s, %s) "
         "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET rating = EXCLUDED.rating",
         [user_id, media_id, "watching", encoded],
     )
@@ -6069,7 +6069,7 @@ def cmd_ratings(ctx: Context, event: dict) -> None:
 
     rows = ctx.sql.query(
         "SELECT media_id, rating, status, is_favorite FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
+        "WHERE user_id = %s AND media_type = 'anime' AND rating IS NOT NULL "
         "ORDER BY rating DESC, added_at DESC LIMIT 25",
         [target_id],
     ) or []
@@ -6434,7 +6434,7 @@ REVIEWS_PAGE_SIZE = 3         # reviews per /reviews page (each has title + body
 def _get_review(ctx: Context, user_id: str, media_id: int) -> dict | None:
     rows = ctx.sql.query(
         "SELECT title, body, created_at, updated_at FROM otaku_reviews "
-        "WHERE user_id = $1 AND media_id = $2",
+        "WHERE user_id = %s AND media_id = %s",
         [user_id, media_id],
     ) or []
     return rows[0] if rows else None
@@ -6455,7 +6455,7 @@ def _upsert_review(
     """
     rows = ctx.sql.query(
         "INSERT INTO otaku_reviews (user_id, media_id, title, body) "
-        "VALUES ($1, $2, $3, $4) "
+        "VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (user_id, media_id) DO UPDATE SET "
         "title = EXCLUDED.title, body = EXCLUDED.body, updated_at = NOW() "
         "RETURNING (xmax = 0) AS inserted",
@@ -6557,7 +6557,7 @@ def _select_reviews_page(
 ) -> tuple[list[dict], int]:
     """Returns (rows_for_page, total_count). Rows sorted updated_at DESC."""
     total_rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE media_id = $1",
+        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE media_id = %s",
         [media_id],
     ) or [{"n": 0}]
     total = int((total_rows[0] or {}).get("n") or 0)
@@ -6566,8 +6566,8 @@ def _select_reviews_page(
     offset = (page - 1) * REVIEWS_PAGE_SIZE
     rows = ctx.sql.query(
         "SELECT user_id, title, body, created_at, updated_at "
-        "FROM otaku_reviews WHERE media_id = $1 "
-        "ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
+        "FROM otaku_reviews WHERE media_id = %s "
+        "ORDER BY updated_at DESC LIMIT %s OFFSET %s",
         [media_id, REVIEWS_PAGE_SIZE, max(0, offset)],
     ) or []
     return rows, total
@@ -6705,7 +6705,7 @@ POLL_OPTION_TEXT_MAX = 100
 def _poll_row(ctx: Context, poll_id: int) -> dict | None:
     rows = ctx.sql.query(
         "SELECT poll_id, started_by, question, started_at, ended_at, status "
-        "FROM otaku_polls WHERE poll_id = $1",
+        "FROM otaku_polls WHERE poll_id = %s",
         [poll_id],
     ) or []
     return rows[0] if rows else None
@@ -6714,7 +6714,7 @@ def _poll_row(ctx: Context, poll_id: int) -> dict | None:
 def _poll_options(ctx: Context, poll_id: int) -> list[dict]:
     return ctx.sql.query(
         "SELECT option_key, text FROM otaku_poll_options "
-        "WHERE poll_id = $1 ORDER BY option_key ASC",
+        "WHERE poll_id = %s ORDER BY option_key ASC",
         [poll_id],
     ) or []
 
@@ -6722,7 +6722,7 @@ def _poll_options(ctx: Context, poll_id: int) -> list[dict]:
 def _poll_vote_counts(ctx: Context, poll_id: int) -> dict[str, int]:
     rows = ctx.sql.query(
         "SELECT option_key, COUNT(*) AS n FROM otaku_poll_votes "
-        "WHERE poll_id = $1 GROUP BY option_key",
+        "WHERE poll_id = %s GROUP BY option_key",
         [poll_id],
     ) or []
     return {str(r["option_key"]): int(r["n"]) for r in rows}
@@ -6731,7 +6731,7 @@ def _poll_vote_counts(ctx: Context, poll_id: int) -> dict[str, int]:
 def _poll_existing_vote(ctx: Context, poll_id: int, user_id: str) -> str | None:
     rows = ctx.sql.query(
         "SELECT option_key FROM otaku_poll_votes "
-        "WHERE poll_id = $1 AND user_id = $2",
+        "WHERE poll_id = %s AND user_id = %s",
         [poll_id, user_id],
     ) or []
     if not rows:
@@ -6813,12 +6813,12 @@ def _cmd_poll_create(ctx: Context, user_id: str, sub_opts: dict) -> None:
     ctx.interaction.defer()
 
     ctx.sql.execute(
-        "INSERT INTO otaku_polls (started_by, question) VALUES ($1, $2)",
+        "INSERT INTO otaku_polls (started_by, question) VALUES (%s, %s)",
         [user_id, question],
     )
     poll_rows = ctx.sql.query(
         "SELECT poll_id FROM otaku_polls "
-        "WHERE started_by = $1 AND question = $2 AND status = 'active' "
+        "WHERE started_by = %s AND question = %s AND status = 'active' "
         "ORDER BY started_at DESC LIMIT 1",
         [user_id, question],
     ) or []
@@ -6834,7 +6834,7 @@ def _cmd_poll_create(ctx: Context, user_id: str, sub_opts: dict) -> None:
     if options:
         ctx.sql.execute(
             "INSERT INTO otaku_poll_options (poll_id, option_key, text) "
-            "SELECT $1, k, t FROM UNNEST($2::TEXT[], $3::TEXT[]) AS u(k, t)",
+            "SELECT %s, k, t FROM UNNEST(%s::TEXT[], %s::TEXT[]) AS u(k, t)",
             [poll_id, [k for k, _ in options], [t for _, t in options]],
         )
 
@@ -6894,7 +6894,7 @@ def _cmd_poll_end(ctx: Context, user_id: str, sub_opts: dict) -> None:
     total = sum(counts.values())
     ctx.sql.execute(
         "UPDATE otaku_polls SET status = 'ended', ended_at = NOW() "
-        "WHERE poll_id = $1",
+        "WHERE poll_id = %s",
         [poll_id],
     )
     ctx.interaction.followup(
@@ -6967,14 +6967,14 @@ def _handle_poll_vote(ctx: Context, event: dict) -> None:
     if existing is None:
         ctx.sql.execute(
             "INSERT INTO otaku_poll_votes (poll_id, user_id, option_key) "
-            "VALUES ($1, $2, $3)",
+            "VALUES (%s, %s, %s)",
             [poll_id, user_id, option_key],
         )
         msg = S.POLL_VOTE_RECORDED.format(label=label)
     else:
         ctx.sql.execute(
-            "UPDATE otaku_poll_votes SET option_key = $1, voted_at = NOW() "
-            "WHERE poll_id = $2 AND user_id = $3",
+            "UPDATE otaku_poll_votes SET option_key = %s, voted_at = NOW() "
+            "WHERE poll_id = %s AND user_id = %s",
             [option_key, poll_id, user_id],
         )
         msg = S.POLL_VOTE_CHANGED.format(label=label)
@@ -7007,7 +7007,7 @@ def _aotw_active_poll_id(ctx: Context) -> int | None:
 def _aotw_poll_row(ctx: Context, poll_id: int) -> dict | None:
     rows = ctx.sql.query(
         "SELECT poll_id, started_by, started_at, ended_at, winner_id, status "
-        "FROM otaku_aotw_polls WHERE poll_id = $1",
+        "FROM otaku_aotw_polls WHERE poll_id = %s",
         [poll_id],
     ) or []
     return rows[0] if rows else None
@@ -7015,7 +7015,7 @@ def _aotw_poll_row(ctx: Context, poll_id: int) -> dict | None:
 
 def _aotw_candidates(ctx: Context, poll_id: int) -> list[int]:
     rows = ctx.sql.query(
-        "SELECT media_id FROM otaku_aotw_candidates WHERE poll_id = $1 "
+        "SELECT media_id FROM otaku_aotw_candidates WHERE poll_id = %s "
         "ORDER BY media_id ASC",
         [poll_id],
     ) or []
@@ -7025,7 +7025,7 @@ def _aotw_candidates(ctx: Context, poll_id: int) -> list[int]:
 def _aotw_vote_counts(ctx: Context, poll_id: int) -> dict[int, int]:
     rows = ctx.sql.query(
         "SELECT media_id, COUNT(*) AS n FROM otaku_aotw_votes "
-        "WHERE poll_id = $1 GROUP BY media_id",
+        "WHERE poll_id = %s GROUP BY media_id",
         [poll_id],
     ) or []
     return {int(r["media_id"]): int(r["n"]) for r in rows}
@@ -7034,7 +7034,7 @@ def _aotw_vote_counts(ctx: Context, poll_id: int) -> dict[int, int]:
 def _aotw_existing_vote(ctx: Context, poll_id: int, user_id: str) -> int | None:
     rows = ctx.sql.query(
         "SELECT media_id FROM otaku_aotw_votes "
-        "WHERE poll_id = $1 AND user_id = $2",
+        "WHERE poll_id = %s AND user_id = %s",
         [poll_id, user_id],
     ) or []
     if not rows:
@@ -7115,7 +7115,7 @@ def _cmd_aotw_start(ctx: Context, user_id: str) -> None:
 
     rows = ctx.sql.query(
         "SELECT media_id FROM otaku_server_watchlist "
-        "ORDER BY added_at DESC LIMIT $1",
+        "ORDER BY added_at DESC LIMIT %s",
         [AOTW_CANDIDATE_LIMIT],
     ) or []
     candidate_ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
@@ -7124,11 +7124,11 @@ def _cmd_aotw_start(ctx: Context, user_id: str) -> None:
         return
 
     ctx.sql.execute(
-        "INSERT INTO otaku_aotw_polls (started_by) VALUES ($1)", [user_id]
+        "INSERT INTO otaku_aotw_polls (started_by) VALUES (%s)", [user_id]
     )
     poll_rows = ctx.sql.query(
         "SELECT poll_id FROM otaku_aotw_polls "
-        "WHERE started_by = $1 AND status = 'active' "
+        "WHERE started_by = %s AND status = 'active' "
         "ORDER BY started_at DESC LIMIT 1",
         [user_id],
     ) or []
@@ -7143,7 +7143,7 @@ def _cmd_aotw_start(ctx: Context, user_id: str) -> None:
     if candidate_ids:
         ctx.sql.execute(
             "INSERT INTO otaku_aotw_candidates (poll_id, media_id) "
-            "SELECT $1, mid FROM UNNEST($2::INT[]) AS u(mid)",
+            "SELECT %s, mid FROM UNNEST(%s::INT[]) AS u(mid)",
             [poll_id, list(candidate_ids)],
         )
 
@@ -7189,7 +7189,7 @@ def _cmd_aotw_end(ctx: Context, user_id: str, channel_id: str) -> None:
     if not counts:
         ctx.sql.execute(
             "UPDATE otaku_aotw_polls SET status = 'ended', ended_at = NOW() "
-            "WHERE poll_id = $1",
+            "WHERE poll_id = %s",
             [poll_id],
         )
         ctx.interaction.followup(
@@ -7202,7 +7202,7 @@ def _cmd_aotw_end(ctx: Context, user_id: str, channel_id: str) -> None:
     votes = counts[winner_id]
     ctx.sql.execute(
         "UPDATE otaku_aotw_polls SET status = 'ended', ended_at = NOW(), "
-        "winner_id = $1 WHERE poll_id = $2",
+        "winner_id = %s WHERE poll_id = %s",
         [winner_id, poll_id],
     )
 
@@ -7302,14 +7302,14 @@ def _handle_aotw_vote(ctx: Context, event: dict) -> None:
     if existing is None:
         ctx.sql.execute(
             "INSERT INTO otaku_aotw_votes (poll_id, user_id, media_id) "
-            "VALUES ($1, $2, $3)",
+            "VALUES (%s, %s, %s)",
             [poll_id, user_id, media_id],
         )
         msg = S.AOTW_VOTE_RECORDED.format(title=title)
     else:
         ctx.sql.execute(
-            "UPDATE otaku_aotw_votes SET media_id = $1, voted_at = NOW() "
-            "WHERE poll_id = $2 AND user_id = $3",
+            "UPDATE otaku_aotw_votes SET media_id = %s, voted_at = NOW() "
+            "WHERE poll_id = %s AND user_id = %s",
             [media_id, poll_id, user_id],
         )
         msg = S.AOTW_VOTE_CHANGED.format(title=title)
@@ -7336,8 +7336,8 @@ def _user_top_genres(ctx: Context, user_id: str, limit: int) -> list[str]:
     AniList can't be reached. Tied counts break alphabetically for stability."""
     rows = ctx.sql.query(
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' "
-        "ORDER BY added_at DESC LIMIT $2",
+        "WHERE user_id = %s AND media_type = 'anime' "
+        "ORDER BY added_at DESC LIMIT %s",
         [user_id, STATS_TOP_GENRE_SAMPLE],
     ) or []
     ids = [int(r["media_id"]) for r in rows if r.get("media_id") is not None]
@@ -7367,7 +7367,7 @@ def cmd_genre_trends(ctx: Context, event: dict) -> None:
     # Empty-tracker short-circuit before touching AniList.
     tracked_rows = ctx.sql.query(
         "SELECT COUNT(*) AS n FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime'",
+        "WHERE user_id = %s AND media_type = 'anime'",
         [user_id],
     ) or [{"n": 0}]
     if int((tracked_rows[0] or {}).get("n") or 0) == 0:
@@ -7780,19 +7780,19 @@ _ACH_STATS_KEYS: dict[str, str] = {
 _ACH_COUNT_SQL: dict[str, str] = {
     "": (
         "SELECT COUNT(*) AS n FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime'"
+        "WHERE user_id = %s AND media_type = 'anime'"
     ),
     "AND is_favorite = TRUE": (
         "SELECT COUNT(*) AS n FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE"
+        "WHERE user_id = %s AND media_type = 'anime' AND is_favorite = TRUE"
     ),
     "AND status = 'completed'": (
         "SELECT COUNT(*) AS n FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND status = 'completed'"
+        "WHERE user_id = %s AND media_type = 'anime' AND status = 'completed'"
     ),
     "AND rating IS NOT NULL": (
         "SELECT COUNT(*) AS n FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL"
+        "WHERE user_id = %s AND media_type = 'anime' AND rating IS NOT NULL"
     ),
 }
 
@@ -7815,14 +7815,16 @@ def _ach_load_stats(ctx: Context, user_id: str) -> dict:
         "  COUNT(*) FILTER (WHERE status = 'completed') AS completed, "
         "  COUNT(*) FILTER (WHERE rating IS NOT NULL) AS rated "
         "FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime'",
+        "WHERE user_id = %s AND media_type = 'anime'",
         [user_id],
     ) or [{}]
+    # v10.0.9: %s placeholders are positional, not numbered — repeat
+    # user_id once per occurrence (was $1/$1 reuse pre-conversion).
     misc_rows = ctx.sql.query(
         "SELECT "
-        "  (SELECT COUNT(*) FROM otaku_reviews WHERE user_id = $1) AS reviews, "
-        "  (SELECT COUNT(*) FROM otaku_notifications WHERE user_id = $1) AS subs",
-        [user_id],
+        "  (SELECT COUNT(*) FROM otaku_reviews WHERE user_id = %s) AS reviews, "
+        "  (SELECT COUNT(*) FROM otaku_notifications WHERE user_id = %s) AS subs",
+        [user_id, user_id],
     ) or [{}]
     m = media_rows[0] or {}
     n = misc_rows[0] or {}
@@ -7896,7 +7898,7 @@ def _ach_count_reviews(ctx: Context, user_id: str) -> int:
     if isinstance(stats, dict):
         return int(stats.get("reviews") or 0)
     rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = $1",
+        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = %s",
         [user_id],
     ) or [{"n": 0}]
     return int((rows[0] or {}).get("n") or 0)
@@ -7911,7 +7913,7 @@ def _ach_count_subs(ctx: Context, user_id: str) -> int:
     if isinstance(stats, dict):
         return int(stats.get("subs") or 0)
     rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = $1",
+        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = %s",
         [user_id],
     ) or [{"n": 0}]
     return int((rows[0] or {}).get("n") or 0)
@@ -8010,7 +8012,7 @@ def _get_user_achievements(ctx: Context, user_id: str) -> set[str]:
     if not user_id:
         return set()
     rows = ctx.sql.query(
-        "SELECT achievement_key FROM otaku_achievements WHERE user_id = $1",
+        "SELECT achievement_key FROM otaku_achievements WHERE user_id = %s",
         [user_id],
     ) or []
     return {r["achievement_key"] for r in rows if r.get("achievement_key")}
@@ -8049,7 +8051,7 @@ def _check_and_award_achievements(ctx: Context, user_id: str) -> list[str]:
             try:
                 ctx.sql.execute(
                     "INSERT INTO otaku_achievements (user_id, achievement_key) "
-                    "VALUES ($1, $2) "
+                    "VALUES (%s, %s) "
                     "ON CONFLICT (user_id, achievement_key) DO NOTHING",
                     [user_id, key],
                 )
@@ -8238,7 +8240,7 @@ def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
     try:
         rows = ctx.sql.query(
             "SELECT media_id, rating FROM otaku_user_media "
-            "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
+            "WHERE user_id = %s AND media_type = 'anime' AND rating IS NOT NULL "
             "ORDER BY rating DESC, media_id LIMIT 1000",
             [user_id],
         ) or []
@@ -8263,7 +8265,7 @@ def _recommend_tracked_ids(ctx: Context, user_id: str) -> set[int]:
     """All anime media_ids the user has tracked in any status — excluded from candidates."""
     rows = ctx.sql.query(
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime'",
+        "WHERE user_id = %s AND media_type = 'anime'",
         [user_id],
     ) or []
     return {int(r["media_id"]) for r in rows if r.get("media_id") is not None}
@@ -8273,7 +8275,7 @@ def _recommend_peer_ids(ctx: Context, target_id: str) -> list[str]:
     """Other users on this server with at least one anime rating."""
     rows = ctx.sql.query(
         "SELECT DISTINCT user_id FROM otaku_user_media "
-        "WHERE media_type = 'anime' AND rating IS NOT NULL AND user_id != $1",
+        "WHERE media_type = 'anime' AND rating IS NOT NULL AND user_id != %s",
         [target_id],
     ) or []
     return [str(r["user_id"]) for r in rows if r.get("user_id") is not None]
@@ -8309,10 +8311,10 @@ def _recommend_peer_vectors_batch(
         "      PARTITION BY user_id ORDER BY rating DESC, media_id"
         "    ) AS rn "
         "  FROM otaku_user_media "
-        "  WHERE user_id = ANY($1::TEXT[]) "
+        "  WHERE user_id = ANY(%s::TEXT[]) "
         "  AND media_type = 'anime' AND rating IS NOT NULL"
         ") sub "
-        "WHERE rn <= $2",
+        "WHERE rn <= %s",
         [list(peer_ids), RECOMMEND_PEER_RATING_CAP],
     ) or []
     out: dict[str, dict[int, float]] = {}
@@ -8403,13 +8405,13 @@ def _recommend_fallback_seed_id(ctx: Context, user_id: str) -> int | None:
     """
     for sql in (
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
+        "WHERE user_id = %s AND media_type = 'anime' AND rating IS NOT NULL "
         "ORDER BY rating DESC, added_at DESC LIMIT 1",
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE "
+        "WHERE user_id = %s AND media_type = 'anime' AND is_favorite = TRUE "
         "ORDER BY added_at DESC LIMIT 1",
         "SELECT media_id FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' "
+        "WHERE user_id = %s AND media_type = 'anime' "
         "ORDER BY added_at DESC LIMIT 1",
     ):
         rows = ctx.sql.query(sql, [user_id]) or []

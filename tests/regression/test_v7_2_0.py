@@ -153,7 +153,7 @@ def test_create_inserts_options_in_order(monkeypatch):
     monkeypatch.setattr(p, "_caller_is_admin", lambda c, u: True)
 
     def _q(sql, params=None):
-        if "WHERE started_by = $1 AND question = $2" in sql:
+        if "WHERE started_by = %s AND question = %s" in sql:
             return [{"poll_id": 42}]
         if "FROM otaku_polls WHERE poll_id" in sql:
             return [{"poll_id": 42, "started_by": "u", "question": "q",
@@ -174,7 +174,7 @@ def test_create_inserts_options_in_order(monkeypatch):
     # regression-fix (v10.0.3, updated v10.0.5): the v7.2 doctrine inserted
     # options one row at a time. v10.0.3 collapsed them into a multi-row
     # VALUES INSERT; v10.0.5 then replaced the f-string VALUES builder with
-    # static `UNNEST($2::TEXT[], $3::TEXT[])` SQL to comply with the SDK's
+    # static `UNNEST(%s::TEXT[], %s::TEXT[])` SQL to comply with the SDK's
     # "no f-string SQL" rule. Original intent (both options inserted, keys
     # in order 'a' then 'b') is now expressed as: one INSERT, three params
     # (poll_id scalar + two parallel arrays).
@@ -194,7 +194,7 @@ def test_create_posts_vote_buttons_with_correct_custom_ids(monkeypatch):
     monkeypatch.setattr(p, "_caller_is_admin", lambda c, u: True)
 
     def _q(sql, params=None):
-        if "WHERE started_by = $1 AND question = $2" in sql:
+        if "WHERE started_by = %s AND question = %s" in sql:
             return [{"poll_id": 42}]
         if "FROM otaku_polls WHERE poll_id" in sql:
             return [{"poll_id": 42, "started_by": "u", "question": "q",
