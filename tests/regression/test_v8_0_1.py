@@ -68,10 +68,15 @@ def test_migration_executes_full_dance_when_v7_table_exists():
     # Step 1: table rename happens.
     assert any("ALTER TABLE otaku_user_anime RENAME TO otaku_user_media" in s
                for s in executed)
-    # Step 2: index rename happens (IF EXISTS guard).
-    assert any("ALTER INDEX IF EXISTS otaku_user_anime_user_status_added_idx" in s
-               and "RENAME TO otaku_user_media_user_status_added_idx" in s
-               for s in executed)
+    # regression-fix (v10.0.8): the host's SQL allowlist (ALTER TABLE,
+    # CREATE INDEX, CREATE TABLE, DELETE, DROP INDEX, DROP TABLE, INSERT,
+    # SELECT, UPDATE) does NOT permit ALTER INDEX. v10.0.8 drops the old
+    # index name instead; `_SCHEMA_INDEX_DDL` creates the v8 name later.
+    # The contract is preserved: the migration MUST clean up the v7 index
+    # name; only the mechanism (DROP, not RENAME) changed.
+    assert any("DROP INDEX IF EXISTS otaku_user_anime_user_status_added_idx" in s
+               for s in executed), \
+        "v10.0.8 must DROP the v7 index name (ALTER INDEX is disallowed by the host)"
     # Step 3: ADD COLUMN media_type.
     assert any("ADD COLUMN IF NOT EXISTS media_type" in s for s in executed)
     # Step 4: PK widening — both DROPs plus the wider ADD CONSTRAINT.
@@ -104,27 +109,34 @@ def test_migration_skips_everything_when_kv_marker_set():
     assert not any("ADD CONSTRAINT" in s for s in executed)
 
 
-# regression-fix (v10.0.6): the v8.0.1 partial-failure self-heal relied on
-# information_schema re-probing each step's landmark. v10.0.6 drops the
-# step-level PK probe, but the self-heal is preserved through a different
-# mechanism — until the KV marker is set, every step's idempotent guards
-# (ALTER INDEX IF EXISTS, ADD COLUMN IF NOT EXISTS, DROP CONSTRAINT IF
-# EXISTS) make re-running safe. This test pins that contract: with v8
-# table present (rename done) and the marker NOT set, the column-add and
-# PK widening still fire on the next call.
-def test_migration_self_heals_after_partial_failure():
-    """v8.0.0 bug: if step 3 errored after step 1 succeeded, the next call's
-    probe found `otaku_user_anime` absent and early-returned, leaving the
-    table half-migrated forever. v8.0.1 self-heals: with the v8 table
-    already renamed but the column / PK still missing, the migration
-    correctly skips RENAME and continues with ADD COLUMN + PK widening.
+# regression-fix (v10.0.8): the host's DDL rate limit (5/hour) made the
+# v8.0.1 "always self-heal" doctrine untenable — every boot that ran the
+# 4 idempotent completion DDLs in the "already-v8 but marker-unset" state
+# would burn 4 of the budget's 5 slots, blocking the rest of
+# `_bootstrap_schema`. v10.0.8 trades partial-failure recovery for
+# rate-limit survival: when v8 already exists, we assume the previous
+# install completed the schema (which is the common case — v10.0.6+'s
+# `_SCHEMA_DDL` creates the table with the full v8 shape inline), set
+# the marker, and return without touching SQL.
+#
+# The partial-failure state this test simulated (v7 renamed but column/
+# PK still missing) is now extremely rare post-v10.0.6 — the marker
+# blocks re-running once migration succeeds, and the structurally-
+# complete `_SCHEMA_DDL` means a fresh-creation v8 install never enters
+# the partial state. If a user does hit it, they need manual intervention.
+def test_migration_treats_existing_v8_as_complete():
+    """When v8 exists at probe time, v10.0.8 treats the migration as
+    already done — sets the KV marker and returns without issuing any
+    completion DDLs. Reason: the host caps DDL at 5/hour, so re-running
+    4 idempotent completion steps every boot would block the rest of
+    bootstrap. The common case (v8 created by _SCHEMA_DDL with the full
+    schema inline) is handled correctly; rare partial-failure states
+    are now an operator-intervention case.
     """
     ctx = MockContext()
 
     def _q(sql: str, params=None):
         if "to_regclass(" in sql:
-            # v7 already renamed; v8 present. Marker NOT set (simulating the
-            # earlier partial failure).
             return [{"v7": None, "v8": "otaku_user_media"}]
         return []
 
@@ -132,11 +144,12 @@ def test_migration_self_heals_after_partial_failure():
     p._migrate_v7_to_v8(ctx)
 
     executed = [c["sql"] for c in ctx.sql.executed]
-    # No re-rename of the already-renamed table.
+    # No rename, no completion DDLs.
     assert not any("ALTER TABLE otaku_user_anime RENAME" in s for s in executed)
-    # But the column add and PK widening MUST fire to complete the migration.
-    assert any("ADD COLUMN IF NOT EXISTS media_type" in s for s in executed)
-    assert any("ADD CONSTRAINT otaku_user_media_pkey" in s for s in executed)
+    assert not any("ADD COLUMN IF NOT EXISTS media_type" in s for s in executed)
+    assert not any("ADD CONSTRAINT otaku_user_media_pkey" in s for s in executed)
+    # Marker is set so subsequent boots short-circuit at the top.
+    assert ctx.kv.get(p._SCHEMA_V8_MIGRATED_KV) == "1"
 
 
 def test_migration_noop_on_fresh_install():

@@ -727,14 +727,16 @@ def test_my_stats_empty_user_replies_empty_state():
 
 
 def test_my_stats_renders_fields_with_titled_lists():
+    # regression-fix (v10.0.8): mock returns raw rows; see CHANGELOG v10.0.8.
     ctx = MockContext()
     # Stub each of the 4 SQL queries by inspecting the SQL.
     def _q(sql, params=None):  # noqa: ANN001
-        if "GROUP BY status" in sql:
-            return [
-                {"status": "completed", "count": 4, "episodes": 48, "mean_rating": 16.0},
-                {"status": "watching",  "count": 1, "episodes": 2,  "mean_rating": None},
-            ]
+        if "FROM otaku_user_media WHERE user_id" in sql and "rating IS NOT NULL" not in sql and "is_favorite" not in sql and "status = 'completed'" not in sql:
+            rows = []
+            for _ in range(4):
+                rows.append({"status": "completed", "episodes_watched": 12, "rating": 16})
+            rows.append({"status": "watching", "episodes_watched": 2, "rating": None})
+            return rows
         if "rating IS NOT NULL" in sql:
             return [
                 {"media_id": 10, "rating": 18},
@@ -768,14 +770,16 @@ def test_my_stats_renders_fields_with_titled_lists():
 
 
 def test_my_stats_completion_percentage_shown():
+    # regression-fix (v10.0.8): mock returns raw rows; see CHANGELOG v10.0.8.
     ctx = MockContext()
 
     def _q(sql, params=None):  # noqa: ANN001
-        if "GROUP BY status" in sql:
-            return [
-                {"status": "completed", "count": 3, "episodes": 0, "mean_rating": None},
-                {"status": "watching",  "count": 1, "episodes": 0, "mean_rating": None},
-            ]
+        if "FROM otaku_user_media WHERE user_id" in sql and "rating IS NOT NULL" not in sql and "is_favorite" not in sql and "status = 'completed'" not in sql:
+            rows = []
+            for _ in range(3):
+                rows.append({"status": "completed", "episodes_watched": 0, "rating": None})
+            rows.append({"status": "watching", "episodes_watched": 0, "rating": None})
+            return rows
         return []
 
     ctx.sql.query = _q  # type: ignore[assignment]
@@ -2215,17 +2219,24 @@ def test_stats_empty_user_replies_empty_state():
 
 
 def test_stats_aggregates_by_status_and_computes_hours():
+    # regression-fix (v10.0.8): mock now returns raw rows (one per anime)
+    # instead of the GROUP BY aggregate result. `_aggregate_user_stats`
+    # switched to Python aggregation; see CHANGELOG v10.0.8.
     ctx = MockContext()
-    # First call (aggregate by status), second (top-genre media_ids).
+    # First call (raw rows for the user), second (top-genre media_ids).
     call_count = {"n": 0}
 
     def _q(sql, params=None):  # noqa: ANN001
         call_count["n"] += 1
-        if "GROUP BY status" in sql:
-            return [
-                {"status": "completed", "count": 5, "episodes": 60, "mean_rating": 16.0},
-                {"status": "watching",  "count": 2, "episodes": 6,  "mean_rating": None},
-            ]
+        if "FROM otaku_user_media WHERE user_id" in sql and "ORDER BY added_at DESC" not in sql:
+            # 5 completed + 2 watching = 7 rows; 60 episodes across completed,
+            # 6 across watching; 5 rated at 16 (= 8.0/10).
+            rows = []
+            for _ in range(5):
+                rows.append({"status": "completed", "episodes_watched": 12, "rating": 16})
+            for _ in range(2):
+                rows.append({"status": "watching",  "episodes_watched": 3,  "rating": None})
+            return rows
         if "ORDER BY added_at DESC" in sql:
             return [{"media_id": 1}, {"media_id": 2}]
         return []

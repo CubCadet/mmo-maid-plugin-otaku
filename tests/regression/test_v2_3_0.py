@@ -46,12 +46,19 @@ def test_stats_aggregate_returns_empty_dict_on_no_rows():
     assert p._aggregate_user_stats(ctx, "u") == {}
 
 
+# regression-fix (v10.0.8): the v2.3.0 contract mocked the SQL aggregate
+# row shape (one row per status with `count`/`episodes`/`mean_rating`
+# columns from the GROUP BY query). v10.0.8 switched to Python
+# aggregation over raw row shape (one row per tracked anime with
+# `status`/`episodes_watched`/`rating` columns). Same output dict — only
+# the input shape changed. The contract (total/total_episodes/
+# total_hours/by_status correctness) is preserved.
 def test_stats_aggregate_computes_hours_from_episodes():
     ctx = MockContext()
 
     def _q(sql, params=None):
         return [
-            {"status": "completed", "count": 1, "episodes": 25, "mean_rating": None},
+            {"status": "completed", "episodes_watched": 25, "rating": None},
         ]
 
     ctx.sql.query = _q

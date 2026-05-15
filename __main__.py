@@ -2622,10 +2622,9 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
     except Exception:  # noqa: BLE001
         pass
 
-    # 1) Rename the v7 table if it still exists AND the v8 name is free.
-    #    `to_regclass(name)` returns the table's OID-as-regclass or NULL —
-    #    a function call, not a system-schema reference, so it sails past
-    #    the host's `information_schema` denylist (v10.0.6).
+    # 1) Probe table existence via `to_regclass()` — a function call (NULL or
+    #    OID) rather than an `information_schema` reference, which the host
+    #    started blocking at v10.0.6.
     rows = ctx.sql.query(
         "SELECT to_regclass('otaku_user_anime') AS v7, "
         "to_regclass('otaku_user_media') AS v8"
@@ -2633,44 +2632,74 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
     probe = rows[0] if rows else {}
     has_v7 = probe.get("v7") is not None
     has_v8 = probe.get("v8") is not None
-    if has_v7 and not has_v8:
-        ctx.sql.execute(
-            "ALTER TABLE otaku_user_anime RENAME TO otaku_user_media"
-        )
-    elif not has_v7 and not has_v8:
-        # Fresh install — neither table exists yet. _SCHEMA_DDL will create
-        # the v8 table with the wide PK declared inline. Mark migrated so
-        # subsequent boots skip this whole function.
+
+    # v10.0.8 — restructured branching. The three cases:
+    #
+    #   (a) Fresh install (neither table exists). `_SCHEMA_DDL` later will
+    #       create otaku_user_media with the wide PK inline; no migration
+    #       work needed. Set marker + return.
+    #
+    #   (b) Already v8 (v8 exists, v7 doesn't). Could be a true v8 fresh
+    #       install where v10.0.6's bootstrap created the table but the
+    #       KV marker got wiped (e.g., plugin reinstall keeps SQL state
+    #       but clears KV). No migration work needed — _SCHEMA_DDL's
+    #       CREATE TABLE IF NOT EXISTS is a no-op and any later ALTER ADD
+    #       COLUMN IF NOT EXISTS is a no-op. Set marker + return.
+    #
+    #   (c) Upgrade from v7 (v7 exists, v8 doesn't). Run the full rename
+    #       dance. This is the only branch that issues migration DDL.
+    #
+    # The fourth combo (both tables exist) is a stuck state from a v8.0.0
+    # bug; v8.0.1's doctrine treats it as "v8 is canonical" — same as (b),
+    # but we also drop the v7 zombie for cleanliness.
+    if not has_v7 and not has_v8:
+        # (a) Fresh install.
+        try:
+            ctx.kv.set(_SCHEMA_V8_MIGRATED_KV, "1")
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if has_v8 and not has_v7:
+        # (b) Already v8. Marker may be unset (e.g., KV wipe via reinstall).
+        try:
+            ctx.kv.set(_SCHEMA_V8_MIGRATED_KV, "1")
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if has_v7 and has_v8:
+        # Edge: both exist (v8.0.0 stuck state). Drop the v7 zombie.
+        ctx.sql.execute("DROP TABLE IF EXISTS otaku_user_anime")
         try:
             ctx.kv.set(_SCHEMA_V8_MIGRATED_KV, "1")
         except Exception:  # noqa: BLE001
             pass
         return
 
-    # 2) Rename the v7 index if it still has the old name. The IF EXISTS
-    #    guards both the source name (already-renamed installs no-op) and
-    #    a manually-dropped index (returns silently — _SCHEMA_INDEX_DDL
-    #    below will recreate it under the v8 name).
+    # (c) Upgrade path: has_v7 and not has_v8. Run the rename dance.
+    ctx.sql.execute("ALTER TABLE otaku_user_anime RENAME TO otaku_user_media")
+
+    # 2) Clean up the old v7 index name. v10.0.6's `ALTER INDEX … RENAME
+    #    TO …` crashed the host on 2026-05-14 with "SQL statement type not
+    #    allowed" — the host's allowlist (ALTER TABLE, CREATE INDEX,
+    #    CREATE TABLE, DELETE, DROP INDEX, DROP TABLE, INSERT, SELECT,
+    #    UPDATE) does NOT include ALTER INDEX. v10.0.8 uses DROP INDEX
+    #    (allowed) and relies on `_SCHEMA_INDEX_DDL`'s
+    #    `CREATE INDEX IF NOT EXISTS otaku_user_media_user_status_added_idx`
+    #    later in `_bootstrap_schema` to recreate under the v8 name.
     ctx.sql.execute(
-        "ALTER INDEX IF EXISTS otaku_user_anime_user_status_added_idx "
-        "RENAME TO otaku_user_media_user_status_added_idx"
+        "DROP INDEX IF EXISTS otaku_user_anime_user_status_added_idx"
     )
 
     # 3) Add the media_type column. ADD COLUMN IF NOT EXISTS is idempotent.
-    #    On PG ≥ 11 the DEFAULT is metadata-only (no table rewrite);
-    #    PG ≤ 10 rewrites the table — see CHANGELOG v8.0.1 migration notes
-    #    for the deploy-time implication.
     ctx.sql.execute(
         "ALTER TABLE otaku_user_media "
         "ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'anime'"
     )
 
-    # 4) Widen the primary key. Postgres can't widen a PK in place. Without
-    #    `information_schema` we can no longer cheaply probe whether the PK
-    #    is already wide, so we unconditionally rebuild — DROP IF EXISTS
-    #    handles the (narrow PK | already-wide PK | no PK) cases uniformly.
-    #    The KV marker set at the end short-circuits this on subsequent
-    #    boots so the rebuild only runs once per tenant.
+    # 4) Widen the primary key. Postgres can't widen a PK in place. The
+    #    DROP IF EXISTS pair handles (narrow PK | already-wide PK | no PK)
+    #    uniformly. The KV marker set at the end short-circuits this on
+    #    subsequent boots so the rebuild only runs once per tenant.
     ctx.sql.execute(
         "ALTER TABLE otaku_user_media "
         "DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
@@ -2712,6 +2741,11 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
 #      remain in the bootstrap list to cover existing v2.0-era tables
 #      that don't yet have the columns).
 _SCHEMA_VERSION_KV = "otaku:schema_version"
+# v10.0.8 keeps this at "10.0.7" deliberately — the v10.0.8 changes are
+# pure bug fixes (migration ALTER INDEX → DROP INDEX, /stats refactor,
+# /recommend diagnostic). The schema shape didn't change, so existing
+# v10.0.7 markers stay valid and those installs short-circuit at the
+# top of `_bootstrap_schema` without re-running anything.
 _CURRENT_SCHEMA_VERSION = "10.0.7"
 
 
@@ -5754,15 +5788,21 @@ STATS_TOP_GENRE_SAMPLE = 50  # Most-recent N anime sampled to pick the top genre
 
 
 def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
-    """Return a dict of SQL-only aggregate stats for a user's anime rows. Empty
-    dict if the user has no anime rows."""
-    # by_status: list of {status, count, episodes, mean_rating}
+    """Return a dict of aggregate stats for a user's anime rows. Empty dict
+    if the user has no anime rows.
+
+    v10.0.8 — was a single SQL aggregate (`GROUP BY status` with
+    `COUNT/SUM/AVG`). The live host rejects it with the generic
+    `SQL execution failed. Check your query syntax and parameters`;
+    cause not yet isolated (same error fires for the simpler
+    `_recommend_user_vector` query, so it isn't aggregates per se).
+    v10.0.8 splits this into a plain row-shape SELECT and aggregates in
+    Python — sidesteps any complex-query parser issue and keeps `/stats`
+    serving the typical user (≤1 000 rows; capped at the SDK ceiling).
+    """
     rows = ctx.sql.query(
-        "SELECT status, COUNT(*) AS count, "
-        "       COALESCE(SUM(episodes_watched), 0) AS episodes, "
-        "       AVG(rating) AS mean_rating "
-        "FROM otaku_user_media WHERE user_id = $1 AND media_type = 'anime' "
-        "GROUP BY status",
+        "SELECT status, episodes_watched, rating "
+        "FROM otaku_user_media WHERE user_id = $1 AND media_type = 'anime'",
         [user_id],
     ) or []
     if not rows:
@@ -5770,17 +5810,18 @@ def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
 
     by_status: dict[str, int] = {s: 0 for s in VALID_STATUSES}
     total_episodes = 0
-    rating_acc = 0.0  # weighted by count to compute overall mean
+    rating_acc = 0.0
     rated_count = 0
     for r in rows:
         status = r.get("status") or "watching"
-        count = int(r.get("count") or 0)
-        by_status[status] = by_status.get(status, 0) + count
-        total_episodes += int(r.get("episodes") or 0)
-        mean = r.get("mean_rating")
-        if mean is not None and count > 0:
-            rating_acc += float(mean) * count
-            rated_count += count
+        by_status[status] = by_status.get(status, 0) + 1
+        ep = r.get("episodes_watched")
+        if ep is not None:
+            total_episodes += int(ep)
+        rating = r.get("rating")
+        if rating is not None:
+            rating_acc += float(rating)
+            rated_count += 1
 
     overall_mean = (rating_acc / rated_count) if rated_count else None
     total = sum(by_status.values())
@@ -8184,18 +8225,30 @@ def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
     """media_id → user's rating on a 0.5..10.0 scale. Anime-only; unrated rows omitted.
 
     v10.0.4: hard-capped via LIMIT + ORDER BY. v10.0.5: cap aligned to the
-    SDK's 1000-row ceiling, and the LIMIT clause is a literal in the SQL
-    (no f-string interpolation — the SDK forbids f-string SQL composition).
-    Without the cap, a pathological user loads the entire vector into
-    memory; the cap is well above any realistic rated catalogue, so
-    production users rarely see truncation.
+    SDK's 1000-row ceiling, and the LIMIT clause is a literal in the SQL.
+
+    v10.0.8 — wrapped in a try/except that logs the failing SQL when the
+    host returns the generic `SQL execution failed` error. The cause of
+    that error on the live host hasn't been isolated (same error fires
+    against the simpler `_aggregate_user_stats` SELECT after v10.0.7's
+    schema bootstrap completed); the log captures it for v10.0.9
+    triage. Returns an empty vector on failure so /recommend falls
+    through to its AniList-similar seed path.
     """
-    rows = ctx.sql.query(
-        "SELECT media_id, rating FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
-        "ORDER BY rating DESC, media_id LIMIT 1000",
-        [user_id],
-    ) or []
+    try:
+        rows = ctx.sql.query(
+            "SELECT media_id, rating FROM otaku_user_media "
+            "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
+            "ORDER BY rating DESC, media_id LIMIT 1000",
+            [user_id],
+        ) or []
+    except Exception as exc:  # noqa: BLE001 — v10.0.8 diagnostic capture
+        ctx.log(
+            f"_recommend_user_vector SQL failed: {exc}",
+            level="error",
+            tags=["recommend", "sql"],
+        )
+        return {}
     vec: dict[int, float] = {}
     for r in rows:
         mid = r.get("media_id")

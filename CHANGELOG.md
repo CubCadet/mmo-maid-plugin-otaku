@@ -20,6 +20,103 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.8] - 2026-05-14
+
+### Third-launch environment patch
+
+v10.0.7's first run against the live host surfaced two more host-side
+realities, and confirmed the persistence of the /stats + /recommend
+"SQL execution failed" symptom we deferred at v10.0.7:
+
+1. **The host enforces a strict SQL statement-type allowlist:**
+   `ALTER TABLE, CREATE INDEX, CREATE TABLE, DELETE, DROP INDEX,
+   DROP TABLE, INSERT, SELECT, UPDATE`. `ALTER INDEX` is NOT on the
+   list — v10.0.6's `_migrate_v7_to_v8` step 2 (`ALTER INDEX … RENAME
+   TO …`) crashed `on_ready` every boot with `RuntimeError: RPC
+   error (sql.execute): SQL statement type not allowed`.
+2. **Migration falls through past both branches when v8 exists alone
+   with no marker.** The user's tenant had `otaku_user_media` from
+   v10.0.6's partial bootstrap, but KV got wiped between launches
+   (probably a plugin reinstall). v10.0.6's branching only covered
+   "v7 only" and "neither" — it fell through to the migration's
+   completion DDLs, hit the disallowed ALTER INDEX, and crashed.
+3. **/stats and /recommend still fail with `SQL execution failed`
+   after the schema is settled** — the v10.0.6 SQL pattern itself is
+   somehow rejected by the host, cause not yet isolated. Same generic
+   error message for both `_aggregate_user_stats` (GROUP BY +
+   COUNT/SUM/AVG aggregate) and `_recommend_user_vector` (simple
+   WHERE + ORDER BY + LIMIT). v10.0.8 sidesteps via a refactor for
+   /stats and adds diagnostic capture for /recommend to gather
+   better signal for v10.0.9.
+
+### Fixed
+- **`_migrate_v7_to_v8` step 2 uses DROP INDEX instead of ALTER INDEX.**
+  `DROP INDEX IF EXISTS otaku_user_anime_user_status_added_idx`
+  cleans up the v7 index name; `_SCHEMA_INDEX_DDL` later creates
+  the v8 name. Same anti-regression intent (cleanup the v7 name);
+  only the mechanism changed.
+- **Migration branching restructured** so the rename + completion
+  DDLs only fire on the true upgrade path (v7 exists, v8 doesn't).
+  Two new branches added:
+  - **"Already v8" (has_v8, not has_v7)**: marker set + return. Common
+    case for v10.0.6+ installs where SQL persisted but KV was wiped.
+  - **"Both tables exist" (stuck state from v8.0.0 era)**: drop v7
+    zombie + set marker + return.
+- **`_aggregate_user_stats` rewritten to Python aggregation.** Fetches
+  raw rows `(status, episodes_watched, rating)` and computes totals
+  in Python — sidesteps any complex-query parser issue on the host.
+  Same output dict; performance is fine for the typical user (≤1 000
+  tracked anime, well under the SDK row cap).
+- **`_recommend_user_vector` wraps its SELECT in try/except.** On
+  `RuntimeError` (the host's generic "SQL execution failed"), logs
+  the exception (tagged `recommend`, `sql`) and returns an empty
+  vector so /recommend falls through to its AniList-similar seed
+  fallback instead of crashing the handler.
+
+### Doctrine carve-outs
+- `tests/regression/test_v8_0_1.py::test_migration_executes_full_dance_when_v7_table_exists`
+  — step 2 assertion changed from `ALTER INDEX … RENAME TO …` to
+  `DROP INDEX IF EXISTS`. The cleanup-contract is preserved.
+- `tests/regression/test_v8_0_1.py::test_migration_self_heals_after_partial_failure`
+  → renamed to `test_migration_treats_existing_v8_as_complete`. v8.0.1
+  doctrine: "always self-heal partial failure". v10.0.8 doctrine:
+  "v8 exists ⇒ assume complete; partial-failure recovery is now an
+  operator-intervention case". Trade-off forced by the host's 5
+  DDL/hour cap — running 4 idempotent completion DDLs per boot would
+  block the rest of bootstrap.
+- `tests/regression/test_v2_3_0.py::test_stats_aggregate_computes_hours_from_episodes`
+  — mock now returns raw rows (`status`/`episodes_watched`/`rating`)
+  instead of aggregate result (`status`/`count`/`episodes`/`mean_rating`).
+  Same total/total_episodes/total_hours/by_status contract.
+- `tests/test_plugin.py::test_stats_aggregates_by_status_and_computes_hours`
+  and `test_my_stats_renders_fields_with_titled_lists` and
+  `test_my_stats_completion_percentage_shown` — same raw-row mock
+  rewrite.
+
+### Tests
+- 10 new immutable contracts in `tests/regression/test_v10_0_8.py`:
+  - Migration does NOT use `ALTER INDEX` (host denylist).
+  - Migration uses `DROP INDEX IF EXISTS` on the upgrade path.
+  - "v8 only" probe state sets marker without firing migration DDLs.
+  - "both tables" probe state drops the v7 zombie.
+  - Upgrade path still fires the full rename + completion sequence.
+  - `_aggregate_user_stats` SQL does NOT contain `GROUP BY`/`COUNT(`/
+    `SUM(`/`AVG(` — selects raw columns only.
+  - Python aggregation produces correct totals + per-status counts +
+    weighted mean rating.
+  - Empty SQL → empty dict.
+  - `_recommend_user_vector` catches and logs SQL errors, returns `{}`.
+  - `_recommend_user_vector` happy path unchanged: rating ÷ 2.0 scaling.
+
+### Known unresolved
+- The underlying cause of `RPC error (sql.query): SQL execution failed.
+  Check your query syntax and parameters.` for the v10.0.6
+  `_aggregate_user_stats` and `_recommend_user_vector` SQL is still
+  unisolated. v10.0.8 sidesteps with a refactor and a diagnostic
+  capture so the next log either confirms the workarounds resolve
+  the symptom or yields better signal (exception text from the
+  `_recommend_user_vector` log) for v10.0.9 triage.
+
 ## [10.0.7] - 2026-05-14
 
 ### Second-launch environment patch
