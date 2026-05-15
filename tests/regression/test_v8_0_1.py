@@ -36,20 +36,19 @@ from mmo_maid_sdk.testing import MockContext
 # ── Migration happy-path: v7 table exists ──────────────────────────────────
 
 
+# regression-fix (v10.0.6): the host blocks the `information_schema` literal.
+# The probe shape was rewritten to use `to_regclass(name)` (single row with
+# `v7`/`v8` columns, NULL when absent). The PK-width probe was removed —
+# v10.0.6 unconditionally rebuilds the PK on first run and uses the KV
+# marker `otaku:schema_v8_migrated` to short-circuit subsequent runs.
 def _mock_v7_install(ctx: MockContext) -> None:
     """Configure MockContext.sql so the migration probes see the v7 table
     present and the v8 wide PK absent — the realistic upgrade path.
     """
-    state = {"queries_seen": []}
-
     def _q(sql: str, params=None):
-        state["queries_seen"].append(sql)
-        # 1) Table-name probe: v7 table present, v8 absent.
-        if "information_schema.tables" in sql:
-            return [{"table_name": "otaku_user_anime"}]
-        # 2) PK-widening probe: wide PK not yet present.
-        if "information_schema.key_column_usage" in sql:
-            return []
+        # v10.0.6 probe: SELECT to_regclass('otaku_user_anime') AS v7, ...
+        if "to_regclass(" in sql:
+            return [{"v7": "otaku_user_anime", "v8": None}]
         return []
 
     ctx.sql.query = _q
@@ -83,35 +82,36 @@ def test_migration_executes_full_dance_when_v7_table_exists():
                for s in executed)
 
 
-def test_migration_skips_pk_widen_when_wide_pk_already_present():
-    """Idempotency: if a previous run already widened the PK, the second run
-    must NOT re-execute the drop/re-add dance."""
+# regression-fix (v10.0.6): the v8.0.1 contract was "PK widen is skipped when
+# the wide PK is already present", probed via information_schema. v10.0.6
+# replaces the probe with a KV marker: once full migration succeeds the
+# function sets `otaku:schema_v8_migrated="1"` and ALL subsequent calls
+# short-circuit on entry. The intent is preserved (no redundant work on
+# already-migrated installs); the mechanism is the KV marker.
+def test_migration_skips_everything_when_kv_marker_set():
+    """Idempotency: if the KV marker says migration completed, the second
+    call must short-circuit before issuing any SQL."""
     ctx = MockContext()
-
-    def _q(sql: str, params=None):
-        if "information_schema.tables" in sql:
-            # Both tables present means the rename already happened (the
-            # v7 name lingers if a manual repair created a stub). v8.0.1
-            # treats this as "no rename needed" — only widen if needed.
-            return [{"table_name": "otaku_user_media"}]
-        if "information_schema.key_column_usage" in sql:
-            # Wide PK already exists.
-            return [{"one": 1}]
-        return []
-
-    ctx.sql.query = _q
+    ctx.kv.set(p._SCHEMA_V8_MIGRATED_KV, "1")
     p._migrate_v7_to_v8(ctx)
 
     executed = [c["sql"] for c in ctx.sql.executed]
-    # No DROP CONSTRAINT or ADD CONSTRAINT should fire when the wide PK is
-    # already in place.
-    assert not any("DROP CONSTRAINT" in s for s in executed), \
-        "must not re-drop a constraint when the wide PK already exists"
-    assert not any("ADD CONSTRAINT otaku_user_media_pkey" in s
-                   for s in executed), \
-        "must not re-add the PK when it's already there"
+    # Marker short-circuits at the very top — not even the advisory lock fires.
+    assert not any("pg_advisory_xact_lock" in s for s in executed), \
+        "must not even acquire the lock when the marker says migrated"
+    assert not any("ALTER" in s for s in executed)
+    assert not any("DROP CONSTRAINT" in s for s in executed)
+    assert not any("ADD CONSTRAINT" in s for s in executed)
 
 
+# regression-fix (v10.0.6): the v8.0.1 partial-failure self-heal relied on
+# information_schema re-probing each step's landmark. v10.0.6 drops the
+# step-level PK probe, but the self-heal is preserved through a different
+# mechanism — until the KV marker is set, every step's idempotent guards
+# (ALTER INDEX IF EXISTS, ADD COLUMN IF NOT EXISTS, DROP CONSTRAINT IF
+# EXISTS) make re-running safe. This test pins that contract: with v8
+# table present (rename done) and the marker NOT set, the column-add and
+# PK widening still fire on the next call.
 def test_migration_self_heals_after_partial_failure():
     """v8.0.0 bug: if step 3 errored after step 1 succeeded, the next call's
     probe found `otaku_user_anime` absent and early-returned, leaving the
@@ -122,12 +122,10 @@ def test_migration_self_heals_after_partial_failure():
     ctx = MockContext()
 
     def _q(sql: str, params=None):
-        if "information_schema.tables" in sql:
-            # v7 already renamed, but the column add never finished.
-            return [{"table_name": "otaku_user_media"}]
-        if "information_schema.key_column_usage" in sql:
-            # Wide PK not yet there.
-            return []
+        if "to_regclass(" in sql:
+            # v7 already renamed; v8 present. Marker NOT set (simulating the
+            # earlier partial failure).
+            return [{"v7": None, "v8": "otaku_user_media"}]
         return []
 
     ctx.sql.query = _q

@@ -477,16 +477,17 @@ def _list_event(options: dict | None = None, **extra) -> dict:
 
 def test_schema_bootstrap_is_idempotent():
     """Running _bootstrap_schema twice must not raise — CREATE/ALTER IF NOT EXISTS."""
+    # regression-fix (v10.0.6): the second call now emits FEWER SQL
+    # statements than the first because `_migrate_v7_to_v8` short-circuits
+    # via the KV marker set on the first run. Idempotency is preserved (no
+    # raises); the doubling expectation no longer holds and was always
+    # an over-specification of the contract.
     ctx = MockContext()
     p._bootstrap_schema(ctx)
     first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)
-    # Same DDLs run both times → recorder count doubles. Each DDL is one of the
-    # idempotent forms (CREATE … IF NOT EXISTS or ADD COLUMN IF NOT EXISTS).
-    # The v8.0 migration probe (SELECT against information_schema) is also
-    # recorded by MockContext but isn't a DDL, so the assertion below scopes
-    # to CREATE/ALTER statements.
-    assert len(ctx.sql.executed) == first_count * 2
+    # Second call still runs the non-migration DDLs (each idempotent).
+    assert len(ctx.sql.executed) > first_count
     assert all(
         "IF NOT EXISTS" in call["sql"]
         for call in ctx.sql.executed
@@ -2469,12 +2470,16 @@ def test_help_title_uses_S():
 
 def test_help_lists_every_manifest_command():
     """/help builds its body from manifest.json — no hardcoded list."""
+    # regression-fix (v10.0.6): /help now chunks the body across multiple
+    # embeds when it would exceed Discord's 4096-char description cap.
+    # The "every command appears" contract is preserved; the body is now
+    # the joined descriptions of all returned embeds.
     ctx = MockContext()
     p.cmd_help(ctx, _slash_event("help", {}, user_id="h1"))
 
     resp = ctx.interaction.responses[-1]
     assert resp.get("ephemeral") is True
-    body = resp["embeds"][0]["description"]
+    body = "\n".join((e.get("description") or "") for e in resp["embeds"])
     # Every slash command in the manifest must appear in /help body.
     from pathlib import Path
     manifest = json.loads((Path(p.__file__).resolve().parent / "manifest.json").read_text())

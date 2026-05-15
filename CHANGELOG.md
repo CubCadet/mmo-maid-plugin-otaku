@@ -20,6 +20,108 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.6] - 2026-05-14
+
+### First-boot environment patch
+
+The first launch of v10.0.5 against the live host (logs captured
+2026-05-14 21:48 ET) surfaced three boot-time issues unrelated to the
+v10.0.0 → v10.0.5 audit work. All three stem from the host environment
+having moved on while the plugin's test suite continued passing
+against the v0.5.2 SDK mocks:
+
+1. **`information_schema` is now a blocked SQL pattern.** Every
+   `on_ready` crashed with `RuntimeError: RPC error (sql.query):
+   Blocked SQL pattern: information_schema` because
+   `_migrate_v7_to_v8` probed `information_schema.tables` and
+   `information_schema.key_column_usage`. The migration failed
+   before `_SCHEMA_DDL` could create the `otaku_user_media` table on
+   fresh installs.
+2. **The live host renamed the slash-command options payload from
+   `options` to `command_options`.** `_option_map(event)` only read
+   `options`, so every handler saw an empty option dict. `/anime
+   query: deathnote` fell into the "no query" branch; `/reviews
+   anime: DeathNote` fell into the "no cached anime" branch. Both
+   silently masqueraded as "user passed no args".
+3. **`/help` exceeded Discord's 4096-char embed description cap.**
+   47 slash commands × name+desc+example lines packed into a single
+   embed description; Discord rejected with `BASE_TYPE_MAX_LENGTH`
+   (error code 50035).
+
+### Fixed
+- **`_migrate_v7_to_v8` no longer touches `information_schema`.**
+  Table existence probe rewritten as
+  `SELECT to_regclass('otaku_user_anime') AS v7,
+  to_regclass('otaku_user_media') AS v8` — a function call, not a
+  system-schema reference, so it sails past the host's denylist.
+  The PK-width probe (the second `information_schema` query) was
+  removed entirely; the DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT
+  pair is now unconditional on first run, and a new KV marker
+  `otaku:schema_v8_migrated` short-circuits the entire function on
+  subsequent boots so the rebuild only runs once per tenant. The
+  marker is re-checked under the advisory lock to defeat TOCTOU
+  between concurrent pool-mode workers.
+- **`_option_map` reads both `command_options` (live host) and
+  `options` (SDK testing helper + v0.5.2 runtime).** `command_options`
+  takes precedence when both are present. Restores every slash
+  command that takes arguments — ~30+ handlers — in a one-line
+  change. Existing tests (which build events via the SDK helper that
+  emits `options`) continue to pass unchanged.
+- **`/help` chunks across multiple embeds.** Greedy-packs commands
+  into ≤3900-char description chunks (under the 4096 cap with
+  headroom for title/footer toward the 6000-char total), capped at
+  10 embeds — Discord's per-message limit. Title rides the first
+  embed; footer rides the last.
+
+### Added
+- **`_SCHEMA_V8_MIGRATED_KV` constant** (`"otaku:schema_v8_migrated"`).
+  Renaming this would make every existing tenant re-run the migration,
+  so it's pinned by a regression test.
+- **`_HELP_DESC_CHUNK = 3900` + `_HELP_MAX_EMBEDS = 10`** module-level
+  constants documenting Discord's embed limits.
+
+### Doctrine carve-outs
+- `tests/regression/test_v8_0_0.py::test_migration_helper_probes_v7_table_before_renaming`
+  and `test_schema_bootstrap_runs_migration_before_create` — assertion
+  changed from `information_schema.tables in q` to `to_regclass( in q`.
+  Same anti-regression intent (the migration MUST probe before
+  RENAME); only the probe shape moved.
+- `tests/regression/test_v8_0_1.py::_mock_v7_install` — the mock query
+  responder returns `{"v7": "otaku_user_anime", "v8": None}` for
+  `to_regclass(` probes (one row, two columns) instead of
+  `{"table_name": "otaku_user_anime"}` rows (one row per table).
+- `tests/regression/test_v8_0_1.py::test_migration_skips_pk_widen_when_wide_pk_already_present`
+  renamed to `test_migration_skips_everything_when_kv_marker_set`.
+  The v8.0.1 contract was "PK widen is skipped when wide PK is
+  already present", probed via `information_schema.key_column_usage`.
+  v10.0.6 replaces this with a stronger contract: when the KV marker
+  is set, the function short-circuits ENTIRELY — not even the
+  advisory lock fires. The intent (no redundant work on already-
+  migrated installs) is preserved; the mechanism is the KV marker.
+- `tests/regression/test_v8_0_1.py::test_migration_self_heals_after_partial_failure`
+  — assertion uses the `to_regclass` probe shape; the partial-failure
+  self-heal contract is preserved (every step's idempotent guards
+  still let re-running heal a half-finished migration as long as the
+  KV marker hasn't been set).
+
+### Tests
+- 15 new immutable contracts in `tests/regression/test_v10_0_6.py`:
+  - `_option_map` reads `command_options`, `options`, prefers the
+    live-host key when both are present, returns empty dict on empty
+    event.
+  - End-to-end: `cmd_anime` with a live-host-shaped payload reaches
+    AniList instead of the usage error.
+  - Migration does NOT reference `information_schema` in any emitted
+    SQL.
+  - Migration uses `to_regclass('otaku_user_anime')` AND
+    `to_regclass('otaku_user_media')` for the table probe.
+  - KV marker set after fresh install AND after full migration dance.
+  - Marker-present fast path issues ZERO SQL calls (no advisory lock).
+  - `_SCHEMA_V8_MIGRATED_KV` constant is pinned to its wire-format value.
+  - `/help` embeds each ≤4096 chars; first has title, last has footer;
+    at most 10 embeds total; every manifest command appears in some
+    embed.
+
 ## [10.0.5] - 2026-05-14
 
 ### SDK compliance + recommendation correctness

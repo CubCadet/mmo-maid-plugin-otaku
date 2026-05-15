@@ -41,13 +41,18 @@ def test_manifest_includes_help_and_genres():
 
 # ── /help ───────────────────────────────────────────────────────────────────
 
+# regression-fix (v10.0.6): /help now chunks the body across multiple embeds
+# (Discord caps a single embed description at 4096 chars; the 47-command body
+# exceeds that). The contract — every manifest command appears in the
+# response — is preserved; the assertion now joins all embed descriptions
+# before searching.
 def test_help_reflects_every_manifest_command():
     ctx = MockContext()
     p.cmd_help(ctx, _slash("help", {}, user_id="reg-h"))
 
     resp = ctx.interaction.responses[-1]
     assert resp.get("ephemeral") is True
-    body = resp["embeds"][0]["description"]
+    body = "\n".join((e.get("description") or "") for e in resp["embeds"])
     for cmd in _manifest()["slash_commands"]:
         assert f"/{cmd['name']}" in body, f"missing /{cmd['name']} in /help"
 

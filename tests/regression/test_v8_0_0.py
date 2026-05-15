@@ -97,18 +97,27 @@ def test_bootstrap_creates_otaku_user_media_with_media_type_and_extended_pk():
     assert "PRIMARY KEY (user_id, media_id, media_type)" in create
 
 
+# regression-fix (v10.0.6): the host now blocks the literal pattern
+# `information_schema`, so the v8.0.0 probe (`SELECT … FROM
+# information_schema.tables`) crashes at boot with `Blocked SQL pattern`.
+# v10.0.6 swapped the probe to `to_regclass(name)` — a function call, not a
+# system-schema reference. The contract here is preserved: the migration MUST
+# probe whether the v7/v8 tables exist before issuing RENAME. Assertion now
+# pins the new probe shape.
 def test_migration_helper_probes_v7_table_before_renaming():
-    """_migrate_v7_to_v8 must SELECT from information_schema before issuing
+    """_migrate_v7_to_v8 must probe table existence before issuing
     ALTER TABLE … RENAME — otherwise re-runs on fresh v8 installs would error."""
     ctx = MockContext()
     p._migrate_v7_to_v8(ctx)
     # MockContext returns [] for queries, so the early-return path triggers and
     # no ALTER TABLE … RENAME executes. The probe SELECT *was* recorded.
     queries = [c["sql"] for c in ctx.sql.executed]
-    assert any("information_schema.tables" in q for q in queries)
+    assert any("to_regclass(" in q for q in queries)
     assert not any("RENAME TO otaku_user_media" in q for q in queries)
 
 
+# regression-fix (v10.0.6): probe shape changed from information_schema to
+# to_regclass. The bootstrap ordering contract is unchanged.
 def test_schema_bootstrap_runs_migration_before_create():
     """_migrate_v7_to_v8 must run *before* the v8 CREATE TABLE — otherwise the
     fresh-install CREATE would happen before the migration's RENAME, leaving
@@ -116,7 +125,7 @@ def test_schema_bootstrap_runs_migration_before_create():
     ctx = MockContext()
     p._bootstrap_schema(ctx)
     queries = [c["sql"] for c in ctx.sql.executed]
-    probe_idx = next(i for i, q in enumerate(queries) if "information_schema.tables" in q)
+    probe_idx = next(i for i, q in enumerate(queries) if "to_regclass(" in q)
     create_idx = next(
         i for i, q in enumerate(queries) if "CREATE TABLE IF NOT EXISTS otaku_user_media" in q
     )
