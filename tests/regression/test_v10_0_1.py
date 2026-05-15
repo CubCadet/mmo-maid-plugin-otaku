@@ -27,10 +27,16 @@ ACHIEVEMENT STATS BATCHING (N+1 fix)
   combined `(SELECT COUNT(*) FROM otaku_reviews ...) AS reviews,
   (SELECT COUNT(*) FROM otaku_notifications ...) AS subs`.
 - `_ach_stats_scope(ctx, user_id)` is a reentrant context manager. On
-  entry it pre-fetches stats and stores them in module-level
-  `_ACH_STATS["current"]`; on exit it clears them. Inner scopes (e.g.
-  `_check_and_award_achievements` nested under `cmd_achievements`) are
-  no-ops so stats load exactly ONCE per user-visible call.
+  entry it pre-fetches stats and stores them in a per-thread cache; on
+  exit it clears them. Inner scopes (e.g. `_check_and_award_achievements`
+  nested under `cmd_achievements`) are no-ops so stats load exactly
+  ONCE per user-visible call.
+
+  (v10.0.1 used a module-global `_ACH_STATS` dict for the cache. v10.0.2
+  swapped that for `threading.local()` after discovering the SDK runs
+  multiple dispatcher threads per worker — the dict could leak user A's
+  stats into user B's predicates under concurrent /achievements calls.
+  The accessor `_ach_stats_current()` replaces direct dict reads.)
 - Inside a scope, `_ach_count_rows`, `_ach_count_reviews`,
   `_ach_count_subs` read from the cached aggregate. Outside a scope,
   they fall back to per-call SQL (backwards-compatible for ad-hoc
@@ -218,6 +224,10 @@ def test_ach_load_stats_zero_for_empty_user_id():
     assert called == []
 
 
+# regression-fix (v10.0.2): direct `_ACH_STATS["current"]` reads replaced
+# with the `_ach_stats_current()` accessor — the underlying cache is now
+# `threading.local()` rather than a module-global dict, but the semantics
+# (None outside scope, dict inside scope) are unchanged.
 def test_ach_stats_scope_caches_within_block():
     """Inside the scope, `_ach_count_rows` reads from cache; outside it hits SQL."""
     ctx = MockContext()
@@ -239,9 +249,10 @@ def test_ach_stats_scope_caches_within_block():
         assert len(sql_calls) == 2
 
     # Out of scope: cache cleared; the next _ach_count_rows would hit SQL.
-    assert p._ACH_STATS.get("current") is None
+    assert p._ach_stats_current() is None
 
 
+# regression-fix (v10.0.2): see comment on test_ach_stats_scope_caches_within_block.
 def test_ach_stats_scope_is_reentrant():
     """Nested scope must not re-fetch; outer scope owns the cache lifetime."""
     ctx = MockContext()
@@ -258,15 +269,16 @@ def test_ach_stats_scope_is_reentrant():
     ctx.sql.query = _q
     with p._ach_stats_scope(ctx, "u"):
         with p._ach_stats_scope(ctx, "u"):
-            assert p._ACH_STATS["current"] is not None
+            assert p._ach_stats_current() is not None
         # Inner exit did NOT clear — outer is still active.
-        assert p._ACH_STATS["current"] is not None
+        assert p._ach_stats_current() is not None
     # Outer exit clears.
-    assert p._ACH_STATS["current"] is None
+    assert p._ach_stats_current() is None
     # Aggregate loaded exactly once across the nested scopes.
     assert load_count[0] == 1
 
 
+# regression-fix (v10.0.2): see comment on test_ach_stats_scope_caches_within_block.
 def test_ach_count_rows_falls_back_to_sql_outside_scope():
     """Tests + ad-hoc callers that don't enter a scope still get correct counts."""
     ctx = MockContext()
@@ -277,7 +289,7 @@ def test_ach_count_rows_falls_back_to_sql_outside_scope():
         return []
 
     ctx.sql.query = _q
-    assert p._ACH_STATS.get("current") is None  # no scope active
+    assert p._ach_stats_current() is None  # no scope active
     assert p._ach_count_rows(ctx, "u") == 42
 
 

@@ -1088,6 +1088,25 @@ behavior, tighter implementation.
   7 existing assertions carved out with documented
   `# regression-fix (v10.0.1):` notes. Suite total: 586 tests, all green.
 
+### v10.0.2 — Concurrency fix (achievement stats thread-local) ✅ shipped 2026-05-14
+
+Post-v10.0.1 audit caught a cross-user leak in the v10.0.1 achievement
+stats cache: the SDK runs 4 dispatcher threads per worker, and the
+module-global `_ACH_STATS` dict was shared across them, so two
+overlapping `/achievements` calls on different users could collide
+and award user A's achievements to user B.
+
+- 🔒 **`_ACH_STATS` dict → `threading.local()`.** Each dispatcher thread
+  now owns its own scope cache. Reentrant semantics on one thread
+  preserved.
+- New accessors `_ach_stats_current()` / `_ach_stats_set()` replace
+  direct dict reads.
+- 5 new immutable contracts in `tests/regression/test_v10_0_2.py`
+  (two-thread overlap, cross-thread invisibility, accessor round-trip,
+  single-thread reentrancy). 3 v10.0.1 tests carved out with
+  `# regression-fix (v10.0.2):` to use the accessor. Suite total: 591
+  tests, all green.
+
 ---
 
 ## Cross-cutting concerns

@@ -23,6 +23,7 @@ import math
 import os
 import random
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -7521,10 +7522,24 @@ def cmd_preferences(ctx: Context, event: dict) -> None:
 # matter for correctness; it does affect display order.
 
 
-# v10.0.1 — per-call aggregate cache. Active only inside `_ach_stats_scope`;
-# `None` outside that scope, so ad-hoc predicate calls (tests, future
-# integrations) still hit SQL on every call and stay correct.
-_ACH_STATS: dict[str, object] = {"current": None}
+# v10.0.2 — per-call aggregate cache, thread-local. The SDK runs up to
+# MMO_SDK_DISPATCH_THREADS (default 4) dispatcher threads per worker, so the
+# v10.0.1 module-global dict could leak user A's stats into user B's
+# predicates if their /achievements calls overlapped. `threading.local()`
+# scopes the cache to the dispatcher thread that opened it, eliminating the
+# cross-user leak while preserving the same reentrant-scope semantics.
+_ach_stats_tls = threading.local()
+
+
+def _ach_stats_current() -> dict | None:
+    """Read the current thread's cached achievement stats, or None if no
+    scope is active on this thread. Exposed for tests + ad-hoc readers."""
+    return getattr(_ach_stats_tls, "current", None)
+
+
+def _ach_stats_set(stats: dict | None) -> None:
+    """Set the current thread's cached achievement stats. None clears."""
+    _ach_stats_tls.current = stats
 
 # Maps the `where_extra` argument used by predicates onto the column name in
 # the cached aggregate row. New `where_extra` values fall through to the SQL
@@ -7578,24 +7593,29 @@ def _ach_load_stats(ctx: Context, user_id: str) -> dict:
 
 
 class _ach_stats_scope:
-    """Per-call memoization for achievement predicates. Reentrant — an
-    inner scope on the same user_id is a no-op so callers (e.g.
-    `cmd_achievements` wrapping `_check_and_award_achievements`) load
-    stats exactly once across the nested call."""
+    """Per-call memoization for achievement predicates. Reentrant per-thread
+    — an inner scope on the same dispatcher thread is a no-op so callers
+    (e.g. `cmd_achievements` wrapping `_check_and_award_achievements`) load
+    stats exactly once across the nested call.
+
+    v10.0.2: the underlying cache is `threading.local()`, so concurrent
+    /achievements calls on different dispatcher threads never see each
+    other's stats. Each thread owns its own scope lifetime independently.
+    """
     def __init__(self, ctx: Context, user_id: str):
         self._ctx = ctx
         self._user_id = user_id
         self._owns = False
 
     def __enter__(self):
-        if _ACH_STATS.get("current") is None:
-            _ACH_STATS["current"] = _ach_load_stats(self._ctx, self._user_id)
+        if _ach_stats_current() is None:
+            _ach_stats_set(_ach_load_stats(self._ctx, self._user_id))
             self._owns = True
-        return _ACH_STATS["current"]
+        return _ach_stats_current()
 
     def __exit__(self, *exc):
         if self._owns:
-            _ACH_STATS["current"] = None
+            _ach_stats_set(None)
         return False
 
 
@@ -7604,10 +7624,11 @@ def _ach_count_rows(ctx: Context, user_id: str, where_extra: str = "") -> int:
 
     v10.0.1: inside an `_ach_stats_scope`, reads from the cached aggregate
     row; outside one, falls back to the per-call SQL it always ran.
+    v10.0.2: the scope cache is now thread-local (see _ach_stats_tls).
     """
     if not user_id:
         return 0
-    stats = _ACH_STATS.get("current")
+    stats = _ach_stats_current()
     if isinstance(stats, dict):
         key = _ACH_STATS_KEYS.get(where_extra)
         if key is not None:
@@ -7623,10 +7644,10 @@ def _ach_count_rows(ctx: Context, user_id: str, where_extra: str = "") -> int:
 
 def _ach_count_reviews(ctx: Context, user_id: str) -> int:
     """v10.0.1: scope-aware review count for the community / first_review
-    predicates and the reviews progress line."""
+    predicates and the reviews progress line. v10.0.2: thread-local."""
     if not user_id:
         return 0
-    stats = _ACH_STATS.get("current")
+    stats = _ach_stats_current()
     if isinstance(stats, dict):
         return int(stats.get("reviews") or 0)
     rows = ctx.sql.query(
@@ -7638,10 +7659,10 @@ def _ach_count_reviews(ctx: Context, user_id: str) -> int:
 
 def _ach_count_subs(ctx: Context, user_id: str) -> int:
     """v10.0.1: scope-aware subscription count for the subscriber predicate
-    and the subscriptions progress line."""
+    and the subscriptions progress line. v10.0.2: thread-local."""
     if not user_id:
         return 0
-    stats = _ACH_STATS.get("current")
+    stats = _ach_stats_current()
     if isinstance(stats, dict):
         return int(stats.get("subs") or 0)
     rows = ctx.sql.query(

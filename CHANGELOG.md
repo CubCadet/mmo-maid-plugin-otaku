@@ -20,6 +20,53 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.2] - 2026-05-14
+
+### Concurrency fix — cross-user achievement leak
+
+Post-v10.0.1 audit caught a thread-safety bug in the new achievement
+stats cache. The SDK runs `MMO_SDK_DISPATCH_THREADS` dispatcher threads
+per worker (default 4), and v10.0.1's module-global `_ACH_STATS = {"current": ...}`
+dict was shared across them. Two overlapping `/achievements` calls on
+different users could collide:
+
+1. Thread A enters `_ach_stats_scope` on user A → writes A's stats to
+   `_ACH_STATS["current"]`, sets `self._owns = True`.
+2. Thread B enters `_ach_stats_scope` on user B → reads "current is
+   not None" (A's stats), sets `self._owns = False`, reuses A's data.
+3. All of B's predicates run against A's totals → B is awarded A's
+   achievements.
+
+### Fixed
+- **Per-thread achievement stats cache.** `_ACH_STATS` dict replaced by
+  `_ach_stats_tls = threading.local()`. Each dispatcher thread now owns
+  its own `current` attribute; no cross-thread visibility. Reentrant
+  semantics on a single thread are preserved.
+- **New accessors `_ach_stats_current()` / `_ach_stats_set()`** replace
+  direct dict reads. Used internally by `_ach_count_rows`,
+  `_ach_count_reviews`, `_ach_count_subs`, and `_ach_stats_scope`;
+  tests + future tooling should also go through them.
+
+### Doctrine carve-outs
+- `tests/regression/test_v10_0_1.py` — 3 tests that asserted
+  `p._ACH_STATS.get("current") is None` / `p._ACH_STATS["current"]`
+  now go through `p._ach_stats_current()`. Each carries an explicit
+  `# regression-fix (v10.0.2):` comment. Same semantic checks
+  (None outside scope, dict inside scope) — only the access path
+  changed, since `threading.local()` is an object, not a dict.
+
+### Tests
+- 5 new immutable contracts in `tests/regression/test_v10_0_2.py`
+  pinning the thread-safety fix:
+  - Two overlapping threads on different users do NOT see each
+    other's stats (the v10.0.1 bug, now blocked).
+  - A scope on the main thread is invisible to a freshly-spawned
+    child thread (the `threading.local()` invariant).
+  - Accessor API contract: `_ach_stats_current()` returns None
+    initially; `_ach_stats_set()` round-trips through `_ach_stats_current()`.
+  - Single-thread reentrancy preserved verbatim (sanity check).
+- Suite total: 591 tests (was 586), all green.
+
 ## [10.0.1] - 2026-05-14
 
 ### Post-audit safety + performance patch
