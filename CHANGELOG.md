@@ -20,6 +20,49 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.4] - 2026-05-14
+
+### Final audit cleanup — defensive bounds + test hardening
+
+Closes the last 🟡 findings from the v10.0.3 audit. Three small fixes;
+no new user-visible behavior; no schema changes; no new capabilities or
+proxy domains.
+
+### Added
+- **`RECOMMEND_VECTOR_LIMIT = 5000`** module-level constant. Bounds the
+  number of rows `_recommend_user_vector` loads for the target user, so
+  a pathological account with 10k+ ratings can't blow worker memory or
+  cause an O(N) hit on every cosine intersection. Typical users (100–500
+  ratings) never hit the cap.
+
+### Fixed
+- **`_recommend_user_vector` defensive LIMIT.** Added
+  `ORDER BY rating DESC, media_id LIMIT RECOMMEND_VECTOR_LIMIT` to the
+  SELECT. When the cap kicks in, the highest-confidence rows survive
+  truncation so cosine norms and shared-title intersections still
+  weight the user's strongest signals.
+
+### Changed
+- **Hardened multi-row INSERT test assertions** in
+  `tests/regression/test_v10_0_3.py`. v10.0.3's tests asserted literal
+  `"($1, $2, $3)"` substrings; v10.0.4 swaps them for a
+  whitespace-agnostic `re.findall(r"\$\d+", sql)` placeholder count.
+  The contract is "N placeholders in $1..$N order," not "the SQL
+  contains these exact substrings" — a future formatter change can no
+  longer silently break the assertion without breaking functionality.
+
+### Tests
+- 5 new immutable contracts in `tests/regression/test_v10_0_4.py`:
+  - `_recommend_user_vector`'s SQL includes `LIMIT RECOMMEND_VECTOR_LIMIT`.
+  - `ORDER BY rating DESC, media_id` is preserved (deterministic
+    truncation under the cap).
+  - `RECOMMEND_VECTOR_LIMIT` is a module-level int in the sane range
+    `[1000, 50000]`.
+  - Vector building succeeds end-to-end with realistic mock data.
+  - `test_v10_0_3.py`'s placeholder assertions now use `re.findall`
+    rather than literal substrings (meta-test guarding the hardening).
+- Suite total: 602 tests (was 597), all green.
+
 ## [10.0.3] - 2026-05-14
 
 ### Audit cleanup — efficiency + stale-code

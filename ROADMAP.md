@@ -1128,6 +1128,28 @@ capabilities or proxy domains.
   2 v7.x tests carved out with `# regression-fix (v10.0.3):` for the
   multi-row INSERT shape change. Suite total: 597 tests, all green.
 
+### v10.0.4 — Final audit cleanup (defensive bounds + test hardening) ✅ shipped 2026-05-14
+
+Closes the last 🟡 findings from the v10.0.3 audit.
+
+- 🔒 **`RECOMMEND_VECTOR_LIMIT = 5000`** caps the target's rating-vector
+  load. Typical users rate 100–500 anime; the cap only triggers on
+  pathological data (e.g. import bots). `ORDER BY rating DESC, media_id`
+  preserves the highest-confidence rows under truncation.
+- 🧹 **Hardened multi-row INSERT test assertions** — swapped literal
+  `"($1, $2, $3)"` substrings for whitespace-agnostic
+  `re.findall(r"\$\d+", sql)` checks. Future formatter changes can no
+  longer silently break the assertion.
+- 🧹 **Refreshed auto-memory** frontmatter to reflect v10.0.4 state.
+- 5 new immutable contracts in `tests/regression/test_v10_0_4.py`.
+  Suite total: 602 tests, all green.
+
+**v10.x maintenance complete.** Five sequential same-day patches closed
+every audit finding. The plugin is now structurally clean across
+stability, SDK compliance, stale code, efficiency, test integrity, and
+hygiene. Next decisions: maintenance freeze, or v11+ pivot if a real
+new direction emerges.
+
 ---
 
 ## Cross-cutting concerns

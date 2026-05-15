@@ -7979,13 +7979,28 @@ RECOMMEND_PEER_CAP = 50
 RECOMMEND_MIN_SELF_RATINGS = 3
 RECOMMEND_MIN_SHARED_TITLES = 3
 RECOMMEND_RESULT_LIMIT = 5
+# v10.0.4 — defensive cap on the target's own rating vector. Typical users
+# rate 100–500 anime; this cap only triggers on pathological data (e.g. an
+# import bot with tens of thousands of rows). When it does, we keep the
+# highest-rated rows so the cosine norm and shared-title intersection still
+# weight the user's strongest signals.
+RECOMMEND_VECTOR_LIMIT = 5000
 
 
 def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
-    """media_id → user's rating on a 0.5..10.0 scale. Anime-only; unrated rows omitted."""
+    """media_id → user's rating on a 0.5..10.0 scale. Anime-only; unrated rows omitted.
+
+    v10.0.4: hard-capped at RECOMMEND_VECTOR_LIMIT rows via LIMIT + ORDER BY.
+    Without the cap, a pathological user (10k+ rated anime) loads the entire
+    vector into memory and pays an O(N) cost every time `_recommend_candidates`
+    intersects keys with a peer. The cap is well above any realistic rated
+    catalogue, so production users never see truncation in practice.
+    """
     rows = ctx.sql.query(
         "SELECT media_id, rating FROM otaku_user_media "
-        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL",
+        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
+        "ORDER BY rating DESC, media_id "
+        f"LIMIT {RECOMMEND_VECTOR_LIMIT}",
         [user_id],
     ) or []
     vec: dict[int, float] = {}

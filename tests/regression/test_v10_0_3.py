@@ -26,6 +26,7 @@ ORPHAN STRING REMOVAL (stale-code cleanup)
 from __future__ import annotations
 
 import math
+import re
 
 import plugin_main as p
 from mmo_maid_sdk.testing import MockContext
@@ -145,10 +146,14 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
     # 3 options × 3 params (poll_id, key, text) = 9 params total.
     params = option_inserts[0]["params"]
     assert len(params) == 9
-    # Verify the SQL uses multiple placeholder tuples.
+    # v10.0.4: shape check is whitespace-agnostic — count distinct $N
+    # placeholders rather than asserting literal "($1, $2, $3)" substrings,
+    # which would break on any future SQL formatter change (compact
+    # spacing, line wrapping, etc.). The contract is "9 placeholders for
+    # 9 params, ordered $1..$9," not "the SQL has these exact substrings".
     sql = option_inserts[0]["sql"]
-    assert "($1, $2, $3)" in sql
-    assert "($7, $8, $9)" in sql
+    placeholders = set(re.findall(r"\$\d+", sql))
+    assert placeholders == {f"${i}" for i in range(1, 10)}
     # Keys appear in declaration order at indices 1, 4, 7.
     keys = [params[3 * i + 1] for i in range(3)]
     assert keys == ["a", "b", "c"]
@@ -199,9 +204,11 @@ def test_aotw_candidates_use_single_multi_row_insert(monkeypatch):
     params = candidate_inserts[0]["params"]
     # 4 candidates × 2 params (poll_id, media_id) = 8 params total.
     assert len(params) == 8
+    # v10.0.4: whitespace-agnostic placeholder check (see comment on
+    # test_poll_options_use_single_multi_row_insert).
     sql = candidate_inserts[0]["sql"]
-    assert "($1, $2)" in sql
-    assert "($7, $8)" in sql
+    placeholders = set(re.findall(r"\$\d+", sql))
+    assert placeholders == {f"${i}" for i in range(1, 9)}
     # media_ids appear in order at odd indices.
     inserted_mids = [params[2 * i + 1] for i in range(4)]
     assert inserted_mids == [10, 20, 30, 40]
