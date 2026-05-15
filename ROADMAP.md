@@ -1144,11 +1144,32 @@ Closes the last 🟡 findings from the v10.0.3 audit.
 - 5 new immutable contracts in `tests/regression/test_v10_0_4.py`.
   Suite total: 602 tests, all green.
 
-**v10.x maintenance complete.** Five sequential same-day patches closed
+### v10.0.5 — SDK compliance + recommendation correctness ✅ shipped 2026-05-14
+
+Third audit pass surfaced two real bugs the prior audits missed:
+
+- 🔒 **Five f-string SQL composition sites** — auto-rejected by the SDK
+  upload reviewer. Rewritten as static SQL: `LIMIT 1000` literal, UNNEST
+  for multi-row INSERTs (polls + aotw), COALESCE for `_upsert_user_media`,
+  `_ACH_COUNT_SQL` dispatch table for `_ach_count_rows`.
+- 🔒 **`_recommend_peer_vectors_batch` silent truncation** — the SDK caps
+  `ctx.sql.query` at 1000 rows, but v10.0.1's batch had no per-peer cap,
+  so ~60% of peer data was being dropped on active servers. v10.0.5 added
+  a `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY rating DESC)`
+  window capped at `RECOMMEND_PEER_RATING_CAP = 20`; 50 peers × 20 = 1000
+  rows max, exactly the SDK ceiling.
+- 🧹 `RECOMMEND_VECTOR_LIMIT` aligned from 5000 (silently capped) to 1000
+  (the real SDK cap).
+- 11 new contracts in `tests/regression/test_v10_0_5.py`; 7 prior tests
+  carved out with `# regression-fix (v10.0.5):` for the new SQL shapes.
+  Suite total: 613 tests, all green.
+
+**v10.x maintenance complete.** Six sequential same-day patches closed
 every audit finding. The plugin is now structurally clean across
 stability, SDK compliance, stale code, efficiency, test integrity, and
-hygiene. Next decisions: maintenance freeze, or v11+ pivot if a real
-new direction emerges.
+hygiene — and now also forbids f-string SQL at the contract level so
+future contributors can't reintroduce it. Next decisions: maintenance
+freeze, or v11+ pivot if a real new direction emerges.
 
 ---
 

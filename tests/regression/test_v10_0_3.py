@@ -106,6 +106,12 @@ def test_recommend_candidates_computes_target_norm_once():
 # ── Multi-row INSERT for poll options ──────────────────────────────────────
 
 
+# regression-fix (v10.0.5): v10.0.3 built the multi-row VALUES (...) clause
+# via an f-string generator. The SDK's upload reviewer auto-rejects
+# f-string SQL composition. v10.0.5 replaced the f-string builder with
+# static `UNNEST($2::TEXT[], $3::TEXT[])` SQL — same atomic INSERT, same
+# row count, only 3 params now (poll_id + two parallel arrays). Original
+# intent (one INSERT, all options in declaration order) is preserved.
 def test_poll_options_use_single_multi_row_insert(monkeypatch):
     """`/poll create` issues one INSERT statement, not N."""
     ctx = MockContext()
@@ -126,7 +132,6 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
         return []
 
     ctx.sql.query = _q
-    # The dispatcher is `cmd_poll`; build the inner /poll create event.
     from mmo_maid_sdk.testing import make_event
     event = make_event(
         "interaction_create", interaction_type=2, command_name="poll",
@@ -143,20 +148,19 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
     option_inserts = [e for e in (ctx.sql.executed or [])
                       if "INSERT INTO otaku_poll_options" in e["sql"]]
     assert len(option_inserts) == 1, "expected exactly one multi-row INSERT"
-    # 3 options × 3 params (poll_id, key, text) = 9 params total.
-    params = option_inserts[0]["params"]
-    assert len(params) == 9
-    # v10.0.4: shape check is whitespace-agnostic — count distinct $N
-    # placeholders rather than asserting literal "($1, $2, $3)" substrings,
-    # which would break on any future SQL formatter change (compact
-    # spacing, line wrapping, etc.). The contract is "9 placeholders for
-    # 9 params, ordered $1..$9," not "the SQL has these exact substrings".
+    # v10.0.5: SQL is now static UNNEST with 3 params: poll_id (scalar)
+    # + key array + text array.
     sql = option_inserts[0]["sql"]
+    assert "UNNEST($2::TEXT[], $3::TEXT[])" in sql
+    params = option_inserts[0]["params"]
+    assert len(params) == 3
+    poll_id, keys_arr, texts_arr = params
+    assert isinstance(poll_id, int)
+    assert keys_arr == ["a", "b", "c"]
+    assert texts_arr == ["opt-a", "opt-b", "opt-c"]
+    # Whitespace-agnostic placeholder check (count distinct $N).
     placeholders = set(re.findall(r"\$\d+", sql))
-    assert placeholders == {f"${i}" for i in range(1, 10)}
-    # Keys appear in declaration order at indices 1, 4, 7.
-    keys = [params[3 * i + 1] for i in range(3)]
-    assert keys == ["a", "b", "c"]
+    assert placeholders == {"$1", "$2", "$3"}
 
 
 # ── Multi-row INSERT for AOTW candidates ───────────────────────────────────
@@ -201,17 +205,18 @@ def test_aotw_candidates_use_single_multi_row_insert(monkeypatch):
     candidate_inserts = [e for e in (ctx.sql.executed or [])
                         if "INSERT INTO otaku_aotw_candidates" in e["sql"]]
     assert len(candidate_inserts) == 1, "expected exactly one multi-row INSERT"
-    params = candidate_inserts[0]["params"]
-    # 4 candidates × 2 params (poll_id, media_id) = 8 params total.
-    assert len(params) == 8
-    # v10.0.4: whitespace-agnostic placeholder check (see comment on
-    # test_poll_options_use_single_multi_row_insert).
+    # regression-fix (v10.0.5): see comment on
+    # test_poll_options_use_single_multi_row_insert. SQL is now static
+    # UNNEST with 2 params: poll_id (scalar) + media_id array.
     sql = candidate_inserts[0]["sql"]
+    assert "UNNEST($2::INT[])" in sql
+    params = candidate_inserts[0]["params"]
+    assert len(params) == 2
+    poll_id, mids_arr = params
+    assert isinstance(poll_id, int)
+    assert mids_arr == [10, 20, 30, 40]
     placeholders = set(re.findall(r"\$\d+", sql))
-    assert placeholders == {f"${i}" for i in range(1, 9)}
-    # media_ids appear in order at odd indices.
-    inserted_mids = [params[2 * i + 1] for i in range(4)]
-    assert inserted_mids == [10, 20, 30, 40]
+    assert placeholders == {"$1", "$2"}
 
 
 # ── FIND_PAGE_MALFORMED removal ────────────────────────────────────────────

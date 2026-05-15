@@ -118,8 +118,15 @@ def test_upsert_review_does_not_execute_separate_update():
 # ── _recommend_peer_vectors_batch ──────────────────────────────────────────
 
 
+# regression-fix (v10.0.5): v10.0.1 fetched all peer ratings in one query
+# without a per-peer cap. The SDK silently truncates at 1000 rows, so an
+# active server (50 peers × ~50 ratings each = 2500 rows expected) was
+# losing ~60% of peer data arbitrarily. v10.0.5 added a ROW_NUMBER window
+# capped at RECOMMEND_PEER_RATING_CAP per peer so 50 × 20 = 1000 rows is
+# the deterministic upper bound. The batch is still one query — only the
+# SQL shape and params changed (now includes $2 for the per-peer cap).
 def test_recommend_peer_vectors_batch_uses_array_param():
-    """One query with WHERE user_id = ANY($1::TEXT[]); no per-peer loop."""
+    """One query with WHERE user_id = ANY($1::TEXT[]) and a per-peer cap."""
     ctx = MockContext()
     queries: list = []
 
@@ -136,7 +143,10 @@ def test_recommend_peer_vectors_batch_uses_array_param():
     assert len(queries) == 1
     sql, params = queries[0]
     assert "ANY($1::TEXT[])" in sql
-    assert params == [["a", "b"]]
+    # v10.0.5: per-peer cap via ROW_NUMBER, with the cap passed as $2.
+    assert "ROW_NUMBER()" in sql
+    assert "PARTITION BY user_id" in sql
+    assert params == [["a", "b"], p.RECOMMEND_PEER_RATING_CAP]
     # rating is /2.0
     assert out == {"a": {1: 9.0, 2: 8.0}, "b": {1: 7.0}}
 

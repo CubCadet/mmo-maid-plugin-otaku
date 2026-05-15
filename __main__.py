@@ -2705,20 +2705,23 @@ def _upsert_user_media(
     """
     insert_status = status if status is not None else "watching"
     insert_favorite = bool(is_favorite) if is_favorite is not None else False
+    # v10.0.5 — replaced the prior `f"ON CONFLICT ... SET {update_sql}"`
+    # builder with static SQL + COALESCE. $6/$7 are NULL when the caller
+    # didn't pass that field, so COALESCE preserves the existing row's
+    # value; otherwise it overwrites with the caller's value. Matches
+    # the SDK's "no f-string SQL" rule without changing observable behavior.
+    update_status = status  # NULL = "don't touch this field"
+    update_favorite = bool(is_favorite) if is_favorite is not None else None
 
-    update_clauses = []
-    if status is not None:
-        update_clauses.append("status = EXCLUDED.status")
-    if is_favorite is not None:
-        update_clauses.append("is_favorite = EXCLUDED.is_favorite")
-    update_sql = ", ".join(update_clauses) if update_clauses else "user_id = otaku_user_media.user_id"
-
-    sql = (
+    ctx.sql.execute(
         "INSERT INTO otaku_user_media (user_id, media_id, media_type, status, is_favorite) "
         "VALUES ($1, $2, $3, $4, $5) "
-        f"ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET {update_sql}"
+        "ON CONFLICT (user_id, media_id, media_type) DO UPDATE SET "
+        "  status = COALESCE($6, otaku_user_media.status), "
+        "  is_favorite = COALESCE($7, otaku_user_media.is_favorite)",
+        [user_id, media_id, media_type, insert_status, insert_favorite,
+         update_status, update_favorite],
     )
-    ctx.sql.execute(sql, [user_id, media_id, media_type, insert_status, insert_favorite])
 
 
 # Back-compat alias — v7 callers that used the anime-coded name keep working
@@ -6615,18 +6618,15 @@ def _cmd_poll_create(ctx: Context, user_id: str, sub_opts: dict) -> None:
         return
     poll_id = int(poll_rows[0]["poll_id"])
     # v10.0.3: single multi-row INSERT (was one INSERT per option).
-    # POLL_MAX_OPTIONS = 4, so the placeholder count is bounded.
+    # v10.0.5: UNNEST(...) syntax replaces the f-string VALUES (...) builder
+    # to comply with the SDK's "no f-string SQL" rule. Pure static SQL with
+    # three parameters (poll_id + two parallel arrays); PostgreSQL expands
+    # the arrays into rows server-side.
     if options:
-        values_clause = ", ".join(
-            f"(${3 * i + 1}, ${3 * i + 2}, ${3 * i + 3})" for i in range(len(options))
-        )
-        params: list = []
-        for key, text in options:
-            params.extend([poll_id, key, text])
         ctx.sql.execute(
             "INSERT INTO otaku_poll_options (poll_id, option_key, text) "
-            f"VALUES {values_clause}",
-            params,
+            "SELECT $1, k, t FROM UNNEST($2::TEXT[], $3::TEXT[]) AS u(k, t)",
+            [poll_id, [k for k, _ in options], [t for _, t in options]],
         )
 
     embed = _poll_render_embed(ctx, poll_id, header_template=S.POLL_STATUS_HEADER)
@@ -6928,18 +6928,14 @@ def _cmd_aotw_start(ctx: Context, user_id: str) -> None:
         return
     poll_id = int(poll_rows[0]["poll_id"])
     # v10.0.3: single multi-row INSERT (was one INSERT per candidate).
-    # AOTW_CANDIDATE_LIMIT = 5, so the placeholder count is bounded.
+    # v10.0.5: UNNEST(...) syntax replaces the f-string VALUES (...) builder
+    # to comply with the SDK's "no f-string SQL" rule. Pure static SQL with
+    # two parameters (poll_id + media_id array).
     if candidate_ids:
-        values_clause = ", ".join(
-            f"(${2 * i + 1}, ${2 * i + 2})" for i in range(len(candidate_ids))
-        )
-        params: list = []
-        for mid in candidate_ids:
-            params.extend([poll_id, mid])
         ctx.sql.execute(
             "INSERT INTO otaku_aotw_candidates (poll_id, media_id) "
-            f"VALUES {values_clause}",
-            params,
+            "SELECT $1, mid FROM UNNEST($2::INT[]) AS u(mid)",
+            [poll_id, list(candidate_ids)],
         )
 
     media_by_id = _aotw_resolve_media(ctx, candidate_ids)
@@ -7567,6 +7563,30 @@ _ACH_STATS_KEYS: dict[str, str] = {
     "AND rating IS NOT NULL": "rated",
 }
 
+# v10.0.5 — static SQL per `where_extra` value, dispatched by key. Replaces
+# the prior `f"... WHERE ... 'anime'{extra}"` f-string composition (which
+# the SDK upload reviewer rejects, even though `extra` was de-facto a
+# constant from a closed dispatch table). A future predicate that needs a
+# new aggregate must add a row here AND a column in `_ach_load_stats`.
+_ACH_COUNT_SQL: dict[str, str] = {
+    "": (
+        "SELECT COUNT(*) AS n FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime'"
+    ),
+    "AND is_favorite = TRUE": (
+        "SELECT COUNT(*) AS n FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND is_favorite = TRUE"
+    ),
+    "AND status = 'completed'": (
+        "SELECT COUNT(*) AS n FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND status = 'completed'"
+    ),
+    "AND rating IS NOT NULL": (
+        "SELECT COUNT(*) AS n FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL"
+    ),
+}
+
 
 def _ach_load_stats(ctx: Context, user_id: str) -> dict:
     """Single-trip aggregate fetch for every count the predicates need.
@@ -7640,6 +7660,9 @@ def _ach_count_rows(ctx: Context, user_id: str, where_extra: str = "") -> int:
     v10.0.1: inside an `_ach_stats_scope`, reads from the cached aggregate
     row; outside one, falls back to the per-call SQL it always ran.
     v10.0.2: the scope cache is now thread-local (see _ach_stats_tls).
+    v10.0.5: SQL fall-back goes through the static `_ACH_COUNT_SQL` dispatch
+    table instead of an f-string. Unknown `where_extra` returns 0 (the
+    predicate doesn't qualify) rather than building dynamic SQL.
     """
     if not user_id:
         return 0
@@ -7648,12 +7671,10 @@ def _ach_count_rows(ctx: Context, user_id: str, where_extra: str = "") -> int:
         key = _ACH_STATS_KEYS.get(where_extra)
         if key is not None:
             return int(stats.get(key) or 0)
-    extra = f" {where_extra}" if where_extra else ""
-    rows = ctx.sql.query(
-        f"SELECT COUNT(*) AS n FROM otaku_user_media "
-        f"WHERE user_id = $1 AND media_type = 'anime'{extra}",
-        [user_id],
-    ) or [{"n": 0}]
+    sql = _ACH_COUNT_SQL.get(where_extra)
+    if sql is None:
+        return 0
+    rows = ctx.sql.query(sql, [user_id]) or [{"n": 0}]
     return int((rows[0] or {}).get("n") or 0)
 
 
@@ -7979,28 +8000,32 @@ RECOMMEND_PEER_CAP = 50
 RECOMMEND_MIN_SELF_RATINGS = 3
 RECOMMEND_MIN_SHARED_TITLES = 3
 RECOMMEND_RESULT_LIMIT = 5
-# v10.0.4 — defensive cap on the target's own rating vector. Typical users
-# rate 100–500 anime; this cap only triggers on pathological data (e.g. an
-# import bot with tens of thousands of rows). When it does, we keep the
-# highest-rated rows so the cosine norm and shared-title intersection still
-# weight the user's strongest signals.
-RECOMMEND_VECTOR_LIMIT = 5000
+# v10.0.5 — the SDK caps `ctx.sql.query` at 1000 rows (transport-level,
+# `min(int(limit), 1000)`). Both caps below align with that hard ceiling.
+# RECOMMEND_VECTOR_LIMIT (1000): the target's own rating vector is capped
+#   at the 1000 highest-rated rows. Typical users rate 100–500 anime;
+#   power users will see their tail truncated.
+# RECOMMEND_PEER_RATING_CAP (20): each peer's top-N rated anime considered
+#   for shared-title cosine. 50 peers × 20 = 1000, the SDK ceiling for the
+#   batched peer query. Reduces noise from peers' lightly-rated tail.
+RECOMMEND_VECTOR_LIMIT = 1000
+RECOMMEND_PEER_RATING_CAP = 20
 
 
 def _recommend_user_vector(ctx: Context, user_id: str) -> dict[int, float]:
     """media_id → user's rating on a 0.5..10.0 scale. Anime-only; unrated rows omitted.
 
-    v10.0.4: hard-capped at RECOMMEND_VECTOR_LIMIT rows via LIMIT + ORDER BY.
-    Without the cap, a pathological user (10k+ rated anime) loads the entire
-    vector into memory and pays an O(N) cost every time `_recommend_candidates`
-    intersects keys with a peer. The cap is well above any realistic rated
-    catalogue, so production users never see truncation in practice.
+    v10.0.4: hard-capped via LIMIT + ORDER BY. v10.0.5: cap aligned to the
+    SDK's 1000-row ceiling, and the LIMIT clause is a literal in the SQL
+    (no f-string interpolation — the SDK forbids f-string SQL composition).
+    Without the cap, a pathological user loads the entire vector into
+    memory; the cap is well above any realistic rated catalogue, so
+    production users rarely see truncation.
     """
     rows = ctx.sql.query(
         "SELECT media_id, rating FROM otaku_user_media "
         "WHERE user_id = $1 AND media_type = 'anime' AND rating IS NOT NULL "
-        "ORDER BY rating DESC, media_id "
-        f"LIMIT {RECOMMEND_VECTOR_LIMIT}",
+        "ORDER BY rating DESC, media_id LIMIT 1000",
         [user_id],
     ) or []
     vec: dict[int, float] = {}
@@ -8037,19 +8062,37 @@ def _recommend_peer_vectors_batch(
     ctx: Context, peer_ids: list[str]
 ) -> dict[str, dict[int, float]]:
     """v10.0.1 — single-query batch fetch of every peer's rating vector.
+    v10.0.5 — per-peer ROW_NUMBER cap so the batch stays under the SDK's
+    1000-row cap on `ctx.sql.query`.
 
-    Replaces a per-peer SELECT loop (50 peers × 1 query = 50 round-trips)
-    with one `WHERE user_id = ANY($1::TEXT[])` query that hydrates the full
-    {peer_id → {media_id → rating}} map in one shot. Empty peer_ids returns
-    an empty dict without hitting SQL.
+    Without the per-peer cap, 50 peers × ~50 typical ratings = 2500 rows;
+    the SDK silently truncated at 1000, dropping ~60% of peer data
+    arbitrarily and degrading recommendations on active servers.
+
+    The window function picks each peer's top
+    `RECOMMEND_PEER_RATING_CAP` rated anime (ordered by rating, then
+    media_id for determinism). With cap=20 and RECOMMEND_PEER_CAP=50,
+    the total row count is bounded at 50 × 20 = 1000 — exactly the SDK
+    ceiling. Cosine sim still picks up the highest-confidence shared
+    titles for each peer; lightly-rated peer titles drop out, which is
+    desirable (low-signal noise) rather than a correctness regression.
+
+    Empty peer_ids returns `{}` without hitting SQL.
     """
     if not peer_ids:
         return {}
     rows = ctx.sql.query(
-        "SELECT user_id, media_id, rating FROM otaku_user_media "
-        "WHERE user_id = ANY($1::TEXT[]) "
-        "AND media_type = 'anime' AND rating IS NOT NULL",
-        [list(peer_ids)],
+        "SELECT user_id, media_id, rating FROM ("
+        "  SELECT user_id, media_id, rating, "
+        "    ROW_NUMBER() OVER ("
+        "      PARTITION BY user_id ORDER BY rating DESC, media_id"
+        "    ) AS rn "
+        "  FROM otaku_user_media "
+        "  WHERE user_id = ANY($1::TEXT[]) "
+        "  AND media_type = 'anime' AND rating IS NOT NULL"
+        ") sub "
+        "WHERE rn <= $2",
+        [list(peer_ids), RECOMMEND_PEER_RATING_CAP],
     ) or []
     out: dict[str, dict[int, float]] = {}
     for r in rows:

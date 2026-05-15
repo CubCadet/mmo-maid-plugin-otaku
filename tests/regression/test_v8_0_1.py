@@ -224,10 +224,16 @@ _FAV_SAMPLE = {
 }
 
 
+# regression-fix (v10.0.5): the v8.0.1 doctrine asserted the DO UPDATE clause
+# contained `is_favorite = EXCLUDED.is_favorite` / `status = EXCLUDED.status`
+# as anchor strings, defending against regressions that drop the column from
+# the update path. v10.0.5 rewrote `_upsert_user_media` to use COALESCE
+# (`is_favorite = COALESCE($7, ...)`, `status = COALESCE($6, ...)`) because
+# the prior f-string SET-clause builder was banned by the SDK's "no f-string
+# SQL" rule. The same anti-regression intent is preserved: the assertions
+# now look for the COALESCE shape on the corresponding column.
 def test_favorite_upsert_sql_anchors_is_favorite_column():
-    """The /favorite-add INSERT must have `is_favorite = EXCLUDED.is_favorite`
-    in its DO UPDATE clause so a regression that drops the column from the
-    update path can't pass on a coincidental `True in params` match."""
+    """The /favorite-add INSERT's DO UPDATE must touch is_favorite via COALESCE."""
     import json
     ctx = MockContext()
     ctx.kv.set("last_anime:user:anchor1", 555, ttl_seconds=3600)
@@ -238,14 +244,14 @@ def test_favorite_upsert_sql_anchors_is_favorite_column():
     p.cmd_favorite(ctx, _slash("favorite", {}, user_id="anchor1"))
     inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts, "favorite must INSERT"
-    assert "is_favorite = EXCLUDED.is_favorite" in inserts[-1]["sql"], \
-        "favorite's DO UPDATE clause must touch is_favorite"
+    sql = inserts[-1]["sql"]
+    assert "is_favorite = COALESCE(" in sql and "otaku_user_media.is_favorite" in sql, \
+        "favorite's DO UPDATE clause must touch is_favorite via COALESCE"
 
 
+# regression-fix (v10.0.5): see comment on test_favorite_upsert_sql_anchors_is_favorite_column.
 def test_watch_upsert_sql_anchors_status_column():
-    """/watch's INSERT must have `status = EXCLUDED.status` in DO UPDATE so a
-    regression that stops setting the status column can't pass on a
-    coincidental `"watching" in params` match (e.g. against media_type)."""
+    """/watch's INSERT's DO UPDATE must touch status via COALESCE."""
     import json
     ctx = MockContext()
     ctx.kv.set("last_anime:user:anchor2", 555, ttl_seconds=3600)
@@ -256,8 +262,9 @@ def test_watch_upsert_sql_anchors_status_column():
     p.cmd_watch(ctx, _slash("watch", {"status": "watching"}, user_id="anchor2"))
     inserts = [c for c in ctx.sql.executed if "INSERT INTO otaku_user_media" in c["sql"]]
     assert inserts, "watch must INSERT"
-    assert "status = EXCLUDED.status" in inserts[-1]["sql"], \
-        "watch's DO UPDATE clause must touch status"
+    sql = inserts[-1]["sql"]
+    assert "status = COALESCE(" in sql and "otaku_user_media.status" in sql, \
+        "watch's DO UPDATE clause must touch status via COALESCE"
 
 
 def test_rate_upsert_sql_anchors_rating_column():

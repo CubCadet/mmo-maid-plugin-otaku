@@ -20,6 +20,89 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.5] - 2026-05-14
+
+### SDK compliance + recommendation correctness
+
+A third audit pass on v10.0.4 surfaced two real bugs the prior audits had
+missed:
+
+1. **f-string SQL composition** in five places. The SDK's `storage:sql`
+   documentation has a hard rule: *"Use `$1, $2, …` placeholders, never
+   f-strings or `%` formatting. The upload reviewer auto-rejects f-string
+   SQL."* v10.0.5 removes every f-string SQL composition site.
+2. **`_recommend_peer_vectors_batch` was silently truncating peer data.**
+   The SDK caps `ctx.sql.query` at 1000 rows (`min(int(limit), 1000)` in
+   the transport). v10.0.1's batched query had no per-peer cap; for active
+   servers (50 peers × ~50 typical ratings = 2500 expected rows), ~60% of
+   peer ratings were being dropped arbitrarily, silently degrading
+   recommendations.
+
+### Fixed
+- **`_recommend_peer_vectors_batch` per-peer ROW_NUMBER cap.** The batch
+  query now uses `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY rating
+  DESC, media_id)` to pick each peer's top `RECOMMEND_PEER_RATING_CAP`
+  (= 20) rated anime. 50 peers × 20 = 1000 rows max — exactly the SDK
+  ceiling. Cosine similarity now compares against each peer's strongest
+  signals deterministically; lightly-rated peer tails no longer
+  influence recommendations (which is desirable noise reduction, not
+  a correctness regression).
+- **`_recommend_user_vector` aligned to SDK ceiling.** `RECOMMEND_VECTOR_LIMIT`
+  changed from 5000 (silently capped at 1000) to 1000 (matches reality).
+  SQL now reads `LIMIT 1000` as a literal (no f-string interpolation).
+- **Five f-string SQL sites rewritten as static SQL:**
+  - `_recommend_user_vector`: `f"LIMIT {RECOMMEND_VECTOR_LIMIT}"` → static `"LIMIT 1000"`.
+  - `_cmd_poll_create`: `f"VALUES ($N, $N, $N), ..."` builder → static `UNNEST($2::TEXT[], $3::TEXT[])`.
+  - `_cmd_aotw_start`: same `UNNEST` replacement.
+  - `_upsert_user_media`: `f"ON CONFLICT ... SET {update_sql}"` → static
+    `COALESCE($6, otaku_user_media.status)` / `COALESCE($7, otaku_user_media.is_favorite)`.
+    NULL params keep the existing row's value; non-NULL params overwrite.
+    Same observable semantics.
+  - `_ach_count_rows`: `f"WHERE ... 'anime'{extra}"` → static SQL via new
+    `_ACH_COUNT_SQL` dispatch table. Unknown `where_extra` values now
+    return 0 instead of building dynamic SQL.
+
+### Added
+- **`RECOMMEND_PEER_RATING_CAP = 20`** module-level constant. Together
+  with `RECOMMEND_PEER_CAP = 50` enforces the invariant
+  `RECOMMEND_PEER_CAP × RECOMMEND_PEER_RATING_CAP ≤ 1000` (SDK ceiling).
+- **`_ACH_COUNT_SQL` dispatch table** — static SQL keyed on `where_extra`.
+
+### Changed
+- **`RECOMMEND_VECTOR_LIMIT` = 1000** (was 5000). Aligns the constant
+  with the SDK's actual cap; previously the difference was a silent lie.
+
+### Doctrine carve-outs
+- `tests/regression/test_v10_0_1.py::test_recommend_peer_vectors_batch_uses_array_param`
+  — params shape changed (now `[peer_ids, cap]`); SQL now includes
+  `ROW_NUMBER()` + `PARTITION BY user_id`. Carve-out explains the SDK
+  1000-row ceiling that motivated the per-peer cap.
+- `tests/regression/test_v10_0_3.py::test_poll_options_use_single_multi_row_insert`
+  and `test_aotw_candidates_use_single_multi_row_insert` — both assert
+  the new UNNEST SQL shape and the (poll_id, array...) param ordering.
+- `tests/regression/test_v7_1_0.py::test_start_inserts_candidates_and_posts_buttons`
+  and `tests/regression/test_v7_2_0.py::test_create_inserts_options_in_order`
+  — the v10.0.3 carve-outs are extended: now also document the v10.0.5
+  UNNEST shape (two-param INSERT instead of N×2 / N×3 flat params).
+- `tests/regression/test_v8_0_1.py::test_favorite_upsert_sql_anchors_is_favorite_column`
+  and `test_watch_upsert_sql_anchors_status_column` — assertion changed
+  from `EXCLUDED.<col>` to `COALESCE($N, otaku_user_media.<col>)`. Same
+  anti-regression intent (the DO UPDATE must touch the column), only the
+  shape changed.
+
+### Tests
+- 11 new immutable contracts in `tests/regression/test_v10_0_5.py`:
+  - Source scan rejects any future f-string SQL composition.
+  - `RECOMMEND_PEER_RATING_CAP` exists; `RECOMMEND_PEER_CAP × cap ≤ 1000`.
+  - Batch query uses `ROW_NUMBER()` + `PARTITION BY user_id` + `rn <= $2`.
+  - `RECOMMEND_VECTOR_LIMIT ≤ 1000` (matches SDK cap).
+  - LIMIT clause is a literal in the SQL, not an f-string.
+  - Poll + AOTW INSERTs use UNNEST.
+  - `_upsert_user_media` uses COALESCE statically.
+  - `_ach_count_rows` dispatch table is fully static; unknown
+    `where_extra` returns 0.
+- Suite total: 613 tests (was 602), all green.
+
 ## [10.0.4] - 2026-05-14
 
 ### Final audit cleanup — defensive bounds + test hardening
