@@ -25,6 +25,7 @@ import random
 import re
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 
 from mmo_maid_sdk import (
@@ -62,6 +63,14 @@ _SCHEMA_DDL = (
     "  status TEXT NOT NULL,"
     "  is_favorite BOOLEAN NOT NULL DEFAULT FALSE,"
     "  added_at TIMESTAMP NOT NULL DEFAULT NOW(),"
+    # v10.0.7 — folded into the initial CREATE TABLE so fresh installs
+    # don't need separate ALTER ADD COLUMN statements against the host's
+    # DDL rate limit. The standalone _SCHEMA_RATING_DDL / _SCHEMA_EPISODES_DDL
+    # in `_bootstrap_schema` remain to cover existing v2.0-era tables
+    # that pre-date these columns; they no-op via IF NOT EXISTS on fresh
+    # installs.
+    "  rating SMALLINT,"
+    "  episodes_watched SMALLINT DEFAULT 0,"
     "  PRIMARY KEY (user_id, media_id, media_type))"
 )
 _SCHEMA_INDEX_DDL = (
@@ -2233,11 +2242,20 @@ def _jikan_query(
             return cached
 
     _rate_acquire("jikan")
+    # v10.0.7 — SDK's ctx.http.get(url, *, headers=None) does NOT accept a
+    # `params` kwarg. v9.1.0 shipped with the wrong signature and the call
+    # was silently failing as "TypeError: unexpected keyword argument 'params'"
+    # → caught by the bare-Exception clause and surfaced as "jikan call
+    # failed" in the logs. v10.0.7 URL-encodes params into the query string
+    # directly. Same goes for the response shape: SDK returns `status` /
+    # `body_bytes`, not `status_code` / `body`.
     url = f"{JIKAN_BASE_URL}{path}"
+    if params:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}{urllib.parse.urlencode(params, doseq=True)}"
     try:
         resp = ctx.http.get(
             url,
-            params=params or {},
             headers={"Accept": "application/json"},
         )
     except RpcTimeoutError as exc:
@@ -2257,10 +2275,14 @@ def _jikan_query(
         ctx.log(f"jikan call failed: {exc}", level="error", tags=["jikan", "http"])
         return None
 
-    status = (resp or {}).get("status_code") or (resp or {}).get("status") or 0
+    # v10.0.7 — `status_code`/`body` were never the SDK's field names; they
+    # were a pre-existing typo. The `or .get("status")` fallback masked the
+    # bug. Both old fields kept here as defensive fallbacks while we let
+    # callers re-validate.
+    status = (resp or {}).get("status") or (resp or {}).get("status_code") or 0
     if not isinstance(status, int) or status < 200 or status >= 300:
         return None
-    body = (resp or {}).get("body")
+    body = (resp or {}).get("body_bytes") or (resp or {}).get("body")
     if not body:
         return None
     try:
@@ -2296,11 +2318,16 @@ def _kitsu_query(
             return cached.get("data")  # unwrap the cache envelope
 
     _rate_acquire("kitsu")
+    # v10.0.7 — see _jikan_query for the same fix rationale: SDK
+    # `ctx.http.get(url, *, headers=None)` doesn't take `params`; encode
+    # into the URL. Response fields are `status` / `body_bytes`.
     url = f"{KITSU_BASE_URL}{path}"
+    if params:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}{urllib.parse.urlencode(params, doseq=True)}"
     try:
         resp = ctx.http.get(
             url,
-            params=params or {},
             headers={"Accept": "application/vnd.api+json"},
         )
     except RpcTimeoutError as exc:
@@ -2320,10 +2347,10 @@ def _kitsu_query(
         ctx.log(f"kitsu call failed: {exc}", level="error", tags=["kitsu", "http"])
         return None
 
-    status = (resp or {}).get("status_code") or (resp or {}).get("status") or 0
+    status = (resp or {}).get("status") or (resp or {}).get("status_code") or 0
     if not isinstance(status, int) or status < 200 or status >= 300:
         return None
-    body = (resp or {}).get("body")
+    body = (resp or {}).get("body_bytes") or (resp or {}).get("body")
     if not body:
         return None
     try:
@@ -2666,6 +2693,28 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
         pass
 
 
+# v10.0.7 — the host enforces a strict DDL rate limit (5 statements/hour
+# per tenant). A fresh install of v10.0.6 hit the cap at the 6th DDL and
+# crashed `on_ready` before half the tables existed.
+#
+# v10.0.7 makes bootstrap **resilient and resumable**:
+#   1) A schema-version KV marker (`otaku:schema_version`) short-circuits
+#      the whole bootstrap once the install is complete. Subsequent boots
+#      issue ZERO DDL.
+#   2) On `RateLimitError` mid-bootstrap we log a warning and return
+#      cleanly — the marker stays unset, so the next worker boot picks up
+#      where we left off (each individual DDL is idempotent via
+#      `IF NOT EXISTS`, so re-running prior ones is a no-op but counts
+#      against the budget; across ~3 worker restarts a fresh install
+#      completes).
+#   3) v2.1/v2.2 ALTER ADD COLUMN statements were folded into the
+#      `otaku_user_media` CREATE TABLE for fresh installs (the ALTERs
+#      remain in the bootstrap list to cover existing v2.0-era tables
+#      that don't yet have the columns).
+_SCHEMA_VERSION_KV = "otaku:schema_version"
+_CURRENT_SCHEMA_VERSION = "10.0.7"
+
+
 def _bootstrap_schema(ctx: Context) -> None:
     """Create the otaku_user_media table, its index, and additive columns. Idempotent.
 
@@ -2674,34 +2723,73 @@ def _bootstrap_schema(ctx: Context) -> None:
     truth across every upgrade path. The v7→v8 rename runs first so the
     `CREATE TABLE IF NOT EXISTS otaku_user_media` below is a no-op on
     upgraded installs and a real create on fresh installs.
+
+    v10.0.7 — fast path: if `otaku:schema_version` matches the current
+    version, return without touching SQL. The host's DDL rate limit (5
+    statements/hour) bites on full re-runs; this gates them to once
+    per tenant.
     """
-    # v8.0.0 — must run first; later DDLs assume the new table name.
-    _migrate_v7_to_v8(ctx)
-    ctx.sql.execute(_SCHEMA_DDL)
-    ctx.sql.execute(_SCHEMA_INDEX_DDL)
-    # v2.1.0
-    ctx.sql.execute(_SCHEMA_RATING_DDL)
-    # v2.2.0
-    ctx.sql.execute(_SCHEMA_EPISODES_DDL)
-    # v3.0.0
-    ctx.sql.execute(_SCHEMA_SERVER_WATCHLIST_DDL)
-    # v3.2.0
-    ctx.sql.execute(_SCHEMA_WATCH_PARTY_DDL)
-    ctx.sql.execute(_SCHEMA_WATCH_PARTY_MEMBERS_DDL)
-    # v4.0.0
-    ctx.sql.execute(_SCHEMA_NOTIFICATIONS_DDL)
-    # v7.0.0
-    ctx.sql.execute(_SCHEMA_REVIEWS_DDL)
-    # v7.1.0
-    ctx.sql.execute(_SCHEMA_AOTW_POLLS_DDL)
-    ctx.sql.execute(_SCHEMA_AOTW_CANDIDATES_DDL)
-    ctx.sql.execute(_SCHEMA_AOTW_VOTES_DDL)
-    # v7.2.0
-    ctx.sql.execute(_SCHEMA_POLLS_DDL)
-    ctx.sql.execute(_SCHEMA_POLL_OPTIONS_DDL)
-    ctx.sql.execute(_SCHEMA_POLL_VOTES_DDL)
-    # v10.0.0
-    ctx.sql.execute(_SCHEMA_ACHIEVEMENTS_DDL)
+    # v10.0.7 fast path.
+    try:
+        if ctx.kv.get(_SCHEMA_VERSION_KV) == _CURRENT_SCHEMA_VERSION:
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        # v8.0.0 — must run first; later DDLs assume the new table name.
+        _migrate_v7_to_v8(ctx)
+        ctx.sql.execute(_SCHEMA_DDL)
+        ctx.sql.execute(_SCHEMA_INDEX_DDL)
+        # v2.1.0 — still issued for installs whose v2.0 table predated the
+        # column. Fresh v10.0.7 installs already have `rating` from
+        # `_SCHEMA_DDL`; this ALTER becomes a no-op via IF NOT EXISTS
+        # (still costs one DDL slot against the rate limit on first run).
+        ctx.sql.execute(_SCHEMA_RATING_DDL)
+        # v2.2.0 — same; fresh installs already have `episodes_watched`.
+        ctx.sql.execute(_SCHEMA_EPISODES_DDL)
+        # v3.0.0
+        ctx.sql.execute(_SCHEMA_SERVER_WATCHLIST_DDL)
+        # v3.2.0
+        ctx.sql.execute(_SCHEMA_WATCH_PARTY_DDL)
+        ctx.sql.execute(_SCHEMA_WATCH_PARTY_MEMBERS_DDL)
+        # v4.0.0
+        ctx.sql.execute(_SCHEMA_NOTIFICATIONS_DDL)
+        # v7.0.0
+        ctx.sql.execute(_SCHEMA_REVIEWS_DDL)
+        # v7.1.0
+        ctx.sql.execute(_SCHEMA_AOTW_POLLS_DDL)
+        ctx.sql.execute(_SCHEMA_AOTW_CANDIDATES_DDL)
+        ctx.sql.execute(_SCHEMA_AOTW_VOTES_DDL)
+        # v7.2.0
+        ctx.sql.execute(_SCHEMA_POLLS_DDL)
+        ctx.sql.execute(_SCHEMA_POLL_OPTIONS_DDL)
+        ctx.sql.execute(_SCHEMA_POLL_VOTES_DDL)
+        # v10.0.0
+        ctx.sql.execute(_SCHEMA_ACHIEVEMENTS_DDL)
+    except RateLimitError as exc:
+        # v10.0.7 — the host caps DDL at 5 statements/hour. Mid-bootstrap
+        # rate-limits leave the install partially complete; mark progress
+        # by NOT setting the version marker, log a warning so operators
+        # can correlate, and return cleanly. The next worker restart
+        # re-fires `on_ready` for this server and picks up the remaining
+        # DDLs (each `IF NOT EXISTS` so re-running prior ones is safe).
+        try:
+            ctx.log(
+                "schema bootstrap rate-limited; will resume on next worker boot",
+                level="warning",
+                tags=["bootstrap", "rate-limit"],
+                retry_after=getattr(exc, "retry_after", None),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    # v10.0.7 — bootstrap completed fully; gate subsequent boots.
+    try:
+        ctx.kv.set(_SCHEMA_VERSION_KV, _CURRENT_SCHEMA_VERSION)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @plugin.on_install

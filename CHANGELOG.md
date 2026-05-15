@@ -20,6 +20,102 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.7] - 2026-05-14
+
+### Second-launch environment patch
+
+v10.0.6's first-boot fixes (to_regclass migration, command_options
+compat, /help chunking) got the plugin past `on_ready` for the first
+time and revealed two further live-host realities the suite hadn't
+exercised:
+
+1. **The host enforces a strict DDL rate limit: 5 statements/hour per
+   tenant.** v10.0.6's `_bootstrap_schema` issued 16 DDLs on fresh
+   install; it hit the cap at the 6th statement (`_SCHEMA_WATCH_PARTY_DDL`)
+   and crashed `on_ready` with `RateLimitError`, leaving the schema
+   half-applied. Every subsequent worker boot crashed the same way
+   because `CREATE/ALTER IF NOT EXISTS` still counts against the
+   budget even when it's a no-op.
+2. **`ctx.http.get` doesn't accept a `params` kwarg.** v9.1.0's
+   `_jikan_query` and `_kitsu_query` shipped calling
+   `ctx.http.get(url, params={...}, headers={...})`. Every call has
+   been raising `TypeError: unexpected keyword argument 'params'`
+   since v9.1.0; the bare-Exception clause caught it and surfaced
+   the failure as "jikan call failed" / "kitsu call failed" in the
+   logs. Only visible now because the AniList primary path started
+   returning unparseable JSON on the live host, exposing the broken
+   fallback. The response-shape read was also wrong: SDK returns
+   `status` / `body_bytes`; the code read `status_code` / `body`.
+
+Known unresolved issue (defer to v10.0.8): `/stats` and `/recommend`
+return `RPC error (sql.query): SQL execution failed. Check your query
+syntax and parameters.` from the live host. Cause not yet identified;
+possibly collateral from the half-bootstrapped schema in v10.0.6. Will
+be re-tested once v10.0.7's bootstrap completes successfully.
+
+### Fixed
+- **`_bootstrap_schema` is now rate-limit resilient.** New constants
+  `_SCHEMA_VERSION_KV` (`"otaku:schema_version"`) and
+  `_CURRENT_SCHEMA_VERSION` (`"10.0.7"`). On entry, the function
+  reads the marker and short-circuits if it matches — subsequent
+  boots issue ZERO DDL, eliminating the rate-limit-on-every-boot
+  loop. Bootstrap body is wrapped in `try: ... except RateLimitError`;
+  on rate-limit it logs a warning (with `retry_after`) and returns
+  cleanly without crashing `on_ready`. The marker stays unset on
+  partial bootstrap so the next worker restart resumes (each DDL is
+  `IF NOT EXISTS`, so re-running prior ones is safe). Across ~3
+  worker restarts a fresh install completes the full 14-table schema.
+- **`rating` and `episodes_watched` folded into the otaku_user_media
+  CREATE TABLE.** Reduces fresh-install DDL count by 2 (against the
+  host's 5/hour budget) by carrying the columns from the initial
+  create. The legacy `_SCHEMA_RATING_DDL` and `_SCHEMA_EPISODES_DDL`
+  ALTERs remain in the bootstrap list to cover existing v2.0-era
+  tables that pre-date the columns; on fresh installs they no-op via
+  `IF NOT EXISTS` (but still count one DDL slot each — a deliberate
+  trade for upgrade-path safety).
+- **`_jikan_query` and `_kitsu_query` URL-encode params instead of
+  passing a `params=` kwarg.** Uses `urllib.parse.urlencode(params,
+  doseq=True)` appended to the URL. Restores the AniList → Jikan →
+  Kitsu fallback chain that's been silently broken since v9.1.0.
+  Also corrects the response-field read: `status` / `body_bytes`
+  (with `status_code` / `body` kept as defensive fallbacks during
+  the transition).
+
+### Added
+- **`_SCHEMA_VERSION_KV` + `_CURRENT_SCHEMA_VERSION` constants.**
+  Pinned by a regression test so future contributors don't rename
+  the KV key (which would invalidate every existing tenant's marker
+  and force a full re-bootstrap).
+
+### Doctrine carve-outs
+- `tests/regression/test_v2_0_0.py::test_schema_ddl_idempotent` —
+  the second `_bootstrap_schema` call now emits ZERO SQL (was: ≥1 SQL
+  in v10.0.6, was: 2× first-call in pre-v10.0.6). Same idempotency
+  contract; the marker just makes it explicit.
+- `tests/test_plugin.py::test_schema_bootstrap_is_idempotent` —
+  same rewrite.
+
+### Tests
+- 13 new immutable contracts in `tests/regression/test_v10_0_7.py`:
+  - Marker-present fast path issues zero SQL.
+  - Marker set on successful bootstrap.
+  - `_CURRENT_SCHEMA_VERSION = "10.0.7"` and `_SCHEMA_VERSION_KV =
+    "otaku:schema_version"` are pinned.
+  - Stale marker value (e.g., "10.0.6") triggers a full re-run.
+  - `RateLimitError` mid-bootstrap is caught (function does NOT
+    raise) and marker stays unset.
+  - Two-call recovery flow: partial then complete.
+  - `_SCHEMA_DDL` includes `rating SMALLINT` and `episodes_watched
+    SMALLINT` columns.
+  - `_jikan_query` URL-encodes params into the query string (does
+    NOT pass `params=` to `ctx.http.get`).
+  - `_jikan_query` reads the `body_bytes` response field.
+  - `_jikan_query` correctly appends with `&` when the path already
+    contains `?`.
+  - `_kitsu_query` same shape.
+  - End-to-end: `_search_media` falls back to Jikan/MAL when AniList
+    returns None — restoring v9.1's broken-since-shipping fallback.
+
 ## [10.0.6] - 2026-05-14
 
 ### First-boot environment patch

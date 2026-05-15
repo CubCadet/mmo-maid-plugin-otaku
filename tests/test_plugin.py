@@ -477,17 +477,16 @@ def _list_event(options: dict | None = None, **extra) -> dict:
 
 def test_schema_bootstrap_is_idempotent():
     """Running _bootstrap_schema twice must not raise — CREATE/ALTER IF NOT EXISTS."""
-    # regression-fix (v10.0.6): the second call now emits FEWER SQL
-    # statements than the first because `_migrate_v7_to_v8` short-circuits
-    # via the KV marker set on the first run. Idempotency is preserved (no
-    # raises); the doubling expectation no longer holds and was always
-    # an over-specification of the contract.
+    # regression-fix (v10.0.6): second call emitted FEWER SQL statements.
+    # regression-fix (v10.0.7): second call now emits ZERO SQL — the whole
+    # bootstrap short-circuits via the `otaku:schema_version` marker. The
+    # host caps DDL at 5/hour, so any per-boot DDL would burn the budget.
     ctx = MockContext()
     p._bootstrap_schema(ctx)
     first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)
-    # Second call still runs the non-migration DDLs (each idempotent).
-    assert len(ctx.sql.executed) > first_count
+    # Second call is a no-op via the schema-version marker.
+    assert len(ctx.sql.executed) == first_count
     assert all(
         "IF NOT EXISTS" in call["sql"]
         for call in ctx.sql.executed

@@ -94,19 +94,21 @@ def test_schema_ddl_idempotent():
     # versions extend the schema. The real contract is "calling it twice does
     # not raise" (idempotency), which is what we now assert.
     #
-    # regression-fix (v10.0.6): the second call now emits FEWER SQL statements
-    # than the first — `_migrate_v7_to_v8` short-circuits via the KV marker
-    # set on the first call's success. The "doesn't raise + emits some DDLs"
-    # contract is preserved; the doubling expectation was over-specified.
+    # regression-fix (v10.0.6): the second call emitted FEWER SQL statements
+    # than the first — `_migrate_v7_to_v8` short-circuited via the KV marker.
+    #
+    # regression-fix (v10.0.7): the second call now emits ZERO SQL — the
+    # WHOLE bootstrap short-circuits via `otaku:schema_version`. That's the
+    # whole point of the marker (the host caps DDL at 5/hour, so re-issuing
+    # idempotent DDLs on every boot would burn the budget). The "doesn't
+    # raise" contract is preserved.
     ctx = MockContext()
     p._bootstrap_schema(ctx)
     first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)
-    # Second call still runs the non-migration DDLs (CREATE TABLE IF NOT
-    # EXISTS, ADD COLUMN IF NOT EXISTS, etc.) — these are themselves
-    # idempotent. The migration steps are now gated by the KV marker.
-    assert len(ctx.sql.executed) > first_count, \
-        "second _bootstrap_schema call should still run its idempotent DDLs"
+    # Second call is a no-op: marker is set, function returns before any SQL.
+    assert len(ctx.sql.executed) == first_count, \
+        "second _bootstrap_schema call must short-circuit via the schema-version marker"
 
 
 # ── /favorite ───────────────────────────────────────────────────────────────
