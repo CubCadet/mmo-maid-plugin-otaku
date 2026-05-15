@@ -133,19 +133,21 @@ def test_cosine_uses_shared_keys_only_for_dot_but_full_norm():
 # ── _recommend_candidates ───────────────────────────────────────────────────
 
 
+# regression-fix (v10.0.1): _recommend_candidates now batches all peer
+# vectors via `WHERE user_id = ANY($1::TEXT[])` instead of one SELECT per
+# peer. The mock shape changed from a per-call iterator returning a flat
+# row list to a single response carrying every peer's rows tagged with
+# `user_id`. Original assertion (peers_kept + candidate set) is preserved
+# — only the SQL emission shape is adapted.
 def test_candidates_excludes_target_tracked_ids():
     """Anime the target already has in their tracker (any status) never surface."""
     ctx = MockContext()
-    # Target's vector is set directly; SQL only needs to answer the
-    # tracked-set + peer-id + peer-vector queries.
     target_vec = {1: 9.0, 2: 8.0, 3: 7.0, 4: 6.0}
 
     queries: list[str] = []
 
     def _q(sql, params=None):
         queries.append(sql)
-        # First call after target_vec is built: _recommend_tracked_ids.
-        # Then _recommend_peer_ids. Then per-peer _recommend_user_vector.
         if (
             "SELECT media_id FROM otaku_user_media WHERE user_id = $1" in sql
             and "rating" not in sql
@@ -155,39 +157,31 @@ def test_candidates_excludes_target_tracked_ids():
             return [{"media_id": 1}, {"media_id": 99}]  # target tracks 1 and 99
         if "SELECT DISTINCT user_id" in sql:
             return [{"user_id": "peer"}]
-        # peer vector: peer has rated 1, 2, 3, 99, and also brand-new 42.
-        return [
-            {"media_id": 1, "rating": 18},
-            {"media_id": 2, "rating": 18},
-            {"media_id": 3, "rating": 16},
-            {"media_id": 99, "rating": 16},
-            {"media_id": 42, "rating": 20},
-        ]
+        # v10.0.1: batched peer vector — rows carry user_id.
+        if "user_id = ANY" in sql:
+            return [
+                {"user_id": "peer", "media_id": 1, "rating": 18},
+                {"user_id": "peer", "media_id": 2, "rating": 18},
+                {"user_id": "peer", "media_id": 3, "rating": 16},
+                {"user_id": "peer", "media_id": 99, "rating": 16},
+                {"user_id": "peer", "media_id": 42, "rating": 20},
+            ]
+        return []
 
     ctx.sql.query = _q
     candidates, peers_kept = p._recommend_candidates(ctx, "target", target_vec)
     ids = {c["media_id"] for c in candidates}
     assert peers_kept == 1
-    # 1 and 99 are tracked — excluded. 2 and 3 are in target_vec — but the
-    # spec excludes only tracked rows; 2 and 3 ARE in target_vec which means
-    # the target has them in otaku_user_anime, so they'd also be in tracked
-    # ids in reality. The candidate set is what the peer rated that the
-    # target hasn't tracked — only 42 here.
     assert ids == {42}
 
 
+# regression-fix (v10.0.1): same batched-peer-vector adaptation as the
+# test above. Original assertion (only peer B qualifies; candidate {200})
+# is preserved — peer rows now arrive in one response tagged with user_id.
 def test_candidates_drop_peers_below_min_shared():
     """Peers sharing fewer than RECOMMEND_MIN_SHARED_TITLES rated titles don't count."""
     ctx = MockContext()
     target_vec = {1: 9.0, 2: 8.0, 3: 7.0}
-
-    peer_iter = iter([
-        # peer A: shares 1 title — dropped
-        [{"media_id": 1, "rating": 18}, {"media_id": 100, "rating": 16}],
-        # peer B: shares 3 titles — kept
-        [{"media_id": 1, "rating": 18}, {"media_id": 2, "rating": 16},
-         {"media_id": 3, "rating": 14}, {"media_id": 200, "rating": 20}],
-    ])
 
     def _q(sql, params=None):
         if (
@@ -196,15 +190,25 @@ def test_candidates_drop_peers_below_min_shared():
             and "is_favorite" not in sql
             and "status" not in sql
         ):
-            return []  # target tracks nothing extra beyond the rated set
+            return []
         if "SELECT DISTINCT user_id" in sql:
             return [{"user_id": "A"}, {"user_id": "B"}]
-        return next(peer_iter)
+        if "user_id = ANY" in sql:
+            return [
+                # peer A: shares 1 title — dropped
+                {"user_id": "A", "media_id": 1, "rating": 18},
+                {"user_id": "A", "media_id": 100, "rating": 16},
+                # peer B: shares 3 titles — kept
+                {"user_id": "B", "media_id": 1, "rating": 18},
+                {"user_id": "B", "media_id": 2, "rating": 16},
+                {"user_id": "B", "media_id": 3, "rating": 14},
+                {"user_id": "B", "media_id": 200, "rating": 20},
+            ]
+        return []
 
     ctx.sql.query = _q
     candidates, peers_kept = p._recommend_candidates(ctx, "target", target_vec)
-    assert peers_kept == 1  # only B qualified
-    # B's exclusive rec is media_id 200; 100 came from A and A was dropped.
+    assert peers_kept == 1
     assert {c["media_id"] for c in candidates} == {200}
 
 

@@ -20,6 +20,84 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.1] - 2026-05-14
+
+### Post-audit safety + performance patch
+
+Closes the four 🟡 findings from the v10.0.0 audit. Zero new user-visible
+surfaces, zero capability changes, zero schema migrations. One safety fix
+(TOCTOU on `/review` modal submits) plus three perf fixes that collapse
+N+1 query patterns and broaden the AniList in-process cache. Same outputs
+on every observable behavior — only the underlying SQL/cache shape
+changes.
+
+### Fixed
+- **TOCTOU on review upsert (`_upsert_review`).** The v7 doctrine read the
+  existing row first and then INSERT-or-UPDATEd; two concurrent modal
+  submits for the same `(user, media)` could both observe "no existing"
+  and race the INSERT, surfacing IntegrityError out of
+  `_handle_review_submit`. Collapsed into a single
+  `INSERT ... ON CONFLICT (user_id, media_id) DO UPDATE ... RETURNING
+  (xmax = 0)` query. The new-vs-updated distinction (used to pick
+  `REVIEW_SAVED_NEW` vs `REVIEW_SAVED_EDIT`) is preserved via the xmax
+  predicate.
+
+### Performance
+- **Batched peer-vector fetch in `_recommend_candidates`.** Replaced 50
+  sequential SELECTs (one per peer) with a single
+  `WHERE user_id = ANY($1::TEXT[])` query, hydrating every peer's rating
+  vector in one round-trip. New helper `_recommend_peer_vectors_batch`.
+- **Batched achievement aggregates.** `/achievements` used to fan out 16
+  COUNT queries per call (10 predicates + 6 progress lines). Added
+  `_ach_load_stats` — one FILTER aggregate over `otaku_user_media` for
+  total/favorites/completed/rated, plus one paired subquery for
+  reviews + subscriptions — and `_ach_stats_scope` (reentrant context
+  manager) that pre-loads stats once per `cmd_achievements` call so
+  predicates and progress lines read from the cached row. Outside the
+  scope, helpers fall back to per-call SQL so ad-hoc callers (tests,
+  future integrations) keep their existing behavior.
+- **Pagination cache coverage.** Every paginated `_render_*` now passes
+  `cache=True` to `_anilist_query` unconditionally (was `cache=(page == 1)`
+  in 7 call sites). The cache key already varies by `page`, so each page
+  gets its own 5-minute-TTL entry; the `ANILIST_CACHE_MAX_ENTRIES = 256`
+  LRU cap bounds memory. Covers `_render_discover`, `_render_trending`,
+  `_render_character_popular`, `_render_manga_discover`,
+  `_render_premieres`, and `_search_by_genre_tag_blend` (used by `/mood`
+  + `/find`).
+
+### Doctrine carve-outs
+v10.0.1 is a PATCH but adapts 7 regression assertions because they pinned
+implementation details (SQL emission shape, cache flag) that the perf
+fixes legitimately change. Business behavior is preserved verbatim;
+each adapted test carries an explicit `# regression-fix (v10.0.1):`
+comment explaining what changed and why.
+
+- `tests/regression/test_v7_0_0.py`:
+  `test_modal_submit_inserts_new_row`,
+  `test_modal_submit_updates_existing_row` — switched from asserting
+  separate INSERT/UPDATE execute calls to asserting one combined
+  `ON CONFLICT` upsert query.
+- `tests/regression/test_v6_0_0.py`:
+  `test_candidates_excludes_target_tracked_ids`,
+  `test_candidates_drop_peers_below_min_shared` — mocks updated to
+  return one batched response (rows tagged with `user_id`) instead of
+  a per-peer iterator.
+- `tests/regression/test_v10_0_0.py`:
+  `test_check_and_award_inserts_only_newly_met_achievements`,
+  `test_check_and_award_uses_idempotent_insert` — mocks updated to
+  return the new aggregate-row shape (`{"total", "favorites",
+  "completed", "rated"}` plus `{"reviews", "subs"}`).
+- `tests/regression/test_v8_3_0.py`:
+  renamed `test_character_popular_uses_first_page_cache` →
+  `test_character_popular_caches_every_page`; assertion flipped from
+  "page 2+ should NOT cache" to "every page caches."
+
+### Tests
+- 17 new immutable contracts in `tests/regression/test_v10_0_1.py`
+  pinning the four fixes (TOCTOU collapse, batch peer vectors,
+  scope-cached achievement aggregates, all-page pagination cache).
+- Suite total: 586 tests (was 569), all green.
+
 ## [10.0.0] - 2026-05-14
 
 ### Phase 10 — Maturity & marketplace-featured release

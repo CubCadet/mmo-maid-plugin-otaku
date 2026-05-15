@@ -218,9 +218,14 @@ def test_character_popular_handles_character_with_no_parent_media(monkeypatch):
     assert "5" in body  # favourites count
 
 
-def test_character_popular_uses_first_page_cache(monkeypatch):
-    """Page 1 of the leaderboard is cache-friendly (changes slowly); pages 2+
-    should NOT be cached (fewer hits, less staleness sensitivity)."""
+# regression-fix (v10.0.1): the v8.3 doctrine cached only page 1 of the
+# popular-characters leaderboard to dodge stale pages 2+. v10.0.1 cached
+# every page after the audit identified pagination re-fetches as a hot
+# path — the 5-minute TTL bounds staleness and the LRU cap (256 entries)
+# bounds memory. The new contract is "every page is cacheable" — the
+# original spirit (page 1 stays cache-friendly) is preserved.
+def test_character_popular_caches_every_page(monkeypatch):
+    """Pagination buttons should hit the in-process cache, not re-fetch."""
     seen: dict = {}
 
     def _spy(_ctx, query, variables=None, cache=False):
@@ -232,4 +237,4 @@ def test_character_popular_uses_first_page_cache(monkeypatch):
     p.cmd_character_popular(ctx, _slash("character-popular", user_id="u"))
     p._render_character_popular(ctx, page=2, deferred=True)
     assert seen[1] is True, "page 1 should use the in-process cache"
-    assert seen[2] is False, "page 2+ should NOT cache"
+    assert seen[2] is True, "v10.0.1: page 2+ should also cache"

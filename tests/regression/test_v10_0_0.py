@@ -140,33 +140,29 @@ def test_check_and_award_returns_empty_for_user_with_nothing():
     assert awarded == []
 
 
+# regression-fix (v10.0.1): the v10 doctrine ran one COUNT query per
+# predicate (16 round-trips per /achievements call). v10.0.1 collapses them
+# into a single FILTER-aggregate over otaku_user_media plus one subquery
+# pair for reviews + notifications. Business behavior is unchanged — same
+# predicates, same awards — but the mock SQL shape changes from
+# `{"n": ...}` per-predicate to a single aggregate row with named
+# columns. Original assertion (first_anime + completed_10 fire, not
+# completed_50) is preserved verbatim.
 def test_check_and_award_inserts_only_newly_met_achievements():
-    """User has 12 completed anime → only `first_anime`, `first_favorite`
-    (no — needs is_favorite TRUE), and `completed_10` should fire on first
-    check. (Note: `first_favorite` doesn't fire because no favorites set
-    in this mock.) Second call awards nothing new."""
+    """User has 12 completed anime → first_anime + completed_10 fire."""
     ctx = MockContext()
 
     def _q(sql, params=None):
         if "otaku_achievements" in sql:
             return []  # no prior awards
-        # COUNT queries — return realistic numbers.
-        if "AND status = 'completed'" in sql:
-            return [{"n": 12}]  # 12 completed
-        if "AND is_favorite = TRUE" in sql:
-            return [{"n": 0}]
-        if "AND rating IS NOT NULL" in sql:
-            return [{"n": 0}]
-        if "FROM otaku_reviews" in sql:
-            return [{"n": 0}]
-        if "FROM otaku_notifications" in sql:
-            return [{"n": 0}]
-        # plain COUNT(*) for first_anime — return >= 1
-        return [{"n": 12}]
+        if "FROM otaku_user_media" in sql and "FILTER" in sql:
+            return [{"total": 12, "favorites": 0, "completed": 12, "rated": 0}]
+        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+            return [{"reviews": 0, "subs": 0}]
+        return [{"n": 0}]
 
     ctx.sql.query = _q
     awarded = p._check_and_award_achievements(ctx, "binge-user")
-    # Should award first_anime + completed_10. NOT completed_50 (12 < 50).
     assert "first_anime" in awarded
     assert "completed_10" in awarded
     assert "completed_50" not in awarded
@@ -190,6 +186,10 @@ def test_check_and_award_skips_already_earned():
     assert "first_anime" not in awarded
 
 
+# regression-fix (v10.0.1): see comment on
+# test_check_and_award_inserts_only_newly_met_achievements. The
+# `ON CONFLICT DO NOTHING` assertion on the INSERT is preserved verbatim;
+# only the predicate-feeding mock returns the new aggregate row shape.
 def test_check_and_award_uses_idempotent_insert():
     """The INSERT must use ON CONFLICT DO NOTHING so a race or retry can't
     error out the handler."""
@@ -198,7 +198,11 @@ def test_check_and_award_uses_idempotent_insert():
     def _q(sql, params=None):
         if "otaku_achievements" in sql:
             return []
-        return [{"n": 5}]  # qualifies everything > 0
+        if "FROM otaku_user_media" in sql and "FILTER" in sql:
+            return [{"total": 5, "favorites": 5, "completed": 5, "rated": 5}]
+        if "FROM otaku_reviews WHERE user_id = $1" in sql and "FROM otaku_notifications" in sql:
+            return [{"reviews": 5, "subs": 5}]
+        return [{"n": 5}]
 
     executes_seen: list = []
 

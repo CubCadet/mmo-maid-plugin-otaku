@@ -2426,11 +2426,15 @@ def _render_discover(
     ephemeral_reply: bool = False,
 ) -> None:
     sort_const = SORT_MAP.get(sort_key, "POPULARITY_DESC")
+    # v10.0.1: cache every page (previously page 1 only). AniList answers
+    # the same (genre, sort, page) tuple identically for the
+    # ANILIST_CACHE_TTL window, so re-fetching when a user clicks next/prev
+    # was pure waste.
     data = _anilist_query(
         ctx,
         QUERY_DISCOVER,
         {"genre": genre, "sort": [sort_const], "page": page, "perPage": PER_PAGE},
-        cache=(page == 1),
+        cache=True,
     )
     if data is None:
         _reply_anilist_failure(ctx, deferred=deferred)
@@ -2461,12 +2465,13 @@ def _render_discover(
 
 def _render_trending(ctx: Context, page: int, *, deferred: bool, ephemeral_reply: bool = False) -> None:
     season, year = _current_season()
+    # v10.0.1: cache every page (see _render_discover comment).
     data = _anilist_query(
         ctx,
         QUERY_SEASON,
         {"season": season, "year": year, "sort": ["TRENDING_DESC"],
          "page": page, "perPage": PER_PAGE},
-        cache=(page == 1),
+        cache=True,
     )
     if data is None:
         _reply_anilist_failure(ctx, deferred=deferred)
@@ -3056,11 +3061,12 @@ CHARACTER_POPULAR_PER_PAGE = 5
 
 
 def _render_character_popular(ctx: Context, page: int, *, deferred: bool) -> None:
+    # v10.0.1: cache every page (see _render_discover comment).
     data = _anilist_query(
         ctx,
         QUERY_CHARACTER_POPULAR,
         {"page": page, "perPage": CHARACTER_POPULAR_PER_PAGE},
-        cache=(page == 1),
+        cache=True,
     )
     if data is None:
         _reply_anilist_failure(ctx, deferred=deferred)
@@ -3220,11 +3226,12 @@ def _render_manga_discover(
     ctx: Context, genre: str, sort_key: str, page: int, *, deferred: bool
 ) -> None:
     sort_const = SORT_MAP.get(sort_key, "POPULARITY_DESC")
+    # v10.0.1: cache every page (see _render_discover comment).
     data = _anilist_query(
         ctx,
         QUERY_MANGA_DISCOVER,
         {"genre": genre, "sort": [sort_const], "page": page, "perPage": PER_PAGE},
-        cache=(page == 1),
+        cache=True,
     )
     if data is None:
         _reply_anilist_failure(ctx, deferred=deferred)
@@ -4290,12 +4297,13 @@ def _season_is_fresh(now: datetime | None = None) -> bool:
 def _render_premieres(
     ctx: Context, season: str, year: int, page: int, *, deferred: bool
 ) -> None:
+    # v10.0.1: cache every page (see _render_discover comment).
     data = _anilist_query(
         ctx,
         QUERY_SEASON,
         {"season": season, "year": year, "sort": ["POPULARITY_DESC"],
          "page": page, "perPage": PER_PAGE},
-        cache=(page == 1),
+        cache=True,
     )
     if data is None:
         _reply_anilist_failure(ctx, deferred=deferred)
@@ -6223,22 +6231,25 @@ def _get_review(ctx: Context, user_id: str, media_id: int) -> dict | None:
 def _upsert_review(
     ctx: Context, user_id: str, media_id: int, *, title: str, body: str
 ) -> bool:
-    """Insert or update the review. Returns True if a new row was created,
-    False if an existing one was updated."""
-    existing = _get_review(ctx, user_id, media_id)
-    if existing is None:
-        ctx.sql.execute(
-            "INSERT INTO otaku_reviews (user_id, media_id, title, body) "
-            "VALUES ($1, $2, $3, $4)",
-            [user_id, media_id, title, body],
-        )
-        return True
-    ctx.sql.execute(
-        "UPDATE otaku_reviews SET title = $1, body = $2, updated_at = NOW() "
-        "WHERE user_id = $3 AND media_id = $4",
-        [title, body, user_id, media_id],
-    )
-    return False
+    """Insert or update the review atomically. Returns True for a new row,
+    False if an existing one was updated.
+
+    v10.0.1: collapsed read-then-write into a single INSERT...ON CONFLICT
+    DO UPDATE — the prior pattern had a TOCTOU window where two concurrent
+    modal submits for the same (user, media) could both see "no existing"
+    and race the INSERT, with the loser raising IntegrityError out of
+    `_handle_review_submit`. `(xmax = 0)` distinguishes the freshly
+    inserted row from the updated one so the success message stays correct.
+    """
+    rows = ctx.sql.query(
+        "INSERT INTO otaku_reviews (user_id, media_id, title, body) "
+        "VALUES ($1, $2, $3, $4) "
+        "ON CONFLICT (user_id, media_id) DO UPDATE SET "
+        "title = EXCLUDED.title, body = EXCLUDED.body, updated_at = NOW() "
+        "RETURNING (xmax = 0) AS inserted",
+        [user_id, media_id, title, body],
+    ) or [{"inserted": True}]
+    return bool((rows[0] or {}).get("inserted", True))
 
 
 @plugin.on_slash_command("review")
@@ -7216,11 +7227,12 @@ def _search_by_genre_tag_blend(
     user. Extracted from _mood_query in v9.0 to back /find as well.
     """
     if tags:
+        # v10.0.1: cache every page (see _render_discover comment).
         data = _anilist_query(
             ctx,
             QUERY_MOOD_WITH_TAGS,
             {"genres": genres, "tags": tags, "page": page, "perPage": PER_PAGE},
-            cache=(page == 1),
+            cache=True,
         )
         if data is not None:
             page_obj = (data.get("Page") or {})
@@ -7230,11 +7242,12 @@ def _search_by_genre_tag_blend(
                 return media_list, has_next
         # Empty with tags → fall through to genre-only.
 
+    # v10.0.1: cache every page (see _render_discover comment).
     data = _anilist_query(
         ctx,
         QUERY_MOOD_GENRE_ONLY,
         {"genres": genres, "page": page, "perPage": PER_PAGE},
-        cache=(page == 1),
+        cache=True,
     )
     if data is None:
         return None, False
@@ -7508,14 +7521,131 @@ def cmd_preferences(ctx: Context, event: dict) -> None:
 # matter for correctness; it does affect display order.
 
 
+# v10.0.1 — per-call aggregate cache. Active only inside `_ach_stats_scope`;
+# `None` outside that scope, so ad-hoc predicate calls (tests, future
+# integrations) still hit SQL on every call and stay correct.
+_ACH_STATS: dict[str, object] = {"current": None}
+
+# Maps the `where_extra` argument used by predicates onto the column name in
+# the cached aggregate row. New `where_extra` values fall through to the SQL
+# path automatically — the dispatch table is the only thing to update if a
+# future predicate adds a new aggregate.
+_ACH_STATS_KEYS: dict[str, str] = {
+    "": "total",
+    "AND is_favorite = TRUE": "favorites",
+    "AND status = 'completed'": "completed",
+    "AND rating IS NOT NULL": "rated",
+}
+
+
+def _ach_load_stats(ctx: Context, user_id: str) -> dict:
+    """Single-trip aggregate fetch for every count the predicates need.
+
+    v10.0.1: collapses what used to be up to 16 sequential COUNT queries
+    per `/achievements` call (10 checks + 6 progress) into 2 SQL trips.
+    FILTER aggregates over `otaku_user_media` get all four media counts in
+    one scan; a second query takes reviews + subscriptions in one row.
+    """
+    if not user_id:
+        return {"total": 0, "favorites": 0, "completed": 0, "rated": 0,
+                "reviews": 0, "subs": 0}
+    media_rows = ctx.sql.query(
+        "SELECT "
+        "  COUNT(*) AS total, "
+        "  COUNT(*) FILTER (WHERE is_favorite = TRUE) AS favorites, "
+        "  COUNT(*) FILTER (WHERE status = 'completed') AS completed, "
+        "  COUNT(*) FILTER (WHERE rating IS NOT NULL) AS rated "
+        "FROM otaku_user_media "
+        "WHERE user_id = $1 AND media_type = 'anime'",
+        [user_id],
+    ) or [{}]
+    misc_rows = ctx.sql.query(
+        "SELECT "
+        "  (SELECT COUNT(*) FROM otaku_reviews WHERE user_id = $1) AS reviews, "
+        "  (SELECT COUNT(*) FROM otaku_notifications WHERE user_id = $1) AS subs",
+        [user_id],
+    ) or [{}]
+    m = media_rows[0] or {}
+    n = misc_rows[0] or {}
+    return {
+        "total": int(m.get("total") or 0),
+        "favorites": int(m.get("favorites") or 0),
+        "completed": int(m.get("completed") or 0),
+        "rated": int(m.get("rated") or 0),
+        "reviews": int(n.get("reviews") or 0),
+        "subs": int(n.get("subs") or 0),
+    }
+
+
+class _ach_stats_scope:
+    """Per-call memoization for achievement predicates. Reentrant — an
+    inner scope on the same user_id is a no-op so callers (e.g.
+    `cmd_achievements` wrapping `_check_and_award_achievements`) load
+    stats exactly once across the nested call."""
+    def __init__(self, ctx: Context, user_id: str):
+        self._ctx = ctx
+        self._user_id = user_id
+        self._owns = False
+
+    def __enter__(self):
+        if _ACH_STATS.get("current") is None:
+            _ACH_STATS["current"] = _ach_load_stats(self._ctx, self._user_id)
+            self._owns = True
+        return _ACH_STATS["current"]
+
+    def __exit__(self, *exc):
+        if self._owns:
+            _ACH_STATS["current"] = None
+        return False
+
+
 def _ach_count_rows(ctx: Context, user_id: str, where_extra: str = "") -> int:
-    """Helper — COUNT(*) from otaku_user_media with optional extra WHERE."""
+    """Helper — COUNT(*) from otaku_user_media with optional extra WHERE.
+
+    v10.0.1: inside an `_ach_stats_scope`, reads from the cached aggregate
+    row; outside one, falls back to the per-call SQL it always ran.
+    """
     if not user_id:
         return 0
+    stats = _ACH_STATS.get("current")
+    if isinstance(stats, dict):
+        key = _ACH_STATS_KEYS.get(where_extra)
+        if key is not None:
+            return int(stats.get(key) or 0)
     extra = f" {where_extra}" if where_extra else ""
     rows = ctx.sql.query(
         f"SELECT COUNT(*) AS n FROM otaku_user_media "
         f"WHERE user_id = $1 AND media_type = 'anime'{extra}",
+        [user_id],
+    ) or [{"n": 0}]
+    return int((rows[0] or {}).get("n") or 0)
+
+
+def _ach_count_reviews(ctx: Context, user_id: str) -> int:
+    """v10.0.1: scope-aware review count for the community / first_review
+    predicates and the reviews progress line."""
+    if not user_id:
+        return 0
+    stats = _ACH_STATS.get("current")
+    if isinstance(stats, dict):
+        return int(stats.get("reviews") or 0)
+    rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = $1",
+        [user_id],
+    ) or [{"n": 0}]
+    return int((rows[0] or {}).get("n") or 0)
+
+
+def _ach_count_subs(ctx: Context, user_id: str) -> int:
+    """v10.0.1: scope-aware subscription count for the subscriber predicate
+    and the subscriptions progress line."""
+    if not user_id:
+        return 0
+    stats = _ACH_STATS.get("current")
+    if isinstance(stats, dict):
+        return int(stats.get("subs") or 0)
+    rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = $1",
         [user_id],
     ) or [{"n": 0}]
     return int((rows[0] or {}).get("n") or 0)
@@ -7534,25 +7664,13 @@ def _ach_check_rated_25(ctx, uid):
 def _ach_check_rated_100(ctx, uid):
     return _ach_count_rows(ctx, uid, "AND rating IS NOT NULL") >= 100
 def _ach_check_first_review(ctx, uid):
-    rows = ctx.sql.query(
-        "SELECT 1 AS one FROM otaku_reviews WHERE user_id = $1 LIMIT 1",
-        [uid],
-    ) or []
-    return bool(rows)
+    return _ach_count_reviews(ctx, uid) >= 1
 def _ach_check_community(ctx, uid):
-    rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = $1",
-        [uid],
-    ) or [{"n": 0}]
-    return int((rows[0] or {}).get("n") or 0) >= 5
+    return _ach_count_reviews(ctx, uid) >= 5
 def _ach_check_polyglot(ctx, uid):
     return _get_pref_language(ctx, uid) is not None
 def _ach_check_subscriber(ctx, uid):
-    rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = $1",
-        [uid],
-    ) or [{"n": 0}]
-    return int((rows[0] or {}).get("n") or 0) >= 3
+    return _ach_count_subs(ctx, uid) >= 3
 
 
 def _ach_progress_completed(ctx, uid):
@@ -7562,15 +7680,9 @@ def _ach_progress_rated(ctx, uid):
     n = _ach_count_rows(ctx, uid, "AND rating IS NOT NULL")
     return f"{n} rated"
 def _ach_progress_reviews(ctx, uid):
-    rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = $1", [uid],
-    ) or [{"n": 0}]
-    return f"{int((rows[0] or {}).get('n') or 0)} reviews"
+    return f"{_ach_count_reviews(ctx, uid)} reviews"
 def _ach_progress_subs(ctx, uid):
-    rows = ctx.sql.query(
-        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = $1", [uid],
-    ) or [{"n": 0}]
-    return f"{int((rows[0] or {}).get('n') or 0)} subscriptions"
+    return f"{_ach_count_subs(ctx, uid)} subscriptions"
 
 
 ACHIEVEMENTS: list[dict] = [
@@ -7642,6 +7754,10 @@ def _check_and_award_achievements(ctx: Context, user_id: str) -> list[str]:
     """Run every predicate, award newly-met achievements, return the list
     of keys awarded THIS call (for the 'newly earned' surface).
 
+    v10.0.1: opens an `_ach_stats_scope` so all SQL-backed predicates share
+    one aggregate fetch. Reentrant — when called from inside
+    `cmd_achievements`'s outer scope, this is a no-op.
+
     Defensive: a SQL transport failure when fetching the already-earned
     set returns [] (no awards this round) rather than raising into the
     handler. Next call retries.
@@ -7653,26 +7769,27 @@ def _check_and_award_achievements(ctx: Context, user_id: str) -> list[str]:
     except Exception:  # noqa: BLE001 — never strand the handler
         return []
     newly_awarded: list[str] = []
-    for ach in ACHIEVEMENTS:
-        key = ach["key"]
-        if key in already:
-            continue
-        try:
-            qualifies = ach["check"](ctx, user_id)
-        except Exception:  # noqa: BLE001 — predicate must never strand the handler
-            continue
-        if not qualifies:
-            continue
-        try:
-            ctx.sql.execute(
-                "INSERT INTO otaku_achievements (user_id, achievement_key) "
-                "VALUES ($1, $2) "
-                "ON CONFLICT (user_id, achievement_key) DO NOTHING",
-                [user_id, key],
-            )
-            newly_awarded.append(key)
-        except Exception:  # noqa: BLE001
-            continue
+    with _ach_stats_scope(ctx, user_id):
+        for ach in ACHIEVEMENTS:
+            key = ach["key"]
+            if key in already:
+                continue
+            try:
+                qualifies = ach["check"](ctx, user_id)
+            except Exception:  # noqa: BLE001 — predicate must never strand the handler
+                continue
+            if not qualifies:
+                continue
+            try:
+                ctx.sql.execute(
+                    "INSERT INTO otaku_achievements (user_id, achievement_key) "
+                    "VALUES ($1, $2) "
+                    "ON CONFLICT (user_id, achievement_key) DO NOTHING",
+                    [user_id, key],
+                )
+                newly_awarded.append(key)
+            except Exception:  # noqa: BLE001
+                continue
     return newly_awarded
 
 
@@ -7685,44 +7802,48 @@ def cmd_achievements(ctx: Context, event: dict) -> None:
     target_id, display, is_self = _extract_target_user(event, opts)
     ctx.interaction.defer(ephemeral=True)
 
-    # Re-check awards for the target user. Even when viewing someone else's
-    # achievements, we re-check their predicates (cheap; just SQL COUNTs)
-    # so the count surface always reflects current state.
-    newly = _check_and_award_achievements(ctx, target_id)
-    earned = _get_user_achievements(ctx, target_id)
+    # v10.0.1: open the stats scope once. The nested call into
+    # `_check_and_award_achievements` and the progress loop below both
+    # consult the same cached aggregate row — one SQL fetch instead of 16.
+    with _ach_stats_scope(ctx, target_id):
+        # Re-check awards for the target user. Even when viewing someone
+        # else's achievements, we re-check their predicates (cheap inside
+        # the scope) so the count surface always reflects current state.
+        newly = _check_and_award_achievements(ctx, target_id)
+        earned = _get_user_achievements(ctx, target_id)
 
-    if not earned and not newly:
-        empty = S.ACHIEVEMENTS_NONE_OWN if is_self else S.ACHIEVEMENTS_NONE_OTHER.format(who=display)
-        _reply_error(ctx, empty, deferred=True)
-        return
+        if not earned and not newly:
+            empty = S.ACHIEVEMENTS_NONE_OWN if is_self else S.ACHIEVEMENTS_NONE_OTHER.format(who=display)
+            _reply_error(ctx, empty, deferred=True)
+            return
 
-    # Build the embed: newly-earned (if any), then earned list, then in-progress.
-    description_parts: list[str] = []
-    if newly:
-        names = ", ".join(
-            next((a["name"] for a in ACHIEVEMENTS if a["key"] == k), k)
-            for k in newly
-        )
-        description_parts.append(S.ACHIEVEMENTS_NEW_AWARDED.format(names=names) + "\n")
+        # Build the embed: newly-earned (if any), earned list, then in-progress.
+        description_parts: list[str] = []
+        if newly:
+            names = ", ".join(
+                next((a["name"] for a in ACHIEVEMENTS if a["key"] == k), k)
+                for k in newly
+            )
+            description_parts.append(S.ACHIEVEMENTS_NEW_AWARDED.format(names=names) + "\n")
 
-    earned_lines: list[str] = []
-    unearned_lines: list[str] = []
-    for ach in ACHIEVEMENTS:
-        line = f"**{ach['name']}** — {ach['description']}"
-        if ach["key"] in earned:
-            earned_lines.append(line)
-        else:
-            prog = ach.get("progress")
-            prog_text = ""
-            if callable(prog):
-                try:
-                    prog_text = prog(ctx, target_id) or ""
-                except Exception:  # noqa: BLE001
-                    prog_text = ""
-            if prog_text:
-                unearned_lines.append(f"{line}\n*Progress: {prog_text}*")
+        earned_lines: list[str] = []
+        unearned_lines: list[str] = []
+        for ach in ACHIEVEMENTS:
+            line = f"**{ach['name']}** — {ach['description']}"
+            if ach["key"] in earned:
+                earned_lines.append(line)
             else:
-                unearned_lines.append(line)
+                prog = ach.get("progress")
+                prog_text = ""
+                if callable(prog):
+                    try:
+                        prog_text = prog(ctx, target_id) or ""
+                    except Exception:  # noqa: BLE001
+                        prog_text = ""
+                if prog_text:
+                    unearned_lines.append(f"{line}\n*Progress: {prog_text}*")
+                else:
+                    unearned_lines.append(line)
 
     if earned_lines:
         description_parts.append(f"### {S.ACHIEVEMENTS_EARNED_HEADER}\n" + "\n".join(earned_lines))
@@ -7861,6 +7982,35 @@ def _recommend_peer_ids(ctx: Context, target_id: str) -> list[str]:
     return [str(r["user_id"]) for r in rows if r.get("user_id") is not None]
 
 
+def _recommend_peer_vectors_batch(
+    ctx: Context, peer_ids: list[str]
+) -> dict[str, dict[int, float]]:
+    """v10.0.1 — single-query batch fetch of every peer's rating vector.
+
+    Replaces a per-peer SELECT loop (50 peers × 1 query = 50 round-trips)
+    with one `WHERE user_id = ANY($1::TEXT[])` query that hydrates the full
+    {peer_id → {media_id → rating}} map in one shot. Empty peer_ids returns
+    an empty dict without hitting SQL.
+    """
+    if not peer_ids:
+        return {}
+    rows = ctx.sql.query(
+        "SELECT user_id, media_id, rating FROM otaku_user_media "
+        "WHERE user_id = ANY($1::TEXT[]) "
+        "AND media_type = 'anime' AND rating IS NOT NULL",
+        [list(peer_ids)],
+    ) or []
+    out: dict[str, dict[int, float]] = {}
+    for r in rows:
+        uid = r.get("user_id")
+        mid = r.get("media_id")
+        rating = r.get("rating")
+        if uid is None or mid is None or rating is None:
+            continue
+        out.setdefault(str(uid), {})[int(mid)] = float(rating) / 2.0
+    return out
+
+
 def _cosine_similarity(
     target: dict[int, float], peer: dict[int, float]
 ) -> tuple[float, int]:
@@ -7888,10 +8038,12 @@ def _recommend_candidates(
     if len(peer_ids) > RECOMMEND_PEER_CAP:
         peer_ids = random.sample(peer_ids, RECOMMEND_PEER_CAP)
 
+    peer_vectors = _recommend_peer_vectors_batch(ctx, peer_ids)
+
     candidates: dict[int, dict] = {}
     peers_kept = 0
     for pid in peer_ids:
-        peer_vec = _recommend_user_vector(ctx, pid)
+        peer_vec = peer_vectors.get(pid, {})
         sim, shared = _cosine_similarity(target_vector, peer_vec)
         if shared < RECOMMEND_MIN_SHARED_TITLES or sim <= 0.0:
             continue

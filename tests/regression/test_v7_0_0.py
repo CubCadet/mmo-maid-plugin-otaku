@@ -194,20 +194,26 @@ def test_modal_submit_routes_through_router(monkeypatch):
     assert "review of" in (resp.get("content") or "").lower()
 
 
+# regression-fix (v10.0.1): the v7 doctrine had two SQL paths (INSERT for new,
+# UPDATE for existing) — a read-then-write pattern that left a TOCTOU window
+# under concurrent modal submits. v10.0.1 collapses both paths into a single
+# `INSERT ... ON CONFLICT (user_id, media_id) DO UPDATE ... RETURNING (xmax = 0)`
+# query. The original contract was "new row vs. update row produce different
+# observable responses" — that's still asserted, but via the response text +
+# the single combined query, not via separate INSERT/UPDATE statements.
 def test_modal_submit_inserts_new_row(monkeypatch):
     ctx = MockContext()
     queries = []
-    executes = []
 
     def _q(sql, params=None):
         queries.append((sql, params))
-        return []  # no existing review
-
-    def _e(sql, params=None):
-        executes.append((sql, params))
+        if "SELECT title, body" in sql:
+            return []  # no existing review when prefilling
+        if "ON CONFLICT" in sql:
+            return [{"inserted": True}]
+        return []
 
     ctx.sql.query = _q
-    ctx.sql.execute = _e
     monkeypatch.setattr(
         p,
         "_anilist_query",
@@ -217,25 +223,25 @@ def test_modal_submit_inserts_new_row(monkeypatch):
         ctx,
         _modal("otaku:review-modal:42", {"title": "T", "body": "B"}, user_id="alice"),
     )
-    insert_sqls = [e[0] for e in executes if "INSERT INTO otaku_reviews" in e[0]]
-    assert len(insert_sqls) == 1
+    upsert_sqls = [q[0] for q in queries if "INSERT INTO otaku_reviews" in q[0]]
+    assert len(upsert_sqls) == 1
+    assert "ON CONFLICT" in upsert_sqls[0]
 
 
+# regression-fix (v10.0.1): see comment on test_modal_submit_inserts_new_row.
 def test_modal_submit_updates_existing_row(monkeypatch):
     ctx = MockContext()
-    executes = []
+    queries = []
 
     def _q(sql, params=None):
-        # Return an existing row so the upsert takes the UPDATE branch.
+        queries.append((sql, params))
         if "SELECT title, body" in sql:
             return [{"title": "old", "body": "old"}]
+        if "ON CONFLICT" in sql:
+            return [{"inserted": False}]
         return []
 
-    def _e(sql, params=None):
-        executes.append(sql)
-
     ctx.sql.query = _q
-    ctx.sql.execute = _e
     monkeypatch.setattr(
         p,
         "_anilist_query",
@@ -245,9 +251,10 @@ def test_modal_submit_updates_existing_row(monkeypatch):
         ctx,
         _modal("otaku:review-modal:42", {"title": "newT", "body": "newB"}, user_id="u"),
     )
-    update_sqls = [s for s in executes if s.startswith("UPDATE otaku_reviews")]
-    assert len(update_sqls) == 1
-    assert "updated_at = NOW()" in update_sqls[0]
+    upsert_sqls = [q[0] for q in queries if "INSERT INTO otaku_reviews" in q[0]]
+    assert len(upsert_sqls) == 1
+    assert "ON CONFLICT" in upsert_sqls[0]
+    assert "updated_at = NOW()" in upsert_sqls[0]
 
 
 def test_modal_submit_rejects_empty_body():

@@ -1067,6 +1067,27 @@ original framing. Future development goes into v10.x maintenance
 (filling in language coverage, growing the achievement registry,
 patching deferred items) or a v11+ if a real new direction emerges.
 
+### v10.0.1 — Post-audit safety + perf patch ✅ shipped 2026-05-14
+
+Closes the four 🟡 findings from the v10.0.0 audit. Same observable
+behavior, tighter implementation.
+
+- 🔒 **TOCTOU collapse on `/review` upsert** — single
+  `INSERT ... ON CONFLICT DO UPDATE ... RETURNING (xmax = 0)` replaces
+  the prior read-then-write; double-submits no longer race.
+- ⚡ **Batched peer-vector fetch** in `_recommend_candidates` — one
+  `WHERE user_id = ANY($1::TEXT[])` query replaces 50 sequential
+  SELECTs.
+- ⚡ **Batched achievement aggregates** — `/achievements` now runs 2
+  SQL trips (one FILTER aggregate + one paired subquery) instead of
+  16, via reentrant `_ach_stats_scope`.
+- ⚡ **Pagination cache coverage** — every page caches (was page 1
+  only) across 7 paginated render functions. 5-minute TTL + 256-entry
+  LRU bound staleness and memory.
+- 17 new immutable contracts in `tests/regression/test_v10_0_1.py`;
+  7 existing assertions carved out with documented
+  `# regression-fix (v10.0.1):` notes. Suite total: 586 tests, all green.
+
 ---
 
 ## Cross-cutting concerns
