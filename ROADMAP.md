@@ -1107,6 +1107,27 @@ and award user A's achievements to user B.
   `# regression-fix (v10.0.2):` to use the accessor. Suite total: 591
   tests, all green.
 
+### v10.0.3 — Audit cleanup (efficiency + stale-code) ✅ shipped 2026-05-14
+
+Closes the remaining 🟡 findings from the v10.0.2 audit. Four small
+fixes; no new user-visible behavior, no schema changes, no new
+capabilities or proxy domains.
+
+- ⚡ **Hoisted `target_norm`** out of `_recommend_candidates`'s per-peer
+  loop. `_cosine_similarity` gained an optional `target_norm` kwarg.
+- ⚡ **Multi-row INSERT** for poll options (`_cmd_poll_create`) and
+  AOTW candidates (`_cmd_aotw_start`) — one INSERT per call instead
+  of N. Bounded by POLL_MAX_OPTIONS = 4 and AOTW_CANDIDATE_LIMIT = 5.
+- 🧹 **Removed `_Strings.FIND_PAGE_MALFORMED`** — orphan scaffolding
+  for /find pagination that v9.0 never shipped.
+- 🧹 **Fixed stale `Page 2 should bypass the cache`** comment in
+  `tests/test_plugin.py` left over from v10.0.1's cache-every-page
+  change. Test assertion was already correct; only the framing
+  comment was misleading.
+- 6 new immutable contracts in `tests/regression/test_v10_0_3.py`;
+  2 v7.x tests carved out with `# regression-fix (v10.0.3):` for the
+  multi-row INSERT shape change. Suite total: 597 tests, all green.
+
 ---
 
 ## Cross-cutting concerns

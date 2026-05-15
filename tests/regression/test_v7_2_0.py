@@ -171,11 +171,19 @@ def test_create_inserts_options_in_order(monkeypatch):
         _poll_event("create", {"question": "Best vibe?", "a": "opt-a", "b": "opt-b"}, user_id="u"),
     )
 
+    # regression-fix (v10.0.3): the v7.2 doctrine inserted poll options
+    # one row at a time (N INSERTs for N options). v10.0.3 collapses them
+    # into a single multi-row VALUES (...) INSERT — same rows reach the
+    # table, fewer round-trips. Original intent (both options inserted,
+    # keys in order 'a' then 'b') is now expressed as: one INSERT
+    # statement containing all option params, in declaration order.
     option_inserts = [e for e in (ctx.sql.executed or [])
                       if "INSERT INTO otaku_poll_options" in e["sql"]]
-    assert len(option_inserts) == 2
-    # Keys are 'a' and 'b' in the params (param index 2 is option_key).
-    keys = [e["params"][1] for e in option_inserts]
+    assert len(option_inserts) == 1
+    params = option_inserts[0]["params"]
+    # 2 options × 3 params each = 6 params; option_key sits at indices 1, 4.
+    assert len(params) == 6
+    keys = [params[3 * i + 1] for i in range(len(params) // 3)]
     assert keys == ["a", "b"]
 
 

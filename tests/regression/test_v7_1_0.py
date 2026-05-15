@@ -187,9 +187,21 @@ def test_start_inserts_candidates_and_posts_buttons(monkeypatch):
     ctx.sql.query = _q
     p.cmd_aotw(ctx, _aotw("start", user_id="u"))
 
-    insert_sqls = [e["sql"] for e in (ctx.sql.executed or [])
-                   if e["sql"].startswith("INSERT INTO otaku_aotw_candidates")]
-    assert len(insert_sqls) == 3
+    # regression-fix (v10.0.3): the v7.1 doctrine inserted candidates one
+    # row at a time (N INSERTs for N candidates). v10.0.3 collapses them
+    # into a single multi-row VALUES (...) INSERT — same rows reach the
+    # table, only fewer round-trips. Original intent (all candidates
+    # inserted, ordered) is now expressed as: one INSERT statement
+    # containing each candidate's params, in order.
+    insert_stmts = [e for e in (ctx.sql.executed or [])
+                    if e["sql"].startswith("INSERT INTO otaku_aotw_candidates")]
+    assert len(insert_stmts) == 1
+    params = insert_stmts[0]["params"]
+    # 3 candidates × 2 params each = 6 params total.
+    assert len(params) == 6
+    # Candidate media_ids are at odd indices (params: poll_id, mid, poll_id, mid, ...).
+    inserted_mids = [params[2 * i + 1] for i in range(len(params) // 2)]
+    assert inserted_mids == [1, 2, 3]
 
     follow = ctx.interaction.followups[-1]
     serialized = json.dumps(

@@ -698,7 +698,6 @@ class _Strings:
     )
     FIND_HEADER = "🔎 Found for *{query}*"
     FIND_FOOTER = "Decoded as: {blend}"
-    FIND_PAGE_MALFORMED = "/find pagination button malformed."
 
     # /achievements (v10.0.0).
     ACHIEVEMENTS_HEADER_OWN = "🏅 Your achievements"
@@ -6615,11 +6614,19 @@ def _cmd_poll_create(ctx: Context, user_id: str, sub_opts: dict) -> None:
         _reply_error(ctx, S.SQL_FAIL, deferred=True)
         return
     poll_id = int(poll_rows[0]["poll_id"])
-    for key, text in options:
+    # v10.0.3: single multi-row INSERT (was one INSERT per option).
+    # POLL_MAX_OPTIONS = 4, so the placeholder count is bounded.
+    if options:
+        values_clause = ", ".join(
+            f"(${3 * i + 1}, ${3 * i + 2}, ${3 * i + 3})" for i in range(len(options))
+        )
+        params: list = []
+        for key, text in options:
+            params.extend([poll_id, key, text])
         ctx.sql.execute(
             "INSERT INTO otaku_poll_options (poll_id, option_key, text) "
-            "VALUES ($1, $2, $3)",
-            [poll_id, key, text],
+            f"VALUES {values_clause}",
+            params,
         )
 
     embed = _poll_render_embed(ctx, poll_id, header_template=S.POLL_STATUS_HEADER)
@@ -6920,11 +6927,19 @@ def _cmd_aotw_start(ctx: Context, user_id: str) -> None:
         _reply_error(ctx, S.SQL_FAIL, deferred=True)
         return
     poll_id = int(poll_rows[0]["poll_id"])
-    for mid in candidate_ids:
+    # v10.0.3: single multi-row INSERT (was one INSERT per candidate).
+    # AOTW_CANDIDATE_LIMIT = 5, so the placeholder count is bounded.
+    if candidate_ids:
+        values_clause = ", ".join(
+            f"(${2 * i + 1}, ${2 * i + 2})" for i in range(len(candidate_ids))
+        )
+        params: list = []
+        for mid in candidate_ids:
+            params.extend([poll_id, mid])
         ctx.sql.execute(
             "INSERT INTO otaku_aotw_candidates (poll_id, media_id) "
-            "VALUES ($1, $2)",
-            [poll_id, mid],
+            f"VALUES {values_clause}",
+            params,
         )
 
     media_by_id = _aotw_resolve_media(ctx, candidate_ids)
@@ -8033,14 +8048,27 @@ def _recommend_peer_vectors_batch(
 
 
 def _cosine_similarity(
-    target: dict[int, float], peer: dict[int, float]
+    target: dict[int, float],
+    peer: dict[int, float],
+    *,
+    target_norm: float | None = None,
 ) -> tuple[float, int]:
-    """Cosine over shared media_ids. Returns (similarity, shared_count)."""
+    """Cosine over shared media_ids. Returns (similarity, shared_count).
+
+    v10.0.3: `target_norm` lets the caller hoist the target's L2 norm out
+    of a per-peer loop — it's invariant across peers and was previously
+    recomputed N times in `_recommend_candidates`. Passing `None`
+    (default) preserves the original signature for ad-hoc callers.
+    """
     shared = target.keys() & peer.keys()
     if not shared:
         return 0.0, 0
     dot = sum(target[m] * peer[m] for m in shared)
-    norm_t = math.sqrt(sum(v * v for v in target.values()))
+    norm_t = (
+        target_norm
+        if target_norm is not None
+        else math.sqrt(sum(v * v for v in target.values()))
+    )
     norm_p = math.sqrt(sum(v * v for v in peer.values()))
     if norm_t == 0.0 or norm_p == 0.0:
         return 0.0, len(shared)
@@ -8061,11 +8089,14 @@ def _recommend_candidates(
 
     peer_vectors = _recommend_peer_vectors_batch(ctx, peer_ids)
 
+    # v10.0.3: hoist target_norm out of the per-peer loop — invariant.
+    target_norm = math.sqrt(sum(v * v for v in target_vector.values()))
+
     candidates: dict[int, dict] = {}
     peers_kept = 0
     for pid in peer_ids:
         peer_vec = peer_vectors.get(pid, {})
-        sim, shared = _cosine_similarity(target_vector, peer_vec)
+        sim, shared = _cosine_similarity(target_vector, peer_vec, target_norm=target_norm)
         if shared < RECOMMEND_MIN_SHARED_TITLES or sim <= 0.0:
             continue
         peers_kept += 1

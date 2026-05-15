@@ -20,6 +20,65 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.3] - 2026-05-14
+
+### Audit cleanup — efficiency + stale-code
+
+Closes the remaining 🟡 findings from the v10.0.2 audit. Four small
+fixes; no new user-visible behavior; no schema changes; no new
+capabilities or proxy domains.
+
+### Performance
+- **Hoisted target_norm out of `_recommend_candidates` peer loop.**
+  `_cosine_similarity` gained an optional `target_norm` kwarg so the
+  caller can supply a pre-computed L2 norm; `_recommend_candidates` now
+  computes it once outside the per-peer loop. Latent O(N×M) was
+  bounded at ~15k ops for typical users; this patch makes the cost
+  truly O(N+M) and protects against pathological 10k+-rating users.
+- **Multi-row INSERT for poll options.** `_cmd_poll_create` collapses
+  the per-option loop into one `INSERT ... VALUES ($1, $2, $3), ($4, $5, $6), ...`
+  statement (POLL_MAX_OPTIONS = 4 bounds the placeholder count).
+- **Multi-row INSERT for AOTW candidates.** `_cmd_aotw_start` collapses
+  the per-candidate loop into one multi-row VALUES INSERT
+  (AOTW_CANDIDATE_LIMIT = 5 bounds the placeholder count).
+
+### Fixed
+- **Stale `# Page 2 should bypass the cache` comment** in
+  `tests/test_plugin.py:2651`. v10.0.1 made every page cacheable;
+  the comment was misleading future maintainers. The test's `+ 1`
+  assertion still holds (first click on page 2 is a cache miss — a
+  new cache key), only the framing changed.
+
+### Removed
+- **`_Strings.FIND_PAGE_MALFORMED`** — orphan scaffolding string never
+  referenced anywhere. Declared as a stub for /find pagination that
+  v9.0 never shipped. Removing it eliminates dead code; if pagination
+  lands later, the string can be reintroduced alongside its call site.
+
+### Doctrine carve-outs
+- `tests/regression/test_v7_1_0.py::test_start_inserts_candidates_and_posts_buttons`
+  — asserted N separate INSERT statements; adapted to one multi-row
+  INSERT with all candidates' params, in order. `# regression-fix (v10.0.3):`
+  comment documents.
+- `tests/regression/test_v7_2_0.py::test_create_inserts_options_in_order`
+  — same shape adaptation for poll options. `# regression-fix (v10.0.3):`
+  comment documents.
+
+### Tests
+- 6 new immutable contracts in `tests/regression/test_v10_0_3.py`:
+  - `_cosine_similarity(target_norm=...)` accepts pre-computed norm and
+    returns the same numerical result as the default path.
+  - Default signature preserved (no kwarg → same v6 behavior).
+  - `_recommend_candidates` produces correct candidate set + peers_kept
+    with the hoisted norm.
+  - `/poll create` issues exactly one multi-row INSERT containing all
+    options in declaration order.
+  - `/aotw start` issues exactly one multi-row INSERT containing all
+    candidates in order.
+  - `_Strings.FIND_PAGE_MALFORMED` no longer exists (orphan removal
+    guard).
+- Suite total: 597 tests (was 591), all green.
+
 ## [10.0.2] - 2026-05-14
 
 ### Concurrency fix — cross-user achievement leak

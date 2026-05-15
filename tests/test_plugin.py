@@ -2648,7 +2648,9 @@ def test_discover_caches_only_page_one():
     after_two = len(ctx.http.requests)
     assert after_two == 1
 
-    # Page 2 (via component) should bypass the cache.
+    # Page 2 has its own cache key — first click is a cache miss, so one
+    # new HTTP request lands. (v10.0.1 made every page cacheable; the
+    # assertion is unchanged because we only click page 2 once here.)
     p._route_components(
         ctx,
         _component_event("otaku:page:Action:popular:2", user_id="c-d3"),
