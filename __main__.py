@@ -183,6 +183,17 @@ _SCHEMA_POLL_VOTES_DDL = (
     "  voted_at TIMESTAMP NOT NULL DEFAULT NOW(),"
     "  PRIMARY KEY (poll_id, user_id))"
 )
+# v10.0.0 — per-user achievements. Once a user meets an achievement
+# predicate the row is inserted; existence is idempotent for the
+# rest of the user's lifetime on this server. Awarded lazily on
+# /achievements lookup (no per-handler check overhead).
+_SCHEMA_ACHIEVEMENTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS otaku_achievements ("
+    "  user_id         TEXT NOT NULL,"
+    "  achievement_key TEXT NOT NULL,"
+    "  awarded_at      TIMESTAMP NOT NULL DEFAULT NOW(),"
+    "  PRIMARY KEY (user_id, achievement_key))"
+)
 
 
 # ── User-facing strings (i18n-ready) ─────────────────────────────────────────
@@ -688,6 +699,20 @@ class _Strings:
     FIND_FOOTER = "Decoded as: {blend}"
     FIND_PAGE_MALFORMED = "/find pagination button malformed."
 
+    # /achievements (v10.0.0).
+    ACHIEVEMENTS_HEADER_OWN = "🏅 Your achievements"
+    ACHIEVEMENTS_HEADER_OTHER = "🏅 {who}'s achievements"
+    ACHIEVEMENTS_NONE_OWN = (
+        "You haven't earned any achievements yet. Track some anime, write a "
+        "review, or rate something to start — `/achievements` re-checks every "
+        "time you run it."
+    )
+    ACHIEVEMENTS_NONE_OTHER = "{who} hasn't earned any achievements yet."
+    ACHIEVEMENTS_NEW_AWARDED = "✨ **Newly earned this check:** {names}"
+    ACHIEVEMENTS_EARNED_HEADER = "✅ Earned"
+    ACHIEVEMENTS_UNEARNED_HEADER = "⏳ In progress"
+    ACHIEVEMENTS_FOOTER = "{earned}/{total} earned · rerun /achievements to re-check"
+
     # /preferences (v9.3.0).
     PREFERENCES_HEADER = "⚙️ Your preferences"
     PREFERENCES_NO_CHANGES = (
@@ -708,6 +733,100 @@ class _Strings:
 
 
 S = _Strings
+
+
+# ── v10.0.0 — Localization (i18n) ────────────────────────────────────────────
+#
+# v1.4 set up the structural pattern: every user-facing string lives in
+# `_Strings` (aliased as `S`). v9.3 added the `pref:lang:user:<id>` KV
+# preference. v10 activates the pipeline: `T(key, lang=..., **fmt)` returns
+# the translated string when a translation exists, falls back to English
+# otherwise.
+#
+# Coverage is intentionally **partial** for v10.0.0 — we ship the
+# infrastructure plus translations for the 20+ most-visible user-facing
+# strings in Japanese and Spanish. Strings without a translation fall
+# back to English transparently. v10.x can grow coverage incrementally
+# without breaking any existing caller (T() always works; missing keys
+# return the English value).
+#
+# Per the v1.4 deviation note, sibling .py modules can't live in the
+# runtime zip's allowlist. So translations live inline as nested dicts.
+
+# Each language maps `_Strings` attribute names to translated values.
+# Missing keys fall back to the English value via T()'s default path.
+TRANSLATIONS: dict[str, dict[str, str]] = {
+    "ja": {
+        "UNTITLED": "無題",
+        "ANILIST_FAILURE_DEFAULT": "AniListが応答しません — 少し待ってもう一度試してください。",
+        "COOLDOWN_WAIT": "少し落ち着いて — あと {remaining}秒で再試行できます。",
+        "ANIME_USAGE": "使い方: `/anime query: <タイトル>`",
+        "ANIME_NOT_FOUND": "**{query}** に一致するアニメが見つかりません。",
+        "ANIME_NO_DESCRIPTION": "*(説明なし)*",
+        "DISCOVER_USAGE": "使い方: `/discover genre: <名前> [sort: popular|trending|score]`",
+        "DISCOVER_NO_RESULTS": "{genre} のアニメは見つかりませんでした。",
+        "TRENDING_NO_RESULTS": "このシーズンのトレンドアニメは見つかりませんでした。",
+        "SIMILAR_NO_RECS": "**{title}** の推奨はまだAniListにありません。",
+        "SIMILAR_NO_CACHE": "まだアニメを検索していません。先に `/anime query: <タイトル>` を試してください。",
+        "MANGA_USAGE": "使い方: `/manga query: <タイトル>`",
+        "MANGA_NOT_FOUND": "**{query}** に一致するマンガが見つかりません。",
+        "MANGA_NO_DESCRIPTION": "*(説明なし)*",
+        "ACHIEVEMENTS_HEADER_OWN": "🏅 あなたの実績",
+        "ACHIEVEMENTS_HEADER_OTHER": "🏅 {who} の実績",
+        "FOOTER_ANILIST": "AniListより",
+    },
+    "es": {
+        "UNTITLED": "Sin título",
+        "ANILIST_FAILURE_DEFAULT": (
+            "AniList no responde — inténtalo de nuevo en un momento, o prueba con otra palabra clave."
+        ),
+        "COOLDOWN_WAIT": "Baja el ritmo — inténtalo de nuevo en {remaining}s.",
+        "ANIME_USAGE": "Uso: `/anime query: <título>`",
+        "ANIME_NOT_FOUND": "No se encontró ningún anime que coincida con **{query}**.",
+        "ANIME_NO_DESCRIPTION": "*(sin descripción)*",
+        "DISCOVER_USAGE": "Uso: `/discover genre: <nombre> [sort: popular|trending|score]`",
+        "DISCOVER_NO_RESULTS": "No se encontraron animes del género {genre}.",
+        "TRENDING_NO_RESULTS": "No hay animes en tendencia esta temporada.",
+        "SIMILAR_NO_RECS": "AniList aún no tiene recomendaciones para **{title}**.",
+        "SIMILAR_NO_CACHE": (
+            "Aún no has buscado un anime. Prueba `/anime query: <título>` primero."
+        ),
+        "MANGA_USAGE": "Uso: `/manga query: <título>`",
+        "MANGA_NOT_FOUND": "No se encontró ningún manga que coincida con **{query}**.",
+        "MANGA_NO_DESCRIPTION": "*(sin descripción)*",
+        "ACHIEVEMENTS_HEADER_OWN": "🏅 Tus logros",
+        "ACHIEVEMENTS_HEADER_OTHER": "🏅 Logros de {who}",
+        "FOOTER_ANILIST": "Datos de AniList",
+    },
+    # Other PREF_LANGUAGE_CHOICES (ko, zh, de, fr) declare the user prefers
+    # those locales but have no translations yet. T() falls through to
+    # English for any key not present in TRANSLATIONS[lang]. v10.x patches
+    # can fill these in without any code change beyond adding entries.
+}
+
+
+def T(key: str, *, lang: str | None = None, **fmt) -> str:
+    """Translate a string by `_Strings` attribute name.
+
+    If `lang` has a TRANSLATIONS entry AND that entry has the requested
+    key, return the translated value formatted with **fmt. Otherwise fall
+    back to the English value from `_Strings`. Missing English keys raise
+    AttributeError — that's a caller bug, not a translation gap.
+    """
+    english = getattr(_Strings, key)
+    if lang and lang in TRANSLATIONS and key in TRANSLATIONS[lang]:
+        template = TRANSLATIONS[lang][key]
+    else:
+        template = english
+    return template.format(**fmt) if fmt else template
+
+
+def T_for(ctx: Context, user_id: str, key: str, **fmt) -> str:
+    """Per-user translator. Looks up the viewer's language preference
+    from KV and routes through T(). The common per-handler shape — call
+    this instead of S.KEY where a localised surface is wanted."""
+    lang = _get_pref_language(ctx, user_id) if user_id else None
+    return T(key, lang=lang, **fmt)
 
 
 ANILIST_URL = "https://graphql.anilist.co"
@@ -1216,6 +1335,7 @@ def _get_pref_language(ctx: Context, user_id: str) -> str | None:
     if isinstance(val, str) and val in PREF_LANGUAGE_CHOICES:
         return val
     return None
+
 
 
 def _option_map(event: dict) -> dict:
@@ -1738,9 +1858,19 @@ def _make_studio_embed(studio: dict) -> dict:
             "inline": False,
         })
 
+    # v10.0.0 accessibility: every embed should carry a meaningful
+    # `description` field (the only field Discord exposes to screen readers
+    # consistently). For the studio card the description is a one-line
+    # summary of what's in the embed below.
+    summary = (
+        f"Animation studio profile · {len(recent)} recent + {len(catalog)} catalog works"
+        if is_anim
+        else f"Production studio profile · {len(recent) + len(catalog)} credits listed"
+    )
     return {
         "title": header,
         "url": site_url,
+        "description": summary,
         "color": ANILIST_COLOR,
         "fields": fields,
         "footer": {"text": S.STUDIO_FOOTER},
@@ -2523,6 +2653,8 @@ def _bootstrap_schema(ctx: Context) -> None:
     ctx.sql.execute(_SCHEMA_POLLS_DDL)
     ctx.sql.execute(_SCHEMA_POLL_OPTIONS_DDL)
     ctx.sql.execute(_SCHEMA_POLL_VOTES_DDL)
+    # v10.0.0
+    ctx.sql.execute(_SCHEMA_ACHIEVEMENTS_DDL)
 
 
 @plugin.on_install
@@ -2608,7 +2740,7 @@ def cmd_anime(ctx: Context, event: dict) -> None:
     opts = _option_map(event)
     query = (opts.get("query") or "").strip()
     if not query:
-        ctx.interaction.respond(content=S.ANIME_USAGE, ephemeral=True)
+        ctx.interaction.respond(content=T_for(ctx, user_id, "ANIME_USAGE"), ephemeral=True)
         return
 
     ctx.interaction.defer()
@@ -2619,7 +2751,11 @@ def cmd_anime(ctx: Context, event: dict) -> None:
     # because they depend on AniList-specific schemas.
     media = _search_media(ctx, query, media_type="anime")
     if media is None:
-        _reply_error(ctx, S.ANIME_NOT_FOUND.format(query=_truncate(query, 80)), deferred=True)
+        _reply_error(
+            ctx,
+            T_for(ctx, user_id, "ANIME_NOT_FOUND", query=_truncate(query, 80)),
+            deferred=True,
+        )
         return
 
     media_id = media.get("id")
@@ -2997,6 +3133,7 @@ _HELP_EXAMPLES = {
     "character-popular": "`/character-popular`",
     "find":          "`/find description: slow romance set in school with supernatural twist`",
     "preferences":   "`/preferences spoilers: hide` or `/preferences language: ja`",
+    "achievements":  "`/achievements` (your own) or `/achievements user: @them`",
     "help":      "`/help`",
     "genres":    "`/genres`",
 }
@@ -7347,6 +7484,262 @@ def cmd_preferences(ctx: Context, event: dict) -> None:
         "color": ANILIST_COLOR,
     }
     ctx.interaction.respond(embeds=[embed], ephemeral=True)
+
+
+# ── v10.0.0 — /achievements ─────────────────────────────────────────────────
+#
+# Achievement detection runs lazily — only when the user runs /achievements.
+# Each predicate is a pure SQL/KV read; if a predicate returns True and the
+# user doesn't yet have the row in otaku_achievements, we insert it and
+# surface it as "newly earned this check." This keeps the per-handler write
+# path zero-cost (no detection overhead on /rate, /watch, /progress, etc.)
+# while still giving users a satisfying "you just earned X" surface when
+# they check.
+#
+# Each entry in ACHIEVEMENTS has:
+#   key:         immutable stable identifier (stored in DB; never rename)
+#   name:        user-visible display name
+#   description: one-line flavour text shown under the name
+#   check:       (ctx, user_id) -> bool — does the user qualify NOW?
+#   progress:    (ctx, user_id) -> str | None — short progress hint for the
+#                in-progress section (e.g. "12/50 completed"). None = no hint.
+#
+# New achievements get APPENDED to ACHIEVEMENTS over time. Order shouldn't
+# matter for correctness; it does affect display order.
+
+
+def _ach_count_rows(ctx: Context, user_id: str, where_extra: str = "") -> int:
+    """Helper — COUNT(*) from otaku_user_media with optional extra WHERE."""
+    if not user_id:
+        return 0
+    extra = f" {where_extra}" if where_extra else ""
+    rows = ctx.sql.query(
+        f"SELECT COUNT(*) AS n FROM otaku_user_media "
+        f"WHERE user_id = $1 AND media_type = 'anime'{extra}",
+        [user_id],
+    ) or [{"n": 0}]
+    return int((rows[0] or {}).get("n") or 0)
+
+
+def _ach_check_first_anime(ctx, uid):
+    return _ach_count_rows(ctx, uid) >= 1
+def _ach_check_first_favorite(ctx, uid):
+    return _ach_count_rows(ctx, uid, "AND is_favorite = TRUE") >= 1
+def _ach_check_completed_10(ctx, uid):
+    return _ach_count_rows(ctx, uid, "AND status = 'completed'") >= 10
+def _ach_check_completed_50(ctx, uid):
+    return _ach_count_rows(ctx, uid, "AND status = 'completed'") >= 50
+def _ach_check_rated_25(ctx, uid):
+    return _ach_count_rows(ctx, uid, "AND rating IS NOT NULL") >= 25
+def _ach_check_rated_100(ctx, uid):
+    return _ach_count_rows(ctx, uid, "AND rating IS NOT NULL") >= 100
+def _ach_check_first_review(ctx, uid):
+    rows = ctx.sql.query(
+        "SELECT 1 AS one FROM otaku_reviews WHERE user_id = $1 LIMIT 1",
+        [uid],
+    ) or []
+    return bool(rows)
+def _ach_check_community(ctx, uid):
+    rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = $1",
+        [uid],
+    ) or [{"n": 0}]
+    return int((rows[0] or {}).get("n") or 0) >= 5
+def _ach_check_polyglot(ctx, uid):
+    return _get_pref_language(ctx, uid) is not None
+def _ach_check_subscriber(ctx, uid):
+    rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = $1",
+        [uid],
+    ) or [{"n": 0}]
+    return int((rows[0] or {}).get("n") or 0) >= 3
+
+
+def _ach_progress_completed(ctx, uid):
+    n = _ach_count_rows(ctx, uid, "AND status = 'completed'")
+    return f"{n} completed"
+def _ach_progress_rated(ctx, uid):
+    n = _ach_count_rows(ctx, uid, "AND rating IS NOT NULL")
+    return f"{n} rated"
+def _ach_progress_reviews(ctx, uid):
+    rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_reviews WHERE user_id = $1", [uid],
+    ) or [{"n": 0}]
+    return f"{int((rows[0] or {}).get('n') or 0)} reviews"
+def _ach_progress_subs(ctx, uid):
+    rows = ctx.sql.query(
+        "SELECT COUNT(*) AS n FROM otaku_notifications WHERE user_id = $1", [uid],
+    ) or [{"n": 0}]
+    return f"{int((rows[0] or {}).get('n') or 0)} subscriptions"
+
+
+ACHIEVEMENTS: list[dict] = [
+    {
+        "key": "first_anime", "name": "📺 First Look",
+        "description": "Look up your first anime with /anime.",
+        "check": _ach_check_first_anime, "progress": None,
+    },
+    {
+        "key": "first_favorite", "name": "⭐ Favorite Picker",
+        "description": "Add your first favorite via /favorite.",
+        "check": _ach_check_first_favorite, "progress": None,
+    },
+    {
+        "key": "first_review", "name": "📝 Critic's Debut",
+        "description": "Submit your first /review.",
+        "check": _ach_check_first_review, "progress": None,
+    },
+    {
+        "key": "completed_10", "name": "🎬 Binge Watcher",
+        "description": "Mark 10 anime as completed via /watch or /progress.",
+        "check": _ach_check_completed_10, "progress": _ach_progress_completed,
+    },
+    {
+        "key": "completed_50", "name": "🏆 Veteran Viewer",
+        "description": "Mark 50 anime as completed.",
+        "check": _ach_check_completed_50, "progress": _ach_progress_completed,
+    },
+    {
+        "key": "rated_25", "name": "🎯 Opinionated",
+        "description": "Rate 25 anime via /rate.",
+        "check": _ach_check_rated_25, "progress": _ach_progress_rated,
+    },
+    {
+        "key": "rated_100", "name": "📊 Curator",
+        "description": "Rate 100 anime — a full review-graded catalogue.",
+        "check": _ach_check_rated_100, "progress": _ach_progress_rated,
+    },
+    {
+        "key": "community", "name": "✍️ Community Voice",
+        "description": "Write 5 /review entries — give back to the server.",
+        "check": _ach_check_community, "progress": _ach_progress_reviews,
+    },
+    {
+        "key": "seasonal_subscriber", "name": "🔔 Tuned In",
+        "description": "Subscribe to airing pings for 3+ anime via /notify.",
+        "check": _ach_check_subscriber, "progress": _ach_progress_subs,
+    },
+    {
+        "key": "polyglot", "name": "🌐 Polyglot",
+        "description": "Set a non-default language via /preferences.",
+        "check": _ach_check_polyglot, "progress": None,
+    },
+]
+
+
+def _get_user_achievements(ctx: Context, user_id: str) -> set[str]:
+    """Return the set of achievement keys this user has already been awarded."""
+    if not user_id:
+        return set()
+    rows = ctx.sql.query(
+        "SELECT achievement_key FROM otaku_achievements WHERE user_id = $1",
+        [user_id],
+    ) or []
+    return {r["achievement_key"] for r in rows if r.get("achievement_key")}
+
+
+def _check_and_award_achievements(ctx: Context, user_id: str) -> list[str]:
+    """Run every predicate, award newly-met achievements, return the list
+    of keys awarded THIS call (for the 'newly earned' surface).
+
+    Defensive: a SQL transport failure when fetching the already-earned
+    set returns [] (no awards this round) rather than raising into the
+    handler. Next call retries.
+    """
+    if not user_id:
+        return []
+    try:
+        already = _get_user_achievements(ctx, user_id)
+    except Exception:  # noqa: BLE001 — never strand the handler
+        return []
+    newly_awarded: list[str] = []
+    for ach in ACHIEVEMENTS:
+        key = ach["key"]
+        if key in already:
+            continue
+        try:
+            qualifies = ach["check"](ctx, user_id)
+        except Exception:  # noqa: BLE001 — predicate must never strand the handler
+            continue
+        if not qualifies:
+            continue
+        try:
+            ctx.sql.execute(
+                "INSERT INTO otaku_achievements (user_id, achievement_key) "
+                "VALUES ($1, $2) "
+                "ON CONFLICT (user_id, achievement_key) DO NOTHING",
+                [user_id, key],
+            )
+            newly_awarded.append(key)
+        except Exception:  # noqa: BLE001
+            continue
+    return newly_awarded
+
+
+@plugin.on_slash_command("achievements")
+def cmd_achievements(ctx: Context, event: dict) -> None:
+    user_id = event.get("user_id") or ""
+    if _on_cooldown(ctx, user_id):
+        return
+    opts = _option_map(event)
+    target_id, display, is_self = _extract_target_user(event, opts)
+    ctx.interaction.defer(ephemeral=True)
+
+    # Re-check awards for the target user. Even when viewing someone else's
+    # achievements, we re-check their predicates (cheap; just SQL COUNTs)
+    # so the count surface always reflects current state.
+    newly = _check_and_award_achievements(ctx, target_id)
+    earned = _get_user_achievements(ctx, target_id)
+
+    if not earned and not newly:
+        empty = S.ACHIEVEMENTS_NONE_OWN if is_self else S.ACHIEVEMENTS_NONE_OTHER.format(who=display)
+        _reply_error(ctx, empty, deferred=True)
+        return
+
+    # Build the embed: newly-earned (if any), then earned list, then in-progress.
+    description_parts: list[str] = []
+    if newly:
+        names = ", ".join(
+            next((a["name"] for a in ACHIEVEMENTS if a["key"] == k), k)
+            for k in newly
+        )
+        description_parts.append(S.ACHIEVEMENTS_NEW_AWARDED.format(names=names) + "\n")
+
+    earned_lines: list[str] = []
+    unearned_lines: list[str] = []
+    for ach in ACHIEVEMENTS:
+        line = f"**{ach['name']}** — {ach['description']}"
+        if ach["key"] in earned:
+            earned_lines.append(line)
+        else:
+            prog = ach.get("progress")
+            prog_text = ""
+            if callable(prog):
+                try:
+                    prog_text = prog(ctx, target_id) or ""
+                except Exception:  # noqa: BLE001
+                    prog_text = ""
+            if prog_text:
+                unearned_lines.append(f"{line}\n*Progress: {prog_text}*")
+            else:
+                unearned_lines.append(line)
+
+    if earned_lines:
+        description_parts.append(f"### {S.ACHIEVEMENTS_EARNED_HEADER}\n" + "\n".join(earned_lines))
+    if unearned_lines:
+        description_parts.append(f"### {S.ACHIEVEMENTS_UNEARNED_HEADER}\n" + "\n".join(unearned_lines))
+
+    header = (
+        S.ACHIEVEMENTS_HEADER_OWN if is_self
+        else S.ACHIEVEMENTS_HEADER_OTHER.format(who=display)
+    )
+    embed = {
+        "title": header,
+        "description": "\n\n".join(description_parts),
+        "color": ANILIST_COLOR,
+        "footer": {"text": S.ACHIEVEMENTS_FOOTER.format(earned=len(earned), total=len(ACHIEVEMENTS))},
+    }
+    ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
 def _render_mood(

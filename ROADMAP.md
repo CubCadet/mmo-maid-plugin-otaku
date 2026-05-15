@@ -1034,18 +1034,38 @@ fallback — no LLM proxy in the SDK.
 
 **Goal:** Bench-press-worthy plugin. Featured on the marketplace.
 
-### v10.0.0 — The mature platform release
+### v10.0.0 — The mature platform release ✅ shipped 2026-05-14
 
-**Targets:**
+**Shipped:**
 
-- **Localization:** Real language support using the v1.4 string table. At least English + Japanese + Spanish.
-- **Accessibility:** Alt-text on every embed image, screen-reader-friendly text descriptions for charts.
-- **Gamification:** Achievements ("completed 50 anime," "watched all of 2025's premieres," "rated 100 anime"). Per-server leaderboard.
-- **Monetization-ready:** If the platform supports paid plugin tiers by then, define free vs. paid features (e.g., personal stats free, server-wide analytics paid).
-- **Documentation:** Full per-command docs site, embedded help walkthrough, video demo.
-- **Marketplace submission:** Apply for "Featured" status on the MMO Maid marketplace.
+- ✅ **Localization:** `T(key, lang)` + `T_for(ctx, user_id, key)` route
+  through the v1.4 strings table; v10.0 ships partial coverage in
+  Japanese + Spanish (~20 user-facing strings each). Future-key coverage
+  is incremental — every English string is reachable for every user.
+- ✅ **Accessibility:** every embed builder audited for `description`
+  field. `_make_studio_embed` was the only gap (now fixed); all other
+  builders v1–v9 already had descriptions.
+- ✅ **Gamification:** new `otaku_achievements` table + 10-entry
+  `ACHIEVEMENTS` registry + `/achievements [user]` slash command.
+  Lazy detection on access — zero per-handler overhead.
 
-This is a deliberate cap. After v10.0.0, future development goes back into the v10.x line, then potentially a v11+ if a real new direction emerges. The number "10" isn't sacred — it represents the moment the plugin moves from "growing" to "running a stable, mature product."
+**Deferred (documented in CHANGELOG):**
+
+- ⏸ **Auto-translation** — still blocked on an SDK translation proxy.
+  v10's static-translation pipeline activates the moment one lands.
+- ⏸ **Monetization-ready** — SDK v0.5.2 has no paid-tier capability;
+  reopens if a future SDK adds one.
+- ⏸ **Documentation site + video demo** — external workflow, out of
+  scope for a code change. The README, CHANGELOG, and ROADMAP serve
+  as the canonical reference.
+- ⏸ **Featured-marketplace application** — external submission. The
+  technical bar (regression discipline, multi-source, multi-language,
+  accessibility) is now met from the code side.
+
+**Phase 10 closes.** This is the deliberate cap per the roadmap's
+original framing. Future development goes into v10.x maintenance
+(filling in language coverage, growing the achievement registry,
+patching deferred items) or a v11+ if a real new direction emerges.
 
 ---
 

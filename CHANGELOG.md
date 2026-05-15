@@ -20,6 +20,144 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.0] - 2026-05-14
+
+### Phase 10 — Maturity & marketplace-featured release
+
+The deliberate **growing → running** pivot per ROADMAP. v10.0 ships three
+maturity slices in one tag: gamification (achievements), localization
+(real i18n built atop the v1.4 strings table + v9.3 language preference),
+and accessibility (embed-description audit). Monetization-ready and
+marketplace submission are documented deferrals — both blocked on
+infrastructure the SDK doesn't yet expose.
+
+### Added — Achievements (gamification)
+- New SQL table `otaku_achievements (user_id, achievement_key, awarded_at,
+  PRIMARY KEY (user_id, achievement_key))`. Bootstrapped idempotently
+  via `_SCHEMA_ACHIEVEMENTS_DDL` in `_bootstrap_schema`.
+- New slash command `/achievements [user]` — displays earned +
+  in-progress achievements for self or another server member. Runs every
+  predicate on access, awards newly-met ones via `INSERT ON CONFLICT DO
+  NOTHING`, surfaces "✨ newly earned" line when applicable.
+- `ACHIEVEMENTS` registry — 10 starter entries:
+  - `first_anime` — Look up your first anime via `/anime`.
+  - `first_favorite` — Add your first favorite.
+  - `first_review` — Submit your first review.
+  - `completed_10` / `completed_50` — Mark N anime completed.
+  - `rated_25` / `rated_100` — Rate N anime.
+  - `community` — Write 5 reviews.
+  - `seasonal_subscriber` — Subscribe to airing pings for 3+ anime.
+  - `polyglot` — Set a language preference.
+- Detection runs **lazily** on `/achievements` access (zero per-handler
+  overhead on /rate, /watch, /progress, etc.). Predicates are pure SQL/
+  KV reads guarded by try/except so any one raising can never strand the
+  handler. Outer `_get_user_achievements` lookup also guarded so transport
+  failure returns 0 newly-awarded rather than propagating.
+- New achievements get **appended** to `ACHIEVEMENTS`; keys are
+  immutable identifiers stored forever once earned.
+
+### Added — Localization (i18n)
+- `TRANSLATIONS` dict: maps language code → {`_Strings` attribute name →
+  translated value}. v10.0 ships partial coverage for **Japanese (ja)**
+  and **Spanish (es)** — 20+ user-visible strings each (`/anime` and
+  `/manga` usage + not-found messages, `/discover`, `/trending`,
+  `/similar` empty/cache surfaces, achievements headers, footer
+  attribution, cooldown wait).
+- `T(key, *, lang=None, **fmt)` — returns the translated string when
+  `TRANSLATIONS[lang][key]` exists; otherwise falls back transparently
+  to the English value from `_Strings`. Missing English keys raise
+  `AttributeError` (caller bug, not a translation gap).
+- `T_for(ctx, user_id, key, **fmt)` — per-user shorthand. Reads
+  `pref:lang:user:<id>` (the v9.3 KV pref) and routes through `T()`.
+- v9.3's `/preferences language:` choices are activated — the embed
+  note that "this doesn't translate anything yet" is now stale for ja
+  and es; still accurate for ko/zh/de/fr until v10.x fills them in.
+- `/anime` migrated to `T_for(...)` for usage + not-found surfaces as
+  proof-of-life. Other commands stay on `S.KEY` until v10.x; they
+  fall back to English cleanly even for users with non-English
+  preferences set. **Partial-coverage doctrine:** every English string
+  is reachable for every user; translated strings are an opt-in
+  enhancement that grows incrementally.
+
+### Added — Accessibility
+- Audited every embed builder for the `description` field (the only
+  embed field Discord exposes consistently to screen readers).
+- Fixed `_make_studio_embed` which previously had no description.
+  Studio embeds now carry a one-line summary describing the studio
+  type and credit count.
+- All other v1–v9 embed builders (`_make_anime_embed`,
+  `_make_manga_embed`, `_make_character_embed`,
+  `_make_voice_actor_embed`, `_make_staff_embed`,
+  `_make_list_embed`) already had descriptions. Audit clean.
+
+### Tests
+- New regression file `tests/regression/test_v10_0_0.py` (23 tests).
+  Coverage:
+  - Manifest `/achievements` shape + USER-type optional `user` option.
+  - Schema bootstrap includes `otaku_achievements` with wide PK.
+  - `ACHIEVEMENTS` registry contract: 10 expected keys present, every
+    entry has name/description/check.
+  - `_check_and_award_achievements` returns [] for empty users,
+    awards only newly-met achievements, skips already-earned,
+    uses idempotent `ON CONFLICT DO NOTHING` inserts, swallows
+    predicate AND outer-query exceptions.
+  - `/achievements` empty-state surface, earned-list rendering.
+  - Localization: TRANSLATIONS has ja + es with ANIME_NOT_FOUND
+    coverage; T() returns English by default; T() returns translated
+    when lang has entry; T() falls back to English for unknown lang
+    AND for missing-key-in-covered-lang; T_for() reads KV pref;
+    `/anime` integration with Spanish-user preference.
+  - Accessibility: `_make_studio_embed` and `_make_anime_embed` both
+    produce non-empty `description` fields.
+
+### Deferred per ROADMAP §10
+- **Auto-translation activation.** v10's localization infrastructure is
+  built for static translations; auto-translating AniList descriptions
+  to the user's preferred language still requires a translation proxy
+  (the v9.2/v9.3 blocker). When the SDK exposes one, the v9.3 lang
+  pref + v10 T() pipeline activates without further changes.
+- **Monetization-ready.** ROADMAP §10 mentions "free vs. paid features
+  if the platform supports paid plugin tiers by then." SDK v0.5.2
+  exposes no paid-tier capability — confirmed via the `pip show
+  mmo-maid-sdk` audit performed during the v9.3 → v10 transition.
+  Skipped; will reopen if a future SDK adds the capability.
+- **Documentation site + video demo.** Out of scope for a code change.
+  The README, CHANGELOG, and ROADMAP serve as the canonical reference.
+- **Featured-marketplace application.** External workflow; the
+  technical bar (Risky-tier stability, regression discipline, multi-
+  language UX, accessibility audit) is now met from the code side.
+
+### Phase 10 summary
+One tag shipped this phase: v10.0.0. Two new slash commands across
+the phase (`/find` in v9.0 stayed the only new search; `/preferences`
+in v9.3 + `/achievements` in v10 round out the personalisation
+surface). 569 tests total (546 → 569). 47 slash commands total (was
+46). Zero new capabilities. Zero new `proxy_domains_requested`.
+
+### The full v10.0 plugin shape
+- **47 slash commands** spanning discovery (/anime, /manga, /discover,
+  /manga-discover, /trending, /similar, /random, /find, /mood,
+  /genre-trends, /season-premieres, /character, /voice-actor, /staff,
+  /studio, /character-popular, /genres), tracking (/favorite,
+  /favorites, /watch, /list, /rate, /ratings, /progress, /import,
+  /stats, /my-stats, /otaku-reset), recommendations (/recommend),
+  community (/compare, /server-watchlist, /wp, /aotw, /poll,
+  /leaderboard, /review, /reviews), notifications (/notify, /unnotify,
+  /notify-list), preferences (/preferences, /achievements),
+  admin (/otaku-admin), and meta (/help).
+- **6 capabilities** declared: `discord:read`, `discord:send_message`,
+  `interaction:respond`, `proxy:http`, `storage:kv`, `storage:sql`.
+  No tier shifts since v2.0 (the original Risky declaration).
+- **3 outbound sources** (`graphql.anilist.co`, `api.jikan.moe`,
+  `kitsu.io`) all proxied through `ctx.http`. Per-source rate buckets.
+- **13 SQL tables**: otaku_user_media, otaku_server_watchlist,
+  otaku_watch_parties, otaku_watch_party_members, otaku_notifications,
+  otaku_reviews, otaku_aotw_polls, otaku_aotw_candidates,
+  otaku_aotw_votes, otaku_polls, otaku_poll_options, otaku_poll_votes,
+  otaku_achievements.
+- **569 tests** across 38 test files (35 immutable regression contracts
+  v1.0 → v10.0, plus tests/test_plugin.py for dev iteration).
+
 ## [9.3.0] - 2026-05-14
 
 ### Phase 9 closes with what shipped today

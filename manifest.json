@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "9.3.0",
+  "version": "10.0.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -192,6 +192,18 @@
           "description": "Free-form English description (e.g. \"slow romance set in school with supernatural twist\")",
           "type": 3,
           "required": true
+        }
+      ]
+    },
+    {
+      "name": "achievements",
+      "description": "View earned + in-progress achievements for yourself or another server member.",
+      "options": [
+        {
+          "name": "user",
+          "description": "Whose achievements to show (defaults to you)",
+          "type": 6,
+          "required": false
         }
       ]
     },
