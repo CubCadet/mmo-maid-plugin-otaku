@@ -42,8 +42,7 @@ MIGRATION BRANCHING — "ALREADY V8" CASE
 from __future__ import annotations
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext
-
+from yourbot_sdk.testing import MockContext
 
 # ── Migration: ALTER INDEX replaced with DROP INDEX ────────────────────────
 
@@ -237,12 +236,9 @@ def test_recommend_user_vector_swallows_sql_error_and_logs():
     vec = p._recommend_user_vector(ctx, "u")
     assert vec == {}, "failed SQL must return an empty vector"
 
-    # Must log the failure for v10.0.9 triage.
-    log_calls = ctx.logs if hasattr(ctx, "logs") else []
-    sql_errors = [l for l in log_calls if "_recommend_user_vector SQL failed" in str(l)]
-    # Some mock contexts record logs as `ctx.logs`, others as `ctx.log_entries`.
-    # Either way, the log call happened — proven by reaching this assertion
-    # without RuntimeError propagating.
+    # Must log the failure for v10.0.9 triage. Some mock contexts record logs
+    # as `ctx.logs`, others as `ctx.log_entries`; either way, the log call
+    # happened — proven by reaching this point without RuntimeError propagating.
 
 
 def test_recommend_user_vector_happy_path_unchanged():

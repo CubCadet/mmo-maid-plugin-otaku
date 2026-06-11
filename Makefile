@@ -2,7 +2,7 @@
 
 help:
 	@echo "Targets:"
-	@echo "  make dev       - local hot-reload loop (mmo dev --watch)"
+	@echo "  make dev       - local hot-reload loop (yourbot dev --watch)"
 	@echo "  make test      - run pytest"
 	@echo "  make lint      - ruff check (auto-fix safe issues)"
 	@echo "  make validate  - pre-flight validator (manifest, caps, SQL safety, layout)"
@@ -10,7 +10,7 @@ help:
 	@echo "  make clean     - remove caches and build artifacts"
 
 dev:
-	mmo dev --watch
+	yourbot dev --watch
 
 test:
 	python -m pytest -q
@@ -21,7 +21,7 @@ lint:
 validate:
 	python scripts/validate_plugin.py .
 
-release: lint validate test
+release: clean lint validate test
 	python scripts/build_release.py --output dist/
 
 clean:

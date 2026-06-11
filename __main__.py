@@ -28,7 +28,7 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 
-from mmo_maid_sdk import (
+from yourbot_sdk import (
     ActionRow,
     Button,
     Context,
@@ -8514,7 +8514,7 @@ def cmd_recommend(ctx: Context, event: dict) -> None:
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
-# Non-negotiable per the mmo-maid-plugins skill: plugin.run() is the last line.
+# Non-negotiable per the yourbot-plugin-dev skill: plugin.run() is the last line.
 # Tests import __main__ via a renamed module spec; they set OTAKU_SKIP_RUN=1 in
 # tests/conftest.py so the import doesn't block on the RPC loop.
 if not os.environ.get("OTAKU_SKIP_RUN"):

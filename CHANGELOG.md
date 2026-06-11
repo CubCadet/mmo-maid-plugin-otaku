@@ -20,6 +20,52 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.10] - 2026-06-11
+
+### Changed — platform rebrand: MMO Maid → YourBot.gg (SDK 0.6.1)
+
+The platform shipped its rename on 2026-06-05: `yourbot-sdk` 0.6.x is the real
+package (`mmo-maid-sdk` 0.6.1 on PyPI is now an empty alias that depends on it),
+the import is `yourbot_sdk`, and the `mmo` console script is replaced by
+`yourbot`. This release migrates the plugin in one move:
+
+- Dependency pin: `mmo-maid-sdk>=0.5.2,<0.6.0` → `yourbot-sdk>=0.6.1,<0.7.0`
+  in `requirements.txt` and `requirements-dev.txt`.
+- Imports: `mmo_maid_sdk` → `yourbot_sdk` in `__main__.py` and all 43 test
+  files. Mechanical rename only — no assertion or behavior changes. The full
+  suite (659 tests) was verified green on 0.5.2 (baseline), 0.5.4, 0.6.1 via
+  the legacy-import shim, and 0.6.1 with native imports.
+- CLI: `mmo dev` → `yourbot dev` in the Makefile and README (0.6.x drops the
+  `mmo` entry point entirely).
+- `scripts/validate_plugin.py`: the AST import check now requires
+  `yourbot_sdk`; brand strings updated here, in `scripts/build_release.py`,
+  and in README prose (mmomaid.com URLs → yourbot.gg).
+- Manifest `id` (`otaku`), command names, capabilities, proxy domains, and
+  schema are all untouched — no tier shift, no re-review trigger beyond the
+  normal tag review.
+
+Upstream changes absorbed with the bump (verified by source diff, all additive
+for this plugin): a transport race fix (correlation-state KeyError could
+permanently kill the reader thread), `ctx.secrets`, `ctx.request_id`,
+`ctx.http(params=)` — deliberately NOT adopted; the live host's proxy rejected
+query params at v10.0.7, so Jikan/Kitsu keep building URLs manually —
+`on_component(prefix=)`, `MockClock`, typed event/response TypedDicts
+(type-level only), and opt-in MockContext capability enforcement (only when an
+explicit `capabilities=` list is passed; our tests pass none).
+
+### Fixed
+
+- `make lint` was red: 11 ruff errors in the v10.0.3–v10.0.9 host-triage test
+  files (unused/unsorted imports, a dead `sql_errors` assignment in
+  `test_v10_0_8.py`, two over-long mock conditions in `test_plugin.py`).
+  Cleanup is non-semantic; no regression-contract assertions changed.
+- `make validate` was red: the dev venv lived inside the repo and tripped the
+  `.venv/` top-level check. The venv now lives at
+  `../mmo-maid-plugin-otaku-venv` (README quick-start updated), and
+  `make release` runs `clean` first so stale caches can't fail validation.
+- `ruff` dev pin bounded to `>=0.15,<0.16` — the unbounded `>=0.4` pin is how
+  new lint rules crept in unnoticed.
+
 ## [10.0.9] - 2026-05-14
 
 ### Root cause identified: `$N` placeholders rejected; global conversion to `%s`

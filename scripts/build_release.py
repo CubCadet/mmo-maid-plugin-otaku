@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_release.py — produce the MMO Maid upload zip from this repo.
+build_release.py — produce the YourBot upload zip from this repo.
 
 Why this exists: the GitHub repo contains lots of meta files (tests, .github,
 README, LICENSE, .gitignore, the SDK wheel, …) that must NOT end up in the
@@ -113,7 +113,7 @@ def load_manifest(repo: Path) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="Build the MMO Maid plugin upload zip.")
+    ap = argparse.ArgumentParser(description="Build the YourBot plugin upload zip.")
     ap.add_argument("-o", "--output", default=".",
                     help="output directory (default: cwd). Created if missing.")
     ap.add_argument("--dry-run", action="store_true",

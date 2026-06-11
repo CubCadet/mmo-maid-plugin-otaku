@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext
+from yourbot_sdk.testing import MockContext
 
 
 def _dashboard_manifest() -> dict:

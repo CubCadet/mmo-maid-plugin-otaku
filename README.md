@@ -2,7 +2,7 @@
 
 > Discover, search, and learn about anime from inside Discord — powered by AniList.
 
-A plugin for [MMO Maid](https://mmomaid.com) — runs sandboxed in the platform and reacts to slash-command interactions on installed servers.
+A plugin for [YourBot](https://yourbot.gg) (the platform formerly known as MMO Maid) — runs sandboxed in the platform and reacts to slash-command interactions on installed servers.
 
 ## What it does
 
@@ -25,7 +25,7 @@ The plugin uses one Discord-side write capability — `discord:send_message` —
 
 ## Dashboard
 
-A two-page manifest-mode dashboard ships with the plugin. Server admins can view it from the MMO Maid dev portal:
+A two-page manifest-mode dashboard ships with the plugin. Server admins can view it from the YourBot dev portal:
 
 - **Overview** — four stat cards (tracked rows, active users 30d, episodes watched, airing subscriptions), a watch-status bar chart, and a top-5-tracked-anime table.
 - **Settings** — pick the airing-announcement channel without leaving the portal (mirrors `/otaku-admin set-channel`).
@@ -185,11 +185,12 @@ All component custom_ids are prefixed with `otaku:`:
 # 1. Clone & install
 git clone https://github.com/CubCadetXT1/mmo-maid-plugin-otaku.git
 cd mmo-maid-plugin-otaku
-python -m venv .venv && source .venv/bin/activate
+# The venv must live OUTSIDE the repo — the validator rejects a top-level .venv/
+python -m venv ../mmo-maid-plugin-otaku-venv && source ../mmo-maid-plugin-otaku-venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 
 # 2. Local dev loop (hot-reload + mock host)
-mmo dev --watch
+yourbot dev --watch
 
 # 3. Tests
 python -m pytest -q
@@ -201,7 +202,7 @@ make lint
 python scripts/validate_plugin.py .
 ```
 
-`mmo dev` fires events from `events.yaml` against a `MockContext`, prints every action the plugin takes, and reloads on file change. See [SDK docs](https://mmomaid.com/dev/docs) for the full developer workflow.
+`yourbot dev` fires events from `events.yaml` against a `MockContext`, prints every action the plugin takes, and reloads on file change. See [SDK docs](https://yourbot.gg/dev/docs) for the full developer workflow.
 
 ## Release process
 
@@ -222,7 +223,7 @@ The tag's version (`v1.2.3` → `1.2.3`) must match `manifest.json`'s `version` 
 
 ## Submitting for review
 
-The MMO Maid dev portal links to this repo and pulls a specific tag for review. Review turnaround is typically 1–3 business days. The reviewer checks the manifest, scans for disallowed imports and unparameterised SQL, and re-prompts users on any tier shift.
+The YourBot dev portal links to this repo and pulls a specific tag for review. Review turnaround is typically 1–3 business days. The reviewer checks the manifest, scans for disallowed imports and unparameterised SQL, and re-prompts users on any tier shift.
 
 ## License
 

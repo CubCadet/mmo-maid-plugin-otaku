@@ -42,8 +42,7 @@ import json
 from pathlib import Path
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext, make_event
-
+from yourbot_sdk.testing import MockContext, make_event
 
 # ── _option_map reads both command_options (live host) and options (SDK) ───
 

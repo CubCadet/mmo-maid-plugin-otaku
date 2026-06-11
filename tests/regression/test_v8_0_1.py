@@ -31,7 +31,7 @@ pin the media_type filter; verified here as a defense-in-depth check.
 from __future__ import annotations
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext
+from yourbot_sdk.testing import MockContext
 
 # ── Migration happy-path: v7 table exists ──────────────────────────────────
 
@@ -217,7 +217,7 @@ def test_migration_acquires_advisory_lock_first():
 
 
 def _slash(name: str, options: dict | None = None, **extra) -> dict:
-    from mmo_maid_sdk.testing import make_event
+    from yourbot_sdk.testing import make_event
     return make_event(
         "interaction_create", interaction_type=2,
         command_name=name,
@@ -320,7 +320,7 @@ def test_leaderboard_completed_query_filters_media_type_anime():
     test_v3_3_0.py:63 noted this in a comment but didn't assert it; v8.0.1
     pins it explicitly here so a regression dropping the filter fires.
     """
-    from mmo_maid_sdk.testing import make_event
+    from yourbot_sdk.testing import make_event
 
     ctx = MockContext()
     captured: dict = {}

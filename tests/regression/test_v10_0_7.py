@@ -43,9 +43,8 @@ from __future__ import annotations
 import json
 
 import plugin_main as p
-from mmo_maid_sdk import RateLimitError
-from mmo_maid_sdk.testing import MockContext, make_event
-
+from yourbot_sdk import RateLimitError
+from yourbot_sdk.testing import MockContext
 
 # ── Schema-version marker short-circuits bootstrap ─────────────────────────
 

@@ -26,10 +26,9 @@ ORPHAN STRING REMOVAL (stale-code cleanup)
 from __future__ import annotations
 
 import math
-import re
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext
+from yourbot_sdk.testing import MockContext
 
 # ── _cosine_similarity target_norm hoist ───────────────────────────────────
 
@@ -132,7 +131,7 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
         return []
 
     ctx.sql.query = _q
-    from mmo_maid_sdk.testing import make_event
+    from yourbot_sdk.testing import make_event
     event = make_event(
         "interaction_create", interaction_type=2, command_name="poll",
         options=[{"name": "create", "type": 1, "options": [
@@ -194,7 +193,7 @@ def test_aotw_candidates_use_single_multi_row_insert(monkeypatch):
         return []
 
     ctx.sql.query = _q
-    from mmo_maid_sdk.testing import make_event
+    from yourbot_sdk.testing import make_event
     event = make_event(
         "interaction_create", interaction_type=2, command_name="aotw",
         options=[{"name": "start", "type": 1, "options": []}],

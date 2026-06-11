@@ -28,7 +28,7 @@ from __future__ import annotations
 import threading
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext
+from yourbot_sdk.testing import MockContext
 
 # ── Single-thread reentrancy preserved (sanity check) ──────────────────────
 

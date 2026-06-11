@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validate_plugin.py — pre-flight validator for MMO Maid plugins (SDK v0.5.1).
+validate_plugin.py — pre-flight validator for YourBot plugins (SDK v0.6.1).
 
 Usage:
     python validate_plugin.py [plugin_dir]
@@ -19,7 +19,7 @@ Checks (all reported, exit code 0 only if everything passes):
        - 'slash_commands' entries have 'name' + 'description'
        - 'proxy_domains_requested' entries are bare hosts (no scheme, no path)
  3. Source code (__main__.py):
-       - imports Plugin and Context from mmo_maid_sdk
+       - imports Plugin and Context from yourbot_sdk
        - has `plugin = Plugin()` at module level
        - calls `plugin.run()` somewhere (and warns if it's not the last
          non-blank, non-comment line)
@@ -305,12 +305,12 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
     # Imports
     imports_plugin = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "mmo_maid_sdk":
+        if isinstance(node, ast.ImportFrom) and node.module == "yourbot_sdk":
             for alias in node.names:
                 if alias.name == "Plugin":
                     imports_plugin = True
     if not imports_plugin:
-        f.error("__main__.py does not import Plugin from mmo_maid_sdk")
+        f.error("__main__.py does not import Plugin from yourbot_sdk")
 
     # plugin = Plugin() at module level
     has_module_plugin = False

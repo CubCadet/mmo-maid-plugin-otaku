@@ -35,8 +35,7 @@ NO BEHAVIOR CHANGE
 from __future__ import annotations
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext, make_event
-
+from yourbot_sdk.testing import MockContext
 
 # ── No $N placeholders remain anywhere in the runtime module ──────────────
 

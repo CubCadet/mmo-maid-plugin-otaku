@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 
 import plugin_main as p
-from mmo_maid_sdk import RateLimitError, RpcTimeoutError
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk import RateLimitError, RpcTimeoutError
+from yourbot_sdk.testing import MockContext, make_event
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -731,7 +731,12 @@ def test_my_stats_renders_fields_with_titled_lists():
     ctx = MockContext()
     # Stub each of the 4 SQL queries by inspecting the SQL.
     def _q(sql, params=None):  # noqa: ANN001
-        if "FROM otaku_user_media WHERE user_id" in sql and "rating IS NOT NULL" not in sql and "is_favorite" not in sql and "status = 'completed'" not in sql:
+        if (
+            "FROM otaku_user_media WHERE user_id" in sql
+            and "rating IS NOT NULL" not in sql
+            and "is_favorite" not in sql
+            and "status = 'completed'" not in sql
+        ):
             rows = []
             for _ in range(4):
                 rows.append({"status": "completed", "episodes_watched": 12, "rating": 16})
@@ -774,7 +779,12 @@ def test_my_stats_completion_percentage_shown():
     ctx = MockContext()
 
     def _q(sql, params=None):  # noqa: ANN001
-        if "FROM otaku_user_media WHERE user_id" in sql and "rating IS NOT NULL" not in sql and "is_favorite" not in sql and "status = 'completed'" not in sql:
+        if (
+            "FROM otaku_user_media WHERE user_id" in sql
+            and "rating IS NOT NULL" not in sql
+            and "is_favorite" not in sql
+            and "status = 'completed'" not in sql
+        ):
             rows = []
             for _ in range(3):
                 rows.append({"status": "completed", "episodes_watched": 0, "rating": None})

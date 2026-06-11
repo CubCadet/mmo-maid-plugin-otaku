@@ -26,7 +26,7 @@ HARDENED MULTI-ROW INSERT TEST ASSERTIONS
 from __future__ import annotations
 
 import plugin_main as p
-from mmo_maid_sdk.testing import MockContext
+from yourbot_sdk.testing import MockContext
 
 # ── _recommend_user_vector defensive cap ───────────────────────────────────
 
