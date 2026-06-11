@@ -20,6 +20,103 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.11] - 2026-06-11
+
+### Live incident: every HTTP body unusable + bootstrap stuck on a fresh install
+
+First live smoke test after v10.0.10 (2026-06-11 14:16 UTC): every
+`proxy.request` returned `rpc.ok` with a readable `status`, but the body
+failed to parse on all three sources — AniList logged "unparseable JSON" for
+queries that certainly match ("death note", "attack on titan"), Jikan/Kitsu
+fell through silently, users saw "No anime found". Separately, the same log
+showed the fresh server's schema bootstrap rate-limited at DDL #6 of 16.
+
+**Root cause analysis (adversarially verified, 3 independent lenses):** the
+SDK client is exonerated — the entire HTTP path (`_HttpApi`, transport
+framing, request params `{method, url, headers, body}`) is byte-identical
+between mmo-maid-sdk 0.5.4 (what live workers ran before the upgrade, since
+the old pin allowed it) and yourbot-sdk 0.6.1; no RPC method gained or
+renamed any param; the deployed v10.0.10 plugin diff was rename-only. The
+fault is in the HOST's proxy.request RESPONSE (body re-keyed, re-encoded,
+truncated, or empty while `status` stayed intact) — consistent with this
+host's drift record ($N→%s, options→command_options, rejected params=).
+Two fallbacks if the next live log disagrees: the host may key its pipeline
+on the artifact's declared dependency (test: re-pin to mmo-maid-sdk), or
+this fresh server may simply never have had a working proxy baseline.
+
+### Fixed
+
+- **Host-drift-tolerant HTTP body extraction** — new `_http_json(resp)`
+  used by all three transports: accepts the documented
+  `{status, body_bytes}` shape plus alternate keys (`body`, `text`),
+  bytes bodies, base64 (`body_b64`/`body_base64`, or base64 under a
+  documented key — decisive double-check), and pre-parsed dict/list
+  passthrough. `truncated: true` now fails closed even when the fragment
+  parses (the flag was never checked anywhere before).
+- **One-line body diagnostics** — `_log_http_body_anomaly` (the v10.0.8
+  diagnostic playbook): on any unusable body, logs keys, body type/length,
+  truncated flag, and the first 160 bytes, bounded. One live `/anime` run
+  now identifies any still-unhandled host shape exactly.
+- **Status coercion + visible status gates** — new `_http_status(resp)`
+  (handles `status`/`status_code`, numeric strings; fails closed on
+  garbage — the old AniList retry loop could crash on a non-numeric
+  status). Jikan/Kitsu non-2xx responses now log a warning instead of
+  silently reporting "no results".
+- **Bootstrap is now actually resumable** — the v10.0.7 "resume on next
+  boot" design made zero forward progress: every boot replayed the done
+  DDLs as IF-NOT-EXISTS no-ops that still consumed the host's 5/hr budget,
+  so a fresh install rate-limited at statement #6 forever. v10.0.11 adds a
+  KV cursor (`otaku:schema_ddl_idx`) persisted after each successful
+  statement; boots resume at the cursor and spend budget only on remaining
+  DDL (fresh install: healthy in ~4 boots). The DDL list is now the
+  append-only `_SCHEMA_DDL_SEQUENCE`; the rate-limit log line gained
+  `remaining_ddl`/`next_ddl` fields (note: its `retry_after` was always the
+  SDK's synthetic 5s default, not host reset timing).
+- **v7→v8 migration can no longer lose the primary key** — the rate limit
+  could abort the upgrade dance at its 6th statement (the final
+  ADD CONSTRAINT), and the next boot's "already v8" branch then set the
+  migrated marker with the table PK-less forever (breaking every
+  ON CONFLICT upsert). The branch now probes
+  `to_regclass('otaku_user_media_pkey')` and finishes the missing steps
+  first; repair fires only on an explicit NULL probe, so the v10.0.8
+  branch contracts (stubs without a `pk` key) are unaffected.
+- **Airing cron no longer burns the dedup key on failure** — the
+  per-episode dedup claim moved after the subscriber query, so a SQL error
+  (missing table mid-bootstrap, transient host failure) no longer
+  permanently skips that episode's pings.
+
+### Tests
+
+33 new immutable contracts in `tests/regression/test_v10_0_11.py` (shape
+tolerance, truncated/status gates, anomaly diagnostics at all three
+transports, cursor resume/rate-limit/garbled-cursor, branch-(b) PK repair +
+back-compat, dedup ordering). Suite total: 692.
+
+### Deferred (audit findings, tracked for a future patch)
+
+- Schema-ready gate: commands touching late-bootstrap tables surface raw
+  errors (deferred replies hang on "thinking…"; `/review` modal submits can
+  lose the typed review) until bootstrap completes. With the cursor fix
+  this window is now bounded (~4 boots), but a friendly "still setting up"
+  reply is worth adding — prioritize the /review path.
+- Admin gating short-circuit on the interaction payload's
+  `member.permissions` (live-verified shape) before the 3-RPC
+  get_guild/get_member/list_roles chain, which fails closed with no log if
+  the host ever drifts those shapes; also log in `_caller_is_admin` except
+  branches.
+- Five `sql.query` sites silently truncate at the SDK's 1000-row ceiling
+  (/compare, /stats, notification fanout, recommend internals — peer-vector
+  batch sits exactly AT the ceiling by design).
+- `pg_advisory_xact_lock` provides no cross-statement serialization (each
+  execute is its own host transaction) — the migration's TOCTOU guard
+  comment overstates it; every step is independently idempotent, so this is
+  doc-level.
+- Five subcommand parsers read legacy `event["options"]` only; works today
+  because the live host sends both keys. Normalize through `_option_map`.
+- Report upstream: 0.6.1 `events.py` InteractionCreate TypedDict omits
+  `options`/`command_options`/`values`; `list_roles` docstring omits
+  `permissions` (present in responses.py and required by our admin gate).
+
 ## [10.0.10] - 2026-06-11
 
 ### Changed — platform rebrand: MMO Maid → YourBot.gg (SDK 0.6.1)

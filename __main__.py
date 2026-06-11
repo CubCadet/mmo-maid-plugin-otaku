@@ -18,6 +18,7 @@ The full per-phase contract lives in CHANGELOG.md and ROADMAP.md.
 """
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -2053,6 +2054,105 @@ def _sleep_for_retry(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def _http_json(resp: dict | None):
+    """Parse the JSON body out of a ctx.http response dict, tolerating live-host
+    field-name/encoding drift (v10.0.11). Returns the parsed object, or None when
+    no usable body is present. Never raises.
+
+    The SDK contract is {status, headers, body_bytes (str), truncated}, but this
+    host has drifted from its own SDK before ($N→%s placeholders, options→
+    command_options, the params= kwarg the proxy rejected). Accepted shapes:
+      - str/bytes JSON under body_bytes / body / text (bytes UTF-8-decoded)
+      - a pre-parsed dict/list under those keys (host-side JSON passthrough)
+      - base64 text under body_b64 / body_base64, or base64 accidentally sent
+        under a documented key (decisive: a real JSON body never b64-decodes
+        cleanly with validate=True AND re-parses as JSON)
+    """
+    if not isinstance(resp, dict):
+        return None
+    if resp.get("truncated"):
+        # A truncated body is unusable even when the fragment happens to
+        # parse — data loss of unknown extent. Fail closed; the anomaly log
+        # at the call site surfaces the flag.
+        return None
+    raw = None
+    for key in ("body_bytes", "body", "text"):
+        val = resp.get(key)
+        if val not in (None, "", b""):
+            raw = val
+            break
+    if raw is None:
+        for key in ("body_b64", "body_base64"):
+            val = resp.get(key)
+            if isinstance(val, str) and val:
+                try:
+                    raw = base64.b64decode(val, validate=True)
+                except (ValueError, TypeError):
+                    return None
+                break
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode("utf-8", errors="replace")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        try:
+            return json.loads(base64.b64decode(raw, validate=True))
+        except (ValueError, TypeError):
+            return None
+
+
+def _http_status(resp: dict | None) -> int:
+    """Coerce the HTTP status out of a ctx.http response dict (v10.0.11).
+
+    Tolerates the documented int under "status", the legacy "status_code"
+    shape, and numeric strings. Returns 0 when absent or garbled so callers'
+    range checks fail closed instead of raising (the pre-v10.0.11 AniList
+    retry loop crashed on a non-numeric status via bare int()).
+    """
+    if not isinstance(resp, dict):
+        return 0
+    for key in ("status", "status_code"):
+        val = resp.get(key)
+        if val is None:
+            continue
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None:
+    """One bounded log line describing an unusable HTTP body (v10.0.11 triage).
+
+    Mirrors the v10.0.8 diagnostic playbook: when the live host's proxy response
+    can't be parsed, this single line in the dev-portal log tells us exactly what
+    shape arrived (keys, body type/length, truncated flag, first bytes) so the
+    next patch can be targeted instead of guessed. Must never raise.
+    """
+    try:
+        r = resp if isinstance(resp, dict) else {}
+        raw = r.get("body_bytes", r.get("body"))
+        ctx.log(
+            f"{source} http body anomaly",
+            level="error",
+            tags=[source, "http", "body-anomaly"],
+            keys=",".join(sorted(str(k) for k in r.keys()))[:200],
+            body_type=type(raw).__name__,
+            body_len=str(len(raw)) if hasattr(raw, "__len__") else "n/a",
+            truncated=str(r.get("truncated")),
+            head=repr(raw[:160]) if isinstance(raw, (str, bytes)) else "",
+        )
+    except Exception:  # noqa: BLE001 — diagnostics must never raise into the caller
+        pass
+
+
 def _anilist_post_once(ctx: Context, body: str) -> tuple[dict | None, str]:
     """One POST to AniList.
 
@@ -2127,8 +2227,8 @@ def _anilist_query(
         if classification in ("rate", "validation", "error"):
             return None  # never retry these
         # classification == "ok"
-        status = resp.get("status") if resp else 0
-        if 500 <= int(status or 0) < 600:
+        status = _http_status(resp)
+        if 500 <= status < 600:
             ctx.log(
                 "anilist 5xx",
                 level="warning",
@@ -2141,7 +2241,7 @@ def _anilist_query(
         # Exhausted retries on transient failures.
         return None
 
-    if resp is None or resp.get("status") != 200:
+    if resp is None or _http_status(resp) != 200:
         ctx.log(
             "anilist non-200",
             level="warning",
@@ -2150,10 +2250,10 @@ def _anilist_query(
         )
         return None
 
-    try:
-        payload = json.loads(resp.get("body_bytes") or "")
-    except (TypeError, ValueError):
+    payload = _http_json(resp)
+    if not isinstance(payload, dict):
         ctx.log("anilist returned unparseable JSON", level="error", tags=["anilist"])
+        _log_http_body_anomaly(ctx, "anilist", resp)
         return None
 
     if payload.get("errors"):
@@ -2275,19 +2375,20 @@ def _jikan_query(
         ctx.log(f"jikan call failed: {exc}", level="error", tags=["jikan", "http"])
         return None
 
-    # v10.0.7 — `status_code`/`body` were never the SDK's field names; they
-    # were a pre-existing typo. The `or .get("status")` fallback masked the
-    # bug. Both old fields kept here as defensive fallbacks while we let
-    # callers re-validate.
-    status = (resp or {}).get("status") or (resp or {}).get("status_code") or 0
-    if not isinstance(status, int) or status < 200 or status >= 300:
+    # v10.0.11 — status coerced via _http_status (handles status/status_code
+    # and numeric strings); non-2xx now LOGS instead of silently dropping, so
+    # a host status-shape drift or a real upstream error is visible in the
+    # dev-portal log instead of masquerading as "no results".
+    status = _http_status(resp)
+    if status < 200 or status >= 300:
+        ctx.log(
+            "jikan non-2xx", level="warning", tags=["jikan", "http"],
+            status=str((resp or {}).get("status", (resp or {}).get("status_code"))),
+        )
         return None
-    body = (resp or {}).get("body_bytes") or (resp or {}).get("body")
-    if not body:
-        return None
-    try:
-        payload = json.loads(body) if isinstance(body, str) else body
-    except (ValueError, TypeError):
+    payload = _http_json(resp)
+    if payload is None:
+        _log_http_body_anomaly(ctx, "jikan", resp)
         return None
     # Jikan wraps results in a `data` field; pagination metadata in `pagination`.
     data = payload.get("data") if isinstance(payload, dict) else None
@@ -2347,15 +2448,16 @@ def _kitsu_query(
         ctx.log(f"kitsu call failed: {exc}", level="error", tags=["kitsu", "http"])
         return None
 
-    status = (resp or {}).get("status") or (resp or {}).get("status_code") or 0
-    if not isinstance(status, int) or status < 200 or status >= 300:
+    status = _http_status(resp)
+    if status < 200 or status >= 300:
+        ctx.log(
+            "kitsu non-2xx", level="warning", tags=["kitsu", "http"],
+            status=str((resp or {}).get("status", (resp or {}).get("status_code"))),
+        )
         return None
-    body = (resp or {}).get("body_bytes") or (resp or {}).get("body")
-    if not body:
-        return None
-    try:
-        payload = json.loads(body) if isinstance(body, str) else body
-    except (ValueError, TypeError):
+    payload = _http_json(resp)
+    if payload is None:
+        _log_http_body_anomaly(ctx, "kitsu", resp)
         return None
     data = payload.get("data") if isinstance(payload, dict) else None
     if data is None:
@@ -2661,6 +2763,41 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
         return
     if has_v8 and not has_v7:
         # (b) Already v8. Marker may be unset (e.g., KV wipe via reinstall).
+        #
+        # v10.0.11 — but "table renamed" does NOT imply "migration finished":
+        # the host's DDL rate limit (5/hr) can abort the upgrade dance in
+        # branch (c) at its 6th statement — the final ADD CONSTRAINT — leaving
+        # the renamed table with NO primary key. This branch then declared the
+        # migration done forever and every ON CONFLICT upsert on
+        # otaku_user_media failed permanently. Probe the wide PK's backing
+        # index (to_regclass works for indexes; plain SELECTs are not
+        # DDL-rate-limited) and finish the remaining steps if it's missing.
+        # Repair fires ONLY on an explicit NULL probe — a row that lacks the
+        # "pk" key entirely (possible only from stubbed SQL in tests) counts
+        # as healthy.
+        pk_rows = ctx.sql.query(
+            "SELECT to_regclass('otaku_user_media_pkey') AS pk"
+        ) or []
+        pk_row = pk_rows[0] if pk_rows else {}
+        pk_missing = "pk" in pk_row and pk_row.get("pk") is None
+        if pk_missing:
+            # Steps 3-6 of the branch (c) dance, minus the DROP of the wide
+            # PK we just proved absent. Each is idempotent; a mid-repair
+            # RateLimitError propagates to _bootstrap_schema's handler, the
+            # marker stays unset, and the next boot retries from the probe.
+            ctx.sql.execute(
+                "ALTER TABLE otaku_user_media "
+                "ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'anime'"
+            )
+            ctx.sql.execute(
+                "ALTER TABLE otaku_user_media "
+                "DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
+            )
+            ctx.sql.execute(
+                "ALTER TABLE otaku_user_media "
+                "ADD CONSTRAINT otaku_user_media_pkey "
+                "PRIMARY KEY (user_id, media_id, media_type)"
+            )
         try:
             ctx.kv.set(_SCHEMA_V8_MIGRATED_KV, "1")
         except Exception:  # noqa: BLE001
@@ -2731,15 +2868,27 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
 #      the whole bootstrap once the install is complete. Subsequent boots
 #      issue ZERO DDL.
 #   2) On `RateLimitError` mid-bootstrap we log a warning and return
-#      cleanly — the marker stays unset, so the next worker boot picks up
-#      where we left off (each individual DDL is idempotent via
-#      `IF NOT EXISTS`, so re-running prior ones is a no-op but counts
-#      against the budget; across ~3 worker restarts a fresh install
-#      completes).
+#      cleanly — the marker stays unset, so the next worker boot resumes.
 #   3) v2.1/v2.2 ALTER ADD COLUMN statements were folded into the
 #      `otaku_user_media` CREATE TABLE for fresh installs (the ALTERs
 #      remain in the bootstrap list to cover existing v2.0-era tables
 #      that don't yet have the columns).
+#
+# v10.0.11 — the v10.0.7 design was NOT actually resumable: every boot
+# replayed the already-done DDLs from the top as IF NOT EXISTS no-ops, and
+# the host's limiter counts statements *received*, not statements that did
+# work (proven live 2026-06-11: boot ran DDLs #1-#5, rate-limited at #6;
+# the next boot would burn the same 5 slots on #1-#5 again — zero forward
+# progress, a fresh install never finished its 16 statements). The fix is a
+# KV cursor (`otaku:schema_ddl_idx`) persisted after each successful
+# statement; resume starts at the cursor, so each boot spends its budget
+# only on DDL that still needs to run (a fresh install heals in
+# ceil(16/5) = 4 boots, ~1h apart).
+#
+# RULE: `_SCHEMA_DDL_SEQUENCE` is APPEND-ONLY. The cursor stores an index
+# into it; reordering or inserting mid-list makes old cursors point at the
+# wrong statement. New versions append (every statement is IF NOT EXISTS /
+# additive, so append order is always safe).
 _SCHEMA_VERSION_KV = "otaku:schema_version"
 # v10.0.8 keeps this at "10.0.7" deliberately — the v10.0.8 changes are
 # pure bug fixes (migration ALTER INDEX → DROP INDEX, /stats refactor,
@@ -2747,6 +2896,54 @@ _SCHEMA_VERSION_KV = "otaku:schema_version"
 # v10.0.7 markers stay valid and those installs short-circuit at the
 # top of `_bootstrap_schema` without re-running anything.
 _CURRENT_SCHEMA_VERSION = "10.0.7"
+
+# v10.0.11 — resume cursor: index of the next _SCHEMA_DDL_SEQUENCE entry to
+# execute. Persisted after every successful statement; absent/garbled values
+# fall back to 0 (full replay — the pre-cursor behavior, still correct via
+# IF NOT EXISTS, just budget-hungry).
+_SCHEMA_DDL_CURSOR_KV = "otaku:schema_ddl_idx"
+
+# Ordered, APPEND-ONLY (see the rule above). Labels feed the rate-limit log
+# so operators can see exactly where bootstrap stopped and what remains.
+_SCHEMA_DDL_SEQUENCE: tuple = (
+    ("v2.0 otaku_user_media", _SCHEMA_DDL),
+    ("v2.0 user/status/added index", _SCHEMA_INDEX_DDL),
+    ("v2.1 rating column", _SCHEMA_RATING_DDL),
+    ("v2.2 episodes_watched column", _SCHEMA_EPISODES_DDL),
+    ("v3.0 server watchlist", _SCHEMA_SERVER_WATCHLIST_DDL),
+    ("v3.2 watch parties", _SCHEMA_WATCH_PARTY_DDL),
+    ("v3.2 watch party members", _SCHEMA_WATCH_PARTY_MEMBERS_DDL),
+    ("v4.0 notifications", _SCHEMA_NOTIFICATIONS_DDL),
+    ("v7.0 reviews", _SCHEMA_REVIEWS_DDL),
+    ("v7.1 aotw polls", _SCHEMA_AOTW_POLLS_DDL),
+    ("v7.1 aotw candidates", _SCHEMA_AOTW_CANDIDATES_DDL),
+    ("v7.1 aotw votes", _SCHEMA_AOTW_VOTES_DDL),
+    ("v7.2 polls", _SCHEMA_POLLS_DDL),
+    ("v7.2 poll options", _SCHEMA_POLL_OPTIONS_DDL),
+    ("v7.2 poll votes", _SCHEMA_POLL_VOTES_DDL),
+    ("v10.0 achievements", _SCHEMA_ACHIEVEMENTS_DDL),
+)
+
+
+def _log_bootstrap_rate_limit(ctx: Context, exc: Exception, *, remaining: int, next_ddl: str) -> None:
+    """Log the bootstrap rate-limit checkpoint. Keeps the historic message
+    string (dashboards/triage grep for it) and adds where we stopped.
+
+    Note: `retry_after` is the SDK's synthetic 5s default when the host error
+    carries no reset timing — the real budget window is the host's ~1 hour;
+    `remaining_ddl`/`next_ddl` are the actionable fields.
+    """
+    try:
+        ctx.log(
+            "schema bootstrap rate-limited; will resume on next worker boot",
+            level="warning",
+            tags=["bootstrap", "rate-limit"],
+            retry_after=getattr(exc, "retry_after", None),
+            remaining_ddl=str(remaining),
+            next_ddl=next_ddl,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _bootstrap_schema(ctx: Context) -> None:
@@ -2771,53 +2968,48 @@ def _bootstrap_schema(ctx: Context) -> None:
         pass
 
     try:
-        # v8.0.0 — must run first; later DDLs assume the new table name.
+        # v8.0.0 — must run first; later DDLs assume the new table name. Runs
+        # outside the cursor: it has its own probe/marker idempotency and its
+        # statement count varies by branch.
         _migrate_v7_to_v8(ctx)
-        ctx.sql.execute(_SCHEMA_DDL)
-        ctx.sql.execute(_SCHEMA_INDEX_DDL)
-        # v2.1.0 — still issued for installs whose v2.0 table predated the
-        # column. Fresh v10.0.7 installs already have `rating` from
-        # `_SCHEMA_DDL`; this ALTER becomes a no-op via IF NOT EXISTS
-        # (still costs one DDL slot against the rate limit on first run).
-        ctx.sql.execute(_SCHEMA_RATING_DDL)
-        # v2.2.0 — same; fresh installs already have `episodes_watched`.
-        ctx.sql.execute(_SCHEMA_EPISODES_DDL)
-        # v3.0.0
-        ctx.sql.execute(_SCHEMA_SERVER_WATCHLIST_DDL)
-        # v3.2.0
-        ctx.sql.execute(_SCHEMA_WATCH_PARTY_DDL)
-        ctx.sql.execute(_SCHEMA_WATCH_PARTY_MEMBERS_DDL)
-        # v4.0.0
-        ctx.sql.execute(_SCHEMA_NOTIFICATIONS_DDL)
-        # v7.0.0
-        ctx.sql.execute(_SCHEMA_REVIEWS_DDL)
-        # v7.1.0
-        ctx.sql.execute(_SCHEMA_AOTW_POLLS_DDL)
-        ctx.sql.execute(_SCHEMA_AOTW_CANDIDATES_DDL)
-        ctx.sql.execute(_SCHEMA_AOTW_VOTES_DDL)
-        # v7.2.0
-        ctx.sql.execute(_SCHEMA_POLLS_DDL)
-        ctx.sql.execute(_SCHEMA_POLL_OPTIONS_DDL)
-        ctx.sql.execute(_SCHEMA_POLL_VOTES_DDL)
-        # v10.0.0
-        ctx.sql.execute(_SCHEMA_ACHIEVEMENTS_DDL)
     except RateLimitError as exc:
-        # v10.0.7 — the host caps DDL at 5 statements/hour. Mid-bootstrap
-        # rate-limits leave the install partially complete; mark progress
-        # by NOT setting the version marker, log a warning so operators
-        # can correlate, and return cleanly. The next worker restart
-        # re-fires `on_ready` for this server and picks up the remaining
-        # DDLs (each `IF NOT EXISTS` so re-running prior ones is safe).
-        try:
-            ctx.log(
-                "schema bootstrap rate-limited; will resume on next worker boot",
-                level="warning",
-                tags=["bootstrap", "rate-limit"],
-                retry_after=getattr(exc, "retry_after", None),
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        _log_bootstrap_rate_limit(
+            ctx, exc,
+            remaining=len(_SCHEMA_DDL_SEQUENCE),
+            next_ddl="v7→v8 migration (unfinished)",
+        )
         return
+
+    # v10.0.11 — resumable DDL loop. Start at the persisted cursor so a boot
+    # never re-spends rate-limit budget on statements that already succeeded
+    # (see the design comment above _SCHEMA_VERSION_KV). The per-version
+    # comments from the old inline list live in _SCHEMA_DDL_SEQUENCE's labels.
+    start_idx = 0
+    try:
+        raw_cursor = ctx.kv.get(_SCHEMA_DDL_CURSOR_KV)
+        if isinstance(raw_cursor, str) and raw_cursor.isdigit():
+            start_idx = min(int(raw_cursor), len(_SCHEMA_DDL_SEQUENCE))
+    except Exception:  # noqa: BLE001 — unreadable cursor → full replay
+        pass
+
+    for idx in range(start_idx, len(_SCHEMA_DDL_SEQUENCE)):
+        label, ddl = _SCHEMA_DDL_SEQUENCE[idx]
+        try:
+            ctx.sql.execute(ddl)
+        except RateLimitError as exc:
+            # The host caps DDL at ~5 statements/hour. The cursor already
+            # points at this statement, so the next worker boot resumes
+            # exactly here with a fresh budget.
+            _log_bootstrap_rate_limit(
+                ctx, exc,
+                remaining=len(_SCHEMA_DDL_SEQUENCE) - idx,
+                next_ddl=label,
+            )
+            return
+        try:
+            ctx.kv.set(_SCHEMA_DDL_CURSOR_KV, str(idx + 1))
+        except Exception:  # noqa: BLE001 — lost cursor → worst case replay
+            pass
 
     # v10.0.7 — bootstrap completed fully; gate subsequent boots.
     try:
@@ -4403,20 +4595,25 @@ def _dispatch_airing_announcements(ctx: Context) -> int:
         if not media_id or not episode:
             continue
 
-        # Dedup: one airing only pings once.
-        dedup_key = _airing_dedup_key(media_id, episode)
-        try:
-            if not ctx.ephemeral.dedup(dedup_key, ttl_seconds=NOTIFY_DEDUP_TTL):
-                continue
-        except Exception:  # noqa: BLE001 — ephemeral down → still try once
-            pass
-
+        # v10.0.11 — query subscribers BEFORE claiming the dedup key. The old
+        # order burned the per-episode claim and THEN ran the SQL; any SQL
+        # failure (e.g. otaku_notifications not yet bootstrapped, transient
+        # host error) permanently skipped that episode's pings for the TTL.
         subs = ctx.sql.query(
             "SELECT user_id, channel_id FROM otaku_notifications WHERE media_id = %s",
             [media_id],
         ) or []
         if not subs:
             continue
+
+        # Dedup: one airing only pings once. Claimed only once we know there
+        # is something to send.
+        dedup_key = _airing_dedup_key(media_id, episode)
+        try:
+            if not ctx.ephemeral.dedup(dedup_key, ttl_seconds=NOTIFY_DEDUP_TTL):
+                continue
+        except Exception:  # noqa: BLE001 — ephemeral down → still try once
+            pass
 
         # Group subscribers by which channel we'd post to.
         by_channel: dict[str, list[str]] = {}
