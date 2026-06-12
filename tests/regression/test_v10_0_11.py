@@ -285,24 +285,31 @@ def test_schema_ddl_sequence_matches_known_statement_count():
 def test_migration_branch_b_repairs_missing_pk():
     """A v7 upgrade that rate-limited at the final ADD CONSTRAINT left the
     renamed table with NO primary key, and branch (b) then declared the
-    migration done forever. v10.0.11: an explicit NULL pk probe triggers the
-    finishing steps before the marker is set."""
+    migration done forever. The PK-missing state must trigger the finishing
+    steps before bootstrap completes.
+
+    # regression-fix (v10.0.12): the v10.0.11 inline branch-(b) repair was
+    # unreachable for tenants whose migrated marker was already set, so the
+    # heal moved to _ensure_wide_pk, called by _bootstrap_schema after every
+    # _migrate_v7_to_v8 return. The probe now COALESCEs to a 'missing'
+    # sentinel so the decision doesn't depend on NULL-column serialization.
+    # Same user-visible contract (PK-less table gets repaired); the stub and
+    # entry point are updated to the new mechanism."""
     ctx = MockContext()
+    ctx.kv.set(p._SCHEMA_V8_MIGRATED_KV, "1")  # poisoned tenant: marker set, PK gone
 
     def _q(sql, params=None, limit=1000):
-        if "to_regclass('otaku_user_anime')" in sql:
-            return [{"v7": None, "v8": "otaku_user_media"}]
         if "to_regclass('otaku_user_media_pkey')" in sql:
-            return [{"pk": None}]  # explicit NULL → PK genuinely missing
+            return [{"pk": "missing"}]  # explicit sentinel → PK genuinely missing
         return []
 
     ctx.sql.query = _q
-    p._migrate_v7_to_v8(ctx)
+    p._bootstrap_schema(ctx)
     sqls = [c["sql"] for c in ctx.sql.executed]
+    assert any("DROP INDEX IF EXISTS otaku_user_anime_user_status_added_idx" in s for s in sqls)
     assert any("ADD COLUMN IF NOT EXISTS media_type" in s for s in sqls)
     assert any("DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey" in s for s in sqls)
     assert any("ADD CONSTRAINT otaku_user_media_pkey" in s for s in sqls)
-    assert ctx.kv.get(p._SCHEMA_V8_MIGRATED_KV) == "1"
 
 
 def test_migration_branch_b_healthy_pk_issues_no_ddl():

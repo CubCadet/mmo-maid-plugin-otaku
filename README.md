@@ -6,7 +6,7 @@ A plugin for [YourBot](https://yourbot.gg) (the platform formerly known as MMO M
 
 ## What it does
 
-Otaku gives your server a small set of slash commands for finding anime: look one up by name, browse a genre, see what's trending this season, or pull recommendations similar to a show you've already looked at. Every command answers with a rich Discord embed (cover art, score, episode count, genre tags, a short description, and a link to the AniList page). The plugin caches each user's most recent `/anime` lookup for 7 days so `/similar` works with no arguments — handy when you've already found the show you care about and just want "more like this." All data comes from AniList's public GraphQL API; the plugin only reaches `graphql.anilist.co` and stores nothing about the user beyond their last-viewed anime ID.
+Otaku gives your server a small set of slash commands for finding anime: look one up by name, browse a genre, see what's trending this season, or pull recommendations similar to a show you've already looked at. Every command answers with a rich Discord embed (cover art, score, episode count, genre tags, a short description, and a link to the AniList page). The plugin caches each user's most recent `/anime` lookup for 7 days so `/similar` works with no arguments — handy when you've already found the show you care about and just want "more like this." Primary data comes from AniList's public GraphQL API, with MAL (Jikan) and Kitsu as fallback search sources — the plugin reaches exactly the three declared proxy domains. Stored data: each user's tracking rows (watch status, rating, episodes, favorites, reviews, subscriptions — see the SQL schema below) plus the small KV keys in the table below.
 
 ## Capabilities
 
@@ -17,9 +17,9 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 | `interaction:respond` | Safe | Reply to slash commands and component (button/select) clicks. Auto-added because the manifest declares `slash_commands`. |
 | `proxy:http` | Safe | Call AniList's GraphQL endpoint (`graphql.anilist.co`) for primary search/lookup. v9.1 added MAL (Jikan v4 at `api.jikan.moe`) and Kitsu (`kitsu.io`) as secondary fallback sources for `/anime` and `/manga` when AniList misses. Per-source rate buckets enforce AniList 90/min, Jikan 3/sec, Kitsu 10/sec. |
 | `storage:kv` | Safe | Cache each user's last-viewed anime ID for 7 days so `/similar` can default to it. Also caches AniList's genre list for 24h. |
-| `storage:sql` | Risky | Per-user anime tracking (`/favorite`, `/watch`, `/list`, `/favorites`). Single table `otaku_user_anime`, auto-scoped per server. |
+| `storage:sql` | Risky | Per-user anime/manga tracking (`/watch`, `/rate`, `/list`, `/favorites`), reviews, watch parties, polls, AOTW, subscriptions, achievements — 13 tables (see the SQL schema section), auto-scoped per server. |
 | `discord:read` | Safe | Read the caller's guild membership and roles to gate `/otaku-admin` to server admins (anyone with `Administrator` or `Manage Server`). Used purely for permission checks. |
-| `discord:send_message` | Risky | Post airing notifications to the per-server announcement channel (or the channel each user subscribed in) when AniList reports a new episode is airing. |
+| `discord:send_message` | Safe | Post airing notifications to the per-server announcement channel (or the channel each user subscribed in) when AniList reports a new episode is airing. |
 
 The plugin uses one Discord-side write capability — `discord:send_message` — exclusively for posting airing notifications to a server-designated channel. All other Discord interactions are slash command replies.
 
@@ -92,40 +92,48 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 
 ### Politeness throttle
 
-Every command checks an ephemeral per-user cooldown (`otaku:user:<id>`, 2 s) before hitting AniList. The cooldown is sandbox-side only — AniList itself permits ~90 req/min globally, and the platform proxy enforces 30/min per (server, plugin). The 2 s per-user throttle stops a single chatty user from monopolising either budget.
+Every command that reaches AniList (or SQL) checks an ephemeral per-user cooldown (`otaku:user:<id>`, 2 s) first — the lone exception is `/help`, which only reads the manifest. The cooldown is sandbox-side only — AniList itself permits ~90 req/min globally, and the platform proxy enforces 30/min per (server, plugin). The 2 s per-user throttle stops a single chatty user from monopolising either budget.
 
 ## KV key convention
 
-The plugin uses two KV keys:
+Durable KV keys (`ctx.kv`):
 
 ```
 last_anime:user:<discord_user_id>   →   <anilist_media_id>   (TTL: 7 days, per-user)
+last_manga:user:<discord_user_id>   →   <anilist_media_id>   (TTL: 7 days, per-user)
+pref:lang:user:<discord_user_id>    →   "en" | "ja" | ...    (no TTL, per-user)
+pref:spoilers:user:<discord_user_id>→   "hide" | "show"      (no TTL, per-user)
 genres:global                       →   ["Action", ...]      (TTL: 24h, server-wide)
 notify_channel:guild                →   "<channel_id>"       (no TTL, server-wide)
 premieres_digest_last:guild         →   "<SEASON>_<YEAR>"    (no TTL, server-wide)
+otaku:schema_version                →   "<version>"          (bootstrap-complete marker)
+otaku:schema_v8_migrated            →   "1"                  (v7→v8 migration marker)
+otaku:schema_ddl_idx                →   "<n>"                (v10.0.11 bootstrap resume cursor)
+otaku:schema_pk_verified            →   "1"                  (v10.0.12 one-time wide-PK check marker)
 ```
+
+Ephemeral keys (`ctx.ephemeral`, Redis-backed, evictable): `otaku:user:<id>` (2 s command cooldown) and `otaku:airing:<media_id>:<episode>` (24 h announce-once dedup).
 
 KV is per-server and per-plugin, so the same user is tracked independently on each server. The 7-day TTL means an inactive user's cache expires on its own — no explicit cleanup needed. KV is wiped automatically on uninstall.
 
 ## SQL schema
 
-v2.0.0 added one table for tracking commands. Rows are auto-scoped to `ctx.server_id` by the runner, so the schema has no explicit `server_id` column.
+Rows are auto-scoped to `ctx.server_id` by the runner, so no table has an explicit `server_id` column. The core tracking table (created `otaku_user_anime` in v2.0.0, renamed and widened in v8.0.0 for manga support):
 
 ```sql
-CREATE TABLE IF NOT EXISTS otaku_user_anime (
+CREATE TABLE IF NOT EXISTS otaku_user_media (
   user_id      TEXT NOT NULL,
   media_id     INTEGER NOT NULL,
-  status       TEXT NOT NULL,                 -- watching | completed | on_hold | dropped | plan
+  media_type   TEXT NOT NULL DEFAULT 'anime',  -- v8.0.0: anime | manga
+  status       TEXT NOT NULL,                  -- watching | completed | on_hold | dropped | plan
   is_favorite  BOOLEAN NOT NULL DEFAULT FALSE,
+  rating       SMALLINT,                       -- v2.1.0: score × 2 (2..20)
+  episodes_watched SMALLINT DEFAULT 0,         -- v2.2.0 (carries chapters for manga rows)
   added_at     TIMESTAMP NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (user_id, media_id)
+  PRIMARY KEY (user_id, media_id, media_type)
 );
-CREATE INDEX IF NOT EXISTS otaku_user_anime_user_status_added_idx
-  ON otaku_user_anime (user_id, status, added_at DESC);
--- v2.1.0 (additive):
-ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS rating SMALLINT;  -- score × 2 (2..20)
--- v2.2.0 (additive):
-ALTER TABLE otaku_user_anime ADD COLUMN IF NOT EXISTS episodes_watched SMALLINT DEFAULT 0;
+CREATE INDEX IF NOT EXISTS otaku_user_media_user_status_added_idx
+  ON otaku_user_media (user_id, status, added_at DESC);
 
 -- v3.0.0:
 CREATE TABLE IF NOT EXISTS otaku_server_watchlist (
@@ -162,7 +170,9 @@ CREATE TABLE IF NOT EXISTS otaku_notifications (
 );
 ```
 
-The DDL is idempotent (`IF NOT EXISTS`) and runs from both `@plugin.on_install` and `@plugin.on_ready`. The `on_ready` path covers pool-mode workers picking up a tenant that upgraded from v1.x (where `on_install` does not re-fire).
+Later versions add: `otaku_reviews` (v7.0), `otaku_aotw_polls` / `otaku_aotw_candidates` / `otaku_aotw_votes` (v7.1), `otaku_polls` / `otaku_poll_options` / `otaku_poll_votes` (v7.2), and `otaku_achievements` (v10.0) — 13 tables across a 16-statement bootstrap. The canonical, ordered list lives in `_SCHEMA_DDL_SEQUENCE` in `__main__.py`.
+
+The DDL is idempotent (`IF NOT EXISTS`) and runs from both `@plugin.on_install` and `@plugin.on_ready`. The `on_ready` path covers pool-mode workers picking up a tenant that upgraded from v1.x (where `on_install` does not re-fire). The host rate-limits DDL (~5 statements/hour per tenant), so bootstrap resumes across worker boots via the `otaku:schema_ddl_idx` KV cursor (v10.0.11) instead of replaying from the top.
 
 ## Custom_id namespace
 
@@ -178,6 +188,15 @@ All component custom_ids are prefixed with `otaku:`:
 | `otaku:swl:<page>` | `/server-watchlist view` prev/next | Server watchlist is shared, no user_id in the id. |
 | `otaku:wp-join:<party_id>` | `[🎬 Join party]` button on `/wp create` and `/wp status` embeds | One-click join for a watch party. |
 | `otaku:premieres:<season>:<year>:<page>` | `/season-premieres` prev/next buttons | Season + year baked in so the same buttons work across multiple seasons in flight. |
+| `otaku:mood:<mood>:<page>` | `/mood` prev/next buttons | Curated mood key baked in. |
+| `otaku:mpage:<genre>:<sort>:<page>` | `/manga-discover` prev/next buttons | Manga twin of `otaku:page`. |
+| `otaku:popchar:<page>` | `/character-popular` prev/next buttons | Rank numbers continue across pages. |
+| `otaku:reviews:<media_id>:<page>` | `/reviews` prev/next buttons | Spoiler redaction re-applied per viewer. |
+| `otaku:reset-confirm:<user_id>` / `otaku:reset-cancel:<user_id>` | `/otaku-reset` confirmation buttons | User-scoped so only the invoker can confirm. |
+| `otaku:aotw-vote:<poll_id>:<media_id>` | `/aotw start` candidate buttons | One active poll per server. |
+| `otaku:poll-vote:<poll_id>:<key>` | `/poll create` option buttons (A–D) | Vote upserts on PK (poll_id, user_id). |
+| `otaku:review-modal:<media_id>` | `/review` modal (interaction_type 5) | Pre-fills the user's existing review. |
+| `otaku:noop:prev` / `otaku:noop:next` | Disabled pagination filler buttons | Never clickable; no route needed. |
 
 ## Quick start (development)
 
@@ -198,8 +217,10 @@ python -m pytest -q
 # 4. Lint (ruff — also runs in CI)
 make lint
 
-# 5. Pre-flight validation (also runs in CI)
-python scripts/validate_plugin.py .
+# 5. Pre-flight validation (also runs in CI). Use make — it cleans first:
+#    test runs leave __pycache__/.pytest_cache at the repo top level, which
+#    the validator's layout check rejects.
+make validate
 ```
 
 `yourbot dev` fires events from `events.yaml` against a `MockContext`, prints every action the plugin takes, and reloads on file change. See [SDK docs](https://yourbot.gg/dev/docs) for the full developer workflow.

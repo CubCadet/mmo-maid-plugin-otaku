@@ -227,8 +227,11 @@ def test_canonicalize_kitsu_parses_string_rating():
     raw = {
         "id": "1",
         "type": "anime",
-        "slug": "cowboy-bebop",
+        # regression-fix (v10.0.12): slug moved into attributes where Kitsu's
+        # real JSON:API puts it — the fixture had mirrored the canonicaliser's
+        # swapped-levels bug (slug read from top level, type from attributes).
         "attributes": {
+            "slug": "cowboy-bebop",
             "canonicalTitle": "Cowboy Bebop",
             "titles": {"en": "Cowboy Bebop", "en_jp": "Cowboy Bebop",
                         "ja_jp": "カウボーイビバップ"},

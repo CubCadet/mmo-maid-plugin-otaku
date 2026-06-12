@@ -28,7 +28,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: ruff check __main__.py tests/
+        run: ruff check __main__.py tests/ scripts/
 
       - name: Validate plugin
         run: python scripts/validate_plugin.py .

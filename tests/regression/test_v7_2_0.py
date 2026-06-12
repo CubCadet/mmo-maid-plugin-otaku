@@ -233,7 +233,9 @@ def test_vote_rejected_on_closed_poll(monkeypatch):
 
     ctx.sql.query = _q
     p._component_dispatch(ctx, _component("otaku:poll-vote:5:a", user_id="u"))
-    resp = ctx.interaction.responses[-1]
+    # regression-fix (v10.0.12): the vote handler now defers before its first
+    # SQL (3-second rule), so post-defer replies arrive as followups.
+    resp = ctx.interaction.followups[-1]
     assert "closed" in (resp.get("content") or "")
 
 
@@ -303,7 +305,8 @@ def test_vote_noop_when_same_choice(monkeypatch):
               if "otaku_poll_votes" in e["sql"]
               and (e["sql"].startswith("INSERT") or e["sql"].startswith("UPDATE"))]
     assert writes == []
-    resp = ctx.interaction.responses[-1]
+    # regression-fix (v10.0.12): post-defer replies arrive as followups.
+    resp = ctx.interaction.followups[-1]
     assert "already voted" in (resp.get("content") or "")
 
 

@@ -48,3 +48,23 @@ def _clear_role_cache():
 def _no_retry_sleep(monkeypatch):
     """Make the retry backoff sleep a no-op in tests — keeps the suite fast."""
     monkeypatch.setattr(_module, "_sleep_for_retry", lambda _s: None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_module_globals():
+    """v10.0.12 — reset module-level mutable state that leaked across tests.
+
+    _LAST_USER_ERROR is written by the AniList error classifier and only
+    consumed by some callers, so a test could observe the previous test's
+    value (a verified order-dependence hazard). _RATE_BUCKETS accumulates
+    jikan/kitsu call timestamps; the whole suite runs inside one rate
+    window, so without clearing, any test asserting on _rate_acquire's
+    return becomes order-dependent (currently masked by _no_retry_sleep).
+    """
+    _module._LAST_USER_ERROR = None
+    for bucket in _module._RATE_BUCKETS.values():
+        bucket.clear()
+    yield
+    _module._LAST_USER_ERROR = None
+    for bucket in _module._RATE_BUCKETS.values():
+        bucket.clear()

@@ -1,4 +1,4 @@
-.PHONY: dev test lint validate release clean help
+.PHONY: dev test lint validate release clean clean-caches help
 
 help:
 	@echo "Targets:"
@@ -16,15 +16,22 @@ test:
 	python -m pytest -q
 
 lint:
-	ruff check __main__.py tests/
+	ruff check __main__.py tests/ scripts/
 
-validate:
+# validate depends on clean-caches: test/lint runs recreate
+# __pycache__/.pytest_cache, which trip the validator's top-level layout
+# check (v10.0.12). Cache-only so a standalone `make validate` doesn't
+# delete a previously built dist/ zip.
+validate: clean-caches
 	python scripts/validate_plugin.py .
 
 release: clean lint validate test
 	python scripts/build_release.py --output dist/
 
-clean:
-	rm -rf dist/ .pytest_cache/ .mypy_cache/ .ruff_cache/ htmlcov/ .coverage
+clean: clean-caches
+	rm -rf dist/ htmlcov/ .coverage
+
+clean-caches:
+	rm -rf .pytest_cache/ .mypy_cache/ .ruff_cache/
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete

@@ -599,6 +599,7 @@ class _Strings:
     POLL_VOTE_RECORDED = "🗳 Voted **{label}**."
     POLL_VOTE_CHANGED = "🗳 Changed your vote to **{label}**."
     POLL_VOTE_NOOP = "You already voted for **{label}**."
+    VOTE_FAILED = "Something went wrong recording your vote — please try again."
 
     # /aotw (v7.1.0).
     AOTW_NOT_ADMIN = (
@@ -1673,7 +1674,10 @@ def _canonicalize_kitsu_media(raw: dict | None) -> dict | None:
         "seasonYear":   year,
         "startDate":    {"year": year},
         "genres":       [],  # Kitsu requires a separate include for genres; v9.1 skips
-        "siteUrl":      f"https://kitsu.io/{(attrs.get('type') or 'anime')}/{raw.get('slug') or raw['id']}",
+        # v10.0.12 — JSON:API puts `type` at the resource top level and `slug`
+        # inside attributes; the levels were swapped, so manga links pointed
+        # at /anime/ and the slug never resolved (id fallback masked it).
+        "siteUrl":      f"https://kitsu.io/{(raw.get('type') or 'anime')}/{attrs.get('slug') or raw['id']}",
     }
 
 
@@ -2070,10 +2074,22 @@ def _http_json(resp: dict | None):
     """
     if not isinstance(resp, dict):
         return None
-    if resp.get("truncated"):
-        # A truncated body is unusable even when the fragment happens to
-        # parse — data loss of unknown extent. Fail closed; the anomaly log
-        # at the call site surfaces the flag.
+    # A truncated body is unusable even when the fragment happens to parse —
+    # data loss of unknown extent. v10.0.12: explicit-FALSY allowlist. Plain
+    # truthiness made a host drifting truncated to the STRING "false" reject
+    # every body; but enumerating truthy shapes instead would fail OPEN on the
+    # next unknown drift ("on", 2, b"true"). So: known-falsy shapes pass,
+    # anything else counts as truncated (fail closed); the anomaly log at the
+    # call site surfaces the flag either way.
+    trunc = resp.get("truncated")
+    if isinstance(trunc, (bytes, bytearray)):
+        trunc = bytes(trunc).decode("utf-8", errors="replace")
+    if not (
+        trunc is None
+        or trunc is False
+        or (isinstance(trunc, (int, float)) and trunc == 0)
+        or (isinstance(trunc, str) and trunc.strip().lower() in ("", "false", "0", "no", "none"))
+    ):
         return None
     raw = None
     for key in ("body_bytes", "body", "text"):
@@ -2138,7 +2154,24 @@ def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None
     """
     try:
         r = resp if isinstance(resp, dict) else {}
-        raw = r.get("body_bytes", r.get("body"))
+        # v10.0.12 — pick the raw body with the SAME key-priority scan as
+        # _http_json, so the diagnostic describes the value the parser
+        # actually saw. The old two-key .get() chain reported a present-but-
+        # None body_bytes while hiding a populated `body`, muddying exactly
+        # the live triage this line exists for.
+        raw = None
+        for key in ("body_bytes", "body", "text", "body_b64", "body_base64"):
+            val = r.get(key)
+            if val not in (None, "", b""):
+                raw = val
+                break
+        if raw is None:
+            # All candidate values empty: report the first PRESENT key's
+            # value so body_type reflects what actually arrived.
+            raw = next(
+                (r[k] for k in ("body_bytes", "body", "text", "body_b64", "body_base64") if k in r),
+                None,
+            )
         ctx.log(
             f"{source} http body anomaly",
             level="error",
@@ -2147,7 +2180,8 @@ def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None
             body_type=type(raw).__name__,
             body_len=str(len(raw)) if hasattr(raw, "__len__") else "n/a",
             truncated=str(r.get("truncated")),
-            head=repr(raw[:160]) if isinstance(raw, (str, bytes)) else "",
+            head=repr(bytes(raw[:160]) if isinstance(raw, bytearray) else raw[:160])
+            if isinstance(raw, (str, bytes, bytearray)) else "",
         )
     except Exception:  # noqa: BLE001 — diagnostics must never raise into the caller
         pass
@@ -2247,6 +2281,9 @@ def _anilist_query(
             level="warning",
             tags=["anilist", "http"],
             status=str(resp.get("status") if resp else None),
+            # v10.0.12 — also log what the gate actually compared, so the
+            # triage line can't diverge from the gate on a drifted shape.
+            status_coerced=str(_http_status(resp)),
         )
         return None
 
@@ -2339,7 +2376,13 @@ def _jikan_query(
     if cache_key is not None:
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached
+            # v10.0.12 — unwrap the {"data": ...} cache envelope, mirroring
+            # _kitsu_query. Returning the envelope raw made every cache HIT
+            # return a different shape than a miss, so repeat MAL-fallback
+            # searches within the TTL silently degraded to Kitsu/'not found'.
+            # isinstance guard: a non-dict cache entry (future put-site drift,
+            # hot-reload remnant) degrades to a miss instead of raising.
+            return cached.get("data") if isinstance(cached, dict) else None
 
     _rate_acquire("jikan")
     # v10.0.7 — SDK's ctx.http.get(url, *, headers=None) does NOT accept a
@@ -2387,11 +2430,14 @@ def _jikan_query(
         )
         return None
     payload = _http_json(resp)
-    if payload is None:
+    if not isinstance(payload, dict):
+        # v10.0.12 — None (no usable body) or parsed-but-non-dict (e.g. a
+        # bare JSON list): neither is the documented Jikan envelope. The
+        # non-dict case used to fall through silently with no diagnostic.
         _log_http_body_anomaly(ctx, "jikan", resp)
         return None
     # Jikan wraps results in a `data` field; pagination metadata in `pagination`.
-    data = payload.get("data") if isinstance(payload, dict) else None
+    data = payload.get("data")
     if data is None:
         return None
     if cache_key is not None:
@@ -2416,7 +2462,8 @@ def _kitsu_query(
     if cache_key is not None:
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached.get("data")  # unwrap the cache envelope
+            # unwrap the cache envelope (isinstance guard: v10.0.12)
+            return cached.get("data") if isinstance(cached, dict) else None
 
     _rate_acquire("kitsu")
     # v10.0.7 — see _jikan_query for the same fix rationale: SDK
@@ -2456,10 +2503,12 @@ def _kitsu_query(
         )
         return None
     payload = _http_json(resp)
-    if payload is None:
+    if not isinstance(payload, dict):
+        # v10.0.12 — same as _jikan_query: non-dict bodies now get the
+        # anomaly diagnostic instead of a silent drop.
         _log_http_body_anomaly(ctx, "kitsu", resp)
         return None
-    data = payload.get("data") if isinstance(payload, dict) else None
+    data = payload.get("data")
     if data is None:
         return None
     # Normalize single-resource responses to a list of one for caller simplicity.
@@ -2662,6 +2711,90 @@ def _render_similar(ctx: Context, media: dict, *, deferred: bool, ephemeral_repl
 
 
 _SCHEMA_V8_MIGRATED_KV = "otaku:schema_v8_migrated"
+# v10.0.12 — set once the wide PK has been verified (or repaired) on a tenant
+# whose bootstrap already completed; gates the one-time post-completion probe.
+_SCHEMA_PK_VERIFIED_KV = "otaku:schema_pk_verified"
+
+# Probe COALESCEs to a sentinel so the repair decision never depends on whether
+# the host serializes NULL columns into result rows (the response-shape drift
+# class this plugin keeps meeting). ::TEXT keeps the value a plain string.
+# Probes the TABLE alongside the PK index: a missing table means bootstrap
+# simply hasn't created it yet (fresh install / cursor before statement #0) —
+# healthy-pending, NOT poisoned. Repairing in that window ALTERed a
+# nonexistent relation and crashed bootstrap before CREATE TABLE could run.
+_PK_PROBE_SQL = (
+    "SELECT COALESCE(to_regclass('otaku_user_media')::TEXT, 'missing') AS tbl, "
+    "COALESCE(to_regclass('otaku_user_media_pkey')::TEXT, 'missing') AS pk"
+)
+
+
+def _ensure_wide_pk(ctx: Context) -> None:
+    """Verify otaku_user_media's wide primary key exists; finish the aborted
+    v7→v8 dance if it doesn't (v10.0.12).
+
+    Why: under v10.0.8–v10.0.10 a v7 upgrade could rate-limit at the final
+    ADD CONSTRAINT, and the next boot's "already v8" branch set the migrated
+    marker with the table PK-less — permanently, because every later boot
+    short-circuited on the marker. v10.0.11 added a probe inside branch (b),
+    but the marker fast-path returned before it, so already-poisoned tenants
+    were never healed. This helper is instead called from _bootstrap_schema
+    AFTER _migrate_v7_to_v8 returns (covering every marker-skip path), and
+    once post-completion via the _SCHEMA_PK_VERIFIED_KV gate.
+
+    A probe row without the pk key at all (possible only from stubbed SQL in
+    tests) counts as healthy. Plain SELECT probes are not DDL-rate-limited.
+    A mid-repair RateLimitError propagates to the caller's handler and the
+    next boot retries from the probe.
+    """
+    rows = ctx.sql.query(_PK_PROBE_SQL) or []
+    row = rows[0] if rows else {}
+    if row.get("tbl") == "missing":
+        # The table doesn't exist yet — bootstrap's first DDL creates it with
+        # the wide PK inline. Nothing to repair (and nothing repairable).
+        return
+    if row.get("pk") != "missing":
+        return
+    try:
+        ctx.log(
+            "wide-PK missing on otaku_user_media; running repair DDL",
+            level="warning",
+            tags=["bootstrap", "pk-heal"],
+        )
+    except Exception:  # noqa: BLE001 — diagnostics must never block the repair
+        pass
+    # Finish steps 2–6 of the branch (c) dance (all idempotent except the
+    # final ADD CONSTRAINT, which the probe just proved absent). The stale v7
+    # index is dropped too: an abort between RENAME and DROP INDEX leaves a
+    # duplicate index that CREATE INDEX IF NOT EXISTS can never clean up.
+    # (No advisory lock here: each host sql.execute is its own transaction,
+    # so a pg_advisory_xact_lock would release immediately — the re-probe
+    # below is the real cross-worker race guard.)
+    ctx.sql.execute(
+        "DROP INDEX IF EXISTS otaku_user_anime_user_status_added_idx"
+    )
+    ctx.sql.execute(
+        "ALTER TABLE otaku_user_media "
+        "ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'anime'"
+    )
+    ctx.sql.execute(
+        "ALTER TABLE otaku_user_media "
+        "DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
+    )
+    try:
+        ctx.sql.execute(
+            "ALTER TABLE otaku_user_media "
+            "ADD CONSTRAINT otaku_user_media_pkey "
+            "PRIMARY KEY (user_id, media_id, media_type)"
+        )
+    except RateLimitError:
+        raise
+    except Exception:  # noqa: BLE001
+        # Either a cross-worker race (another worker added the PK between our
+        # probe and this statement) or a genuine failure. Re-probe to decide:
+        # swallow the race, surface the failure.
+        rows = ctx.sql.query(_PK_PROBE_SQL) or []
+        if (rows[0] if rows else {}).get("pk") == "missing":
+            raise
 
 
 def _migrate_v7_to_v8(ctx: Context) -> None:
@@ -2764,40 +2897,13 @@ def _migrate_v7_to_v8(ctx: Context) -> None:
     if has_v8 and not has_v7:
         # (b) Already v8. Marker may be unset (e.g., KV wipe via reinstall).
         #
-        # v10.0.11 — but "table renamed" does NOT imply "migration finished":
-        # the host's DDL rate limit (5/hr) can abort the upgrade dance in
-        # branch (c) at its 6th statement — the final ADD CONSTRAINT — leaving
-        # the renamed table with NO primary key. This branch then declared the
-        # migration done forever and every ON CONFLICT upsert on
-        # otaku_user_media failed permanently. Probe the wide PK's backing
-        # index (to_regclass works for indexes; plain SELECTs are not
-        # DDL-rate-limited) and finish the remaining steps if it's missing.
-        # Repair fires ONLY on an explicit NULL probe — a row that lacks the
-        # "pk" key entirely (possible only from stubbed SQL in tests) counts
-        # as healthy.
-        pk_rows = ctx.sql.query(
-            "SELECT to_regclass('otaku_user_media_pkey') AS pk"
-        ) or []
-        pk_row = pk_rows[0] if pk_rows else {}
-        pk_missing = "pk" in pk_row and pk_row.get("pk") is None
-        if pk_missing:
-            # Steps 3-6 of the branch (c) dance, minus the DROP of the wide
-            # PK we just proved absent. Each is idempotent; a mid-repair
-            # RateLimitError propagates to _bootstrap_schema's handler, the
-            # marker stays unset, and the next boot retries from the probe.
-            ctx.sql.execute(
-                "ALTER TABLE otaku_user_media "
-                "ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'anime'"
-            )
-            ctx.sql.execute(
-                "ALTER TABLE otaku_user_media "
-                "DROP CONSTRAINT IF EXISTS otaku_user_anime_pkey"
-            )
-            ctx.sql.execute(
-                "ALTER TABLE otaku_user_media "
-                "ADD CONSTRAINT otaku_user_media_pkey "
-                "PRIMARY KEY (user_id, media_id, media_type)"
-            )
+        # v10.0.12 — "table renamed" does NOT imply "migration finished" (the
+        # rate limit can abort branch (c) at its final ADD CONSTRAINT, leaving
+        # the table PK-less). The wide-PK verification/repair that v10.0.11
+        # put inline here was unreachable for tenants whose migrated marker
+        # was already set, so it moved to `_ensure_wide_pk`, which
+        # _bootstrap_schema runs after EVERY _migrate_v7_to_v8 return —
+        # including the marker fast-paths above. This branch only marks.
         try:
             ctx.kv.set(_SCHEMA_V8_MIGRATED_KV, "1")
         except Exception:  # noqa: BLE001
@@ -2963,8 +3069,38 @@ def _bootstrap_schema(ctx: Context) -> None:
     # v10.0.7 fast path.
     try:
         if ctx.kv.get(_SCHEMA_VERSION_KV) == _CURRENT_SCHEMA_VERSION:
+            # v10.0.12 — one-time wide-PK verification for tenants that
+            # completed bootstrap while the PK heal was unreachable
+            # (v10.0.11): one kv.get per boot, one SELECT probe ever.
+            try:
+                if ctx.kv.get(_SCHEMA_PK_VERIFIED_KV) != "1":
+                    _ensure_wide_pk(ctx)
+                    ctx.kv.set(_SCHEMA_PK_VERIFIED_KV, "1")
+            except Exception as exc:  # noqa: BLE001 — heal must never block
+                # boot; the marker stays unset so the next boot retries. But
+                # never silently (v10.0.12): an unlogged genuine failure here
+                # would re-burn repair DDL every boot with zero diagnostics.
+                try:
+                    ctx.log(
+                        "wide-PK heal failed; will retry next boot",
+                        level="error",
+                        tags=["bootstrap", "pk-heal"],
+                        error=f"{type(exc).__name__}: {exc}"[:300],
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             return
     except Exception:  # noqa: BLE001
+        pass
+
+    # v10.0.12 — cursor read moved above the migration so its rate-limit log
+    # can report an accurate remaining count.
+    start_idx = 0
+    try:
+        raw_cursor = ctx.kv.get(_SCHEMA_DDL_CURSOR_KV)
+        if isinstance(raw_cursor, str) and raw_cursor.isdigit():
+            start_idx = min(int(raw_cursor), len(_SCHEMA_DDL_SEQUENCE))
+    except Exception:  # noqa: BLE001 — unreadable cursor → full replay
         pass
 
     try:
@@ -2975,22 +3111,39 @@ def _bootstrap_schema(ctx: Context) -> None:
     except RateLimitError as exc:
         _log_bootstrap_rate_limit(
             ctx, exc,
-            remaining=len(_SCHEMA_DDL_SEQUENCE),
+            remaining=len(_SCHEMA_DDL_SEQUENCE) - start_idx,
             next_ddl="v7→v8 migration (unfinished)",
         )
         return
+
+    # v10.0.12 — wide-PK heal, AFTER the migration returns so it covers the
+    # marker fast-paths that skip the migration body entirely. Guarded
+    # separately from the migration so a heal failure can NEVER block table
+    # creation in the DDL loop below.
+    try:
+        _ensure_wide_pk(ctx)
+    except RateLimitError as exc:
+        _log_bootstrap_rate_limit(
+            ctx, exc,
+            remaining=len(_SCHEMA_DDL_SEQUENCE) - start_idx,
+            next_ddl="wide-PK heal (unfinished)",
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 — log and continue into the loop
+        try:
+            ctx.log(
+                "wide-PK heal failed; continuing bootstrap",
+                level="error",
+                tags=["bootstrap", "pk-heal"],
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # v10.0.11 — resumable DDL loop. Start at the persisted cursor so a boot
     # never re-spends rate-limit budget on statements that already succeeded
     # (see the design comment above _SCHEMA_VERSION_KV). The per-version
     # comments from the old inline list live in _SCHEMA_DDL_SEQUENCE's labels.
-    start_idx = 0
-    try:
-        raw_cursor = ctx.kv.get(_SCHEMA_DDL_CURSOR_KV)
-        if isinstance(raw_cursor, str) and raw_cursor.isdigit():
-            start_idx = min(int(raw_cursor), len(_SCHEMA_DDL_SEQUENCE))
-    except Exception:  # noqa: BLE001 — unreadable cursor → full replay
-        pass
 
     for idx in range(start_idx, len(_SCHEMA_DDL_SEQUENCE)):
         label, ddl = _SCHEMA_DDL_SEQUENCE[idx]
@@ -3014,6 +3167,9 @@ def _bootstrap_schema(ctx: Context) -> None:
     # v10.0.7 — bootstrap completed fully; gate subsequent boots.
     try:
         ctx.kv.set(_SCHEMA_VERSION_KV, _CURRENT_SCHEMA_VERSION)
+        # v10.0.12 — _ensure_wide_pk ran earlier this boot, so the one-time
+        # post-completion probe in the fast path is already satisfied.
+        ctx.kv.set(_SCHEMA_PK_VERIFIED_KV, "1")
     except Exception:  # noqa: BLE001
         pass
 
@@ -3783,7 +3939,7 @@ def _render_manga_favorites(
 
 
 # v10.0.6 — Discord caps an embed description at 4096 chars; the full
-# 47-command help body comfortably exceeds that. Chunk well under the
+# 45-command help body comfortably exceeds that. Chunk well under the
 # limit to leave headroom for the title/footer toward the 6000-char total.
 _HELP_DESC_CHUNK = 3900
 _HELP_MAX_EMBEDS = 10  # Discord's per-message cap
@@ -7140,9 +7296,28 @@ def _handle_poll_vote(ctx: Context, event: dict) -> None:
         ctx.interaction.respond(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
         return
 
+    # v10.0.12 — defer before the first SQL round trip (3-second rule). The
+    # parse-failure exits above are in-memory and keep instant respond()s;
+    # every reply below this line is a followup.
+    ctx.interaction.defer(ephemeral=True)
+    try:
+        _poll_vote_deferred(ctx, poll_id, option_key, user_id)
+    except Exception as exc:  # noqa: BLE001 — never strand a deferred interaction
+        try:
+            ctx.log(f"poll vote failed: {exc}", level="error", tags=["poll", "vote"])
+            ctx.interaction.followup(content=S.VOTE_FAILED, ephemeral=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _poll_vote_deferred(ctx: Context, poll_id: int, option_key: str, user_id: str) -> None:
+    """Post-defer body of _handle_poll_vote (v10.0.12) — every reply is a
+    followup; the caller guards exceptions so a failure (e.g. the concurrent
+    duplicate-vote INSERT race, or a missing table mid-bootstrap) can't
+    strand the deferred interaction in an eternal "thinking…" state."""
     poll = _poll_row(ctx, poll_id)
     if poll is None or poll.get("status") != "active":
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content=S.POLL_VOTE_CLOSED.format(poll_id=poll_id), ephemeral=True
         )
         return
@@ -7150,14 +7325,14 @@ def _handle_poll_vote(ctx: Context, event: dict) -> None:
     options = _poll_options(ctx, poll_id)
     valid_keys = {o["option_key"] for o in options}
     if option_key not in valid_keys:
-        ctx.interaction.respond(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        ctx.interaction.followup(content=S.POLL_VOTE_BUTTON_MALFORMED, ephemeral=True)
         return
     chosen_text = next((o["text"] for o in options if o["option_key"] == option_key), option_key)
     label = f"{option_key.upper()}) {_truncate(chosen_text, 80)}"
 
     existing = _poll_existing_vote(ctx, poll_id, user_id)
     if existing == option_key:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content=S.POLL_VOTE_NOOP.format(label=label), ephemeral=True
         )
         return
@@ -7175,7 +7350,7 @@ def _handle_poll_vote(ctx: Context, event: dict) -> None:
             [option_key, poll_id, user_id],
         )
         msg = S.POLL_VOTE_CHANGED.format(label=label)
-    ctx.interaction.respond(content=msg, ephemeral=True)
+    ctx.interaction.followup(content=msg, ephemeral=True)
 
 
 # ── v7.1.0 — /aotw (anime of the week voting) ────────────────────────────────
@@ -7476,14 +7651,35 @@ def _handle_aotw_vote(ctx: Context, event: dict) -> None:
         ctx.interaction.respond(content=S.AOTW_VOTE_BUTTON_MALFORMED, ephemeral=True)
         return
 
+    # v10.0.12 — defer before the slow work (3-second rule). This handler is
+    # the worst offender of the class: an AniList title resolve (with up to
+    # 2.0s of retry backoff) plus four SQL round trips preceded its only
+    # respond, so the vote could record while the user saw "interaction
+    # failed". The parse-failure exits above stay instant respond()s; every
+    # reply below this line is a followup.
+    ctx.interaction.defer(ephemeral=True)
+    try:
+        _aotw_vote_deferred(ctx, poll_id, media_id, user_id)
+    except Exception as exc:  # noqa: BLE001 — never strand a deferred interaction
+        try:
+            ctx.log(f"aotw vote failed: {exc}", level="error", tags=["aotw", "vote"])
+            ctx.interaction.followup(content=S.VOTE_FAILED, ephemeral=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _aotw_vote_deferred(ctx: Context, poll_id: int, media_id: int, user_id: str) -> None:
+    """Post-defer body of _handle_aotw_vote (v10.0.12) — every reply is a
+    followup; the caller guards exceptions so a failure can't strand the
+    deferred interaction in an eternal "thinking…" state."""
     poll = _aotw_poll_row(ctx, poll_id)
     if poll is None or poll.get("status") != "active":
-        ctx.interaction.respond(content=S.AOTW_VOTE_POLL_CLOSED, ephemeral=True)
+        ctx.interaction.followup(content=S.AOTW_VOTE_POLL_CLOSED, ephemeral=True)
         return
 
     candidates = _aotw_candidates(ctx, poll_id)
     if media_id not in candidates:
-        ctx.interaction.respond(content=S.AOTW_VOTE_BUTTON_MALFORMED, ephemeral=True)
+        ctx.interaction.followup(content=S.AOTW_VOTE_BUTTON_MALFORMED, ephemeral=True)
         return
 
     existing = _aotw_existing_vote(ctx, poll_id, user_id)
@@ -7492,7 +7688,7 @@ def _handle_aotw_vote(ctx: Context, event: dict) -> None:
     title = _format_title(media) if media else f"anime #{media_id}"
 
     if existing == media_id:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content=S.AOTW_VOTE_NOOP.format(title=title), ephemeral=True
         )
         return
@@ -7510,7 +7706,7 @@ def _handle_aotw_vote(ctx: Context, event: dict) -> None:
             [media_id, poll_id, user_id],
         )
         msg = S.AOTW_VOTE_CHANGED.format(title=title)
-    ctx.interaction.respond(content=msg, ephemeral=True)
+    ctx.interaction.followup(content=msg, ephemeral=True)
 
 
 # ── v6.2.0 — /genre-trends (genre-trend recommendations) ────────────────────

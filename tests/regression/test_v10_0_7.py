@@ -55,6 +55,11 @@ def test_bootstrap_short_circuits_when_schema_version_marker_set():
     installs from re-paying the host's 5-DDL/hour budget on every boot."""
     ctx = MockContext()
     ctx.kv.set(p._SCHEMA_VERSION_KV, p._CURRENT_SCHEMA_VERSION)
+    # regression-fix (v10.0.12): steady state now includes the one-time
+    # wide-PK verification marker; without it the fast path runs a single
+    # SELECT probe (not DDL — the budget this contract protects is intact).
+    # The probe behavior itself is pinned in test_v10_0_12.py.
+    ctx.kv.set(p._SCHEMA_PK_VERIFIED_KV, "1")
     p._bootstrap_schema(ctx)
     assert ctx.sql.executed == [], \
         "marker-present fast path must issue zero SQL calls"

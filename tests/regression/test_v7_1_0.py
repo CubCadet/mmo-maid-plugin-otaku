@@ -226,7 +226,10 @@ def test_vote_rejected_on_closed_poll(monkeypatch):
     ctx.sql.query = _q
     monkeypatch.setattr(p, "_anilist_query", lambda *a, **kw: None)
     p._component_dispatch(ctx, _component("otaku:aotw-vote:5:1", user_id="u"))
-    resp = ctx.interaction.responses[-1]
+    # regression-fix (v10.0.12): the vote handler now defers before its first
+    # SQL (3-second rule), so post-defer replies arrive as followups. Same
+    # user-visible message, different delivery mechanism.
+    resp = ctx.interaction.followups[-1]
     assert "closed" in (resp.get("content") or "")
 
 

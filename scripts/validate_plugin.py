@@ -15,7 +15,7 @@ Checks (all reported, exit code 0 only if everything passes):
        - has required fields: id, name, version, description
        - 'id' matches /^[a-z][a-z0-9_]{2,31}$/
        - uses 'capabilities_required' (NOT the legacy 'capabilities_requested')
-       - all capabilities are from the canonical v0.5.1 set
+       - all capabilities are from the canonical v0.6.1 set
        - 'slash_commands' entries have 'name' + 'description'
        - 'proxy_domains_requested' entries are bare hosts (no scheme, no path)
  3. Source code (__main__.py):
@@ -47,9 +47,8 @@ import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable
 
-# ── Canonical capability list (v0.5.1) ─────────────────────────────────────
+# ── Canonical capability list (v0.6.1) ─────────────────────────────────────
 SAFE_CAPS = {
     "storage:kv",
     "discord:send_message",
@@ -64,6 +63,11 @@ RISKY_CAPS = {
     "discord:manage_channels",
     "discord:manage_webhooks",
     "storage:sql",
+    # v10.0.12 — reinstated as a real capability per yourbot-sdk 0.6.1
+    # (_validation.py maps message-content access to it; the live host
+    # strips message_create.content for plugins without it). It had been
+    # mislabeled legacy below.
+    "events:message_content",
 }
 DANGEROUS_CAPS = {
     "discord:moderate_members",
@@ -77,7 +81,7 @@ ALL_CAPS = SAFE_CAPS | RISKY_CAPS | DANGEROUS_CAPS
 # runtime no longer recognises — flag them as ERRORS.
 LEGACY_CAPS = {
     "kv:read", "kv:write",
-    "events:message_content", "events:member_join", "events:member_leave",
+    "events:member_join", "events:member_leave",
     "events:reaction_add", "events:reaction_remove",
     "discord:respond_to_interaction",
 }
@@ -216,7 +220,7 @@ def check_manifest(plugin_dir: Path, f: Findings) -> dict:
             f.error(f"capability {c!r} is a legacy/CLI-scaffold name; not recognised by the runtime")
         elif c not in ALL_CAPS:
             f.warn(
-                f"capability {c!r} is not in the canonical v0.5.1 list — "
+                f"capability {c!r} is not in the canonical v0.6.1 list — "
                 "could be a typo (see references/manifest-and-capabilities.md)"
             )
     f.note(f"declared capabilities ({len(caps)}): {', '.join(sorted(caps)) or '(none)'}")
@@ -348,10 +352,9 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
                         and deco.args[0].value == "message_create"):
                     has_message_create_handler = True
                     message_create_lineno = node.lineno
-                    # Check the very first statement for an author_bot guard
+                    # Check the start of the handler for an author_bot guard
                     body = node.body
                     if body:
-                        first = body[0]
                         # Pattern: if event.get("author_bot"): return
                         # We accept anything containing 'author_bot' in the first 5 statements
                         for stmt in body[:5]:
@@ -430,7 +433,13 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
     used = set(needed_caps.keys())
     # interaction:respond and proxy:http are auto-added; allow them even if not in needed_caps
     AUTO_OR_RUNTIME = {"interaction:respond", "proxy:http"}
-    extra = declared_caps - used - AUTO_OR_RUNTIME - LEGACY_CAPS
+    # v10.0.12 — event-scope capabilities gate event PAYLOAD content (e.g. the
+    # host strips message_create.content without events:message_content), not
+    # ctx.* calls, so no static call-site can ever mark them "used". Without
+    # this exemption every plugin declaring one gets a bogus "drop if unused"
+    # warning — advice that would get message content stripped on live.
+    EVENT_SCOPE_CAPS = {"events:message_content"}
+    extra = declared_caps - used - AUTO_OR_RUNTIME - LEGACY_CAPS - EVENT_SCOPE_CAPS
     # Subtract caps that may be satisfied by less granular helpers we don't statically detect
     for cap in sorted(extra):
         f.warn(f"capability {cap!r} declared but no matching ctx.* call was detected — drop if unused")

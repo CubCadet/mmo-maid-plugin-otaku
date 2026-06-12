@@ -20,6 +20,118 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.12] - 2026-06-12
+
+### Full-codebase regression check: seven verified findings fixed
+
+A sixteen-agent regression sweep (six dimensions, every medium+ finding
+adversarially verified) ran against v10.0.11. No blockers or high-severity
+regressions; seven confirmed mediums and the load-bearing hygiene findings
+are fixed here. Two were gaps in v10.0.11's own fixes — both latent, both
+relevant to interpreting the pending live retest.
+
+### Fixed
+
+- **Wide-PK heal is now reachable for already-poisoned tenants** — the
+  v10.0.11 branch-(b) repair sat behind the `schema_v8_migrated` fast-path,
+  so tenants poisoned under v10.0.8–v10.0.10 (upgrade aborted at the final
+  ADD CONSTRAINT, marker then set with the table PK-less) were never healed
+  — and v10.0.11's cursor would complete bootstrap and lock the state in.
+  The heal moved to `_ensure_wide_pk`: probed after every migration return
+  while bootstrap is incomplete, and once post-completion via the new
+  `otaku:schema_pk_verified` marker. The probe COALESCEs to `'missing'`
+  sentinels (immune to NULL-column serialization drift) **and probes the
+  TABLE alongside the PK index** — the patch's own adversarial verify pass
+  caught that the first draft fired the repair on fresh installs where the
+  table simply didn't exist yet, which would have bricked every new tenant
+  before CREATE TABLE ran. The repair also drops the stale v7 index, logs
+  before firing (`pk-heal` tag), and a lost cross-worker ADD CONSTRAINT
+  race is re-probed and swallowed. Heal failures are contained at both call
+  sites: a non-RateLimit failure mid-bootstrap logs and CONTINUES into the
+  DDL loop (never blocks table creation); a post-completion failure logs
+  `"wide-PK heal failed; will retry next boot"` instead of passing silently.
+- **`truncated` gate uses an explicit-FALSY allowlist** — plain truthiness
+  (v10.0.11) meant a host drifting the flag to the string `"false"` rejected
+  every body, recreating the live incident through the fix itself; but
+  enumerating truthy shapes would fail OPEN on the next unknown drift. Now:
+  `None`/`False`/`0`/`""`/`"false"`/`"0"`/`"no"`/`"none"` (bytes decoded
+  first) pass; anything else counts as truncated and fails closed.
+- **Jikan cache hits unwrap the `{"data": ...}` envelope** (bug since
+  v9.1.0): a hit returned a different shape than a miss, so repeating a
+  MAL-fallback search within the 5-minute TTL silently degraded to Kitsu or
+  "No anime found". Hit and miss now both return the bare data list.
+- **Vote handlers defer before their first SQL** (3-second rule): `/aotw`
+  votes ran an AniList title resolve (up to 2 s of retry backoff) plus four
+  SQL round trips before their only respond — the vote recorded while the
+  user saw "interaction failed". Poll votes had the same shape SQL-only.
+  Parse-failure exits keep instant respond()s; post-defer replies are
+  followups (documented `# regression-fix (v10.0.12):` carve-outs in
+  test_v7_1_0/test_v7_2_0 assertions — message contracts unchanged). The
+  post-defer body is exception-guarded (`_poll_vote_deferred` /
+  `_aotw_vote_deferred`): a failure after defer() — duplicate-vote INSERT
+  race, missing table mid-bootstrap — now logs and sends an error followup
+  instead of stranding the user on an eternal "thinking…" spinner.
+- **Kitsu siteUrl JSON:API levels un-swapped** — `type` is top-level and
+  `slug` lives in attributes; the swap sent manga links to `/anime/` and
+  never resolved slugs (the id fallback masked it). Fixture in
+  test_v9_1_0.py corrected with a carve-out (it had mirrored the bug).
+- **Anomaly diagnostics fidelity** — the raw body in
+  `_log_http_body_anomaly` is picked with `_http_json`'s key priority (a
+  present-but-None `body_bytes` no longer hides a populated `body`),
+  bytearray heads render, Jikan/Kitsu now log the anomaly for
+  parsed-but-non-dict bodies, and the AniList non-200 line carries
+  `status_coerced` (what the gate actually compared).
+- **Migration-phase rate-limit log** reports a cursor-aware
+  `remaining_ddl` instead of a flat 16 (cursor read moved above the
+  migration call).
+- **Test rig** — module globals `_LAST_USER_ERROR` and `_RATE_BUCKETS` are
+  reset per test (autouse fixture); both verifiably leaked across tests.
+- **Lint blind spot closed** — `make lint` and CI now cover `scripts/`;
+  the two surviving ruff errors in validate_plugin.py fixed.
+- **`make validate` depends on the new `clean-caches` target** — test runs
+  recreate `__pycache__`/`.pytest_cache`, which tripped the validator in the
+  documented dev flow; cache-only cleaning so a standalone `make validate`
+  no longer deletes a previously built `dist/` zip. README quick-start
+  updated to use `make validate`.
+- **Validator capability catalog synced to SDK 0.6.1** —
+  `events:message_content` is a real capability again (0.6.1 maps
+  message-content access to it; the live host strips `message_create.content`
+  without it — observed in the 2026-06-11 live log), no longer auto-flagged
+  legacy. Event-scope capabilities are exempt from the "drop if unused"
+  warning (they gate event payloads, not ctx.* calls, so no call site can
+  ever mark them used). Stale "v0.5.1" labels updated.
+
+### Docs
+
+- README: command-count and stale claims corrected (45 slash commands — the
+  long-standing "47" was off by two vs manifest + handlers; erratum for
+  CHANGELOG [10.0.0]'s count), `discord:send_message` tier label reconciled
+  to Safe (matches the validator catalog), complete KV-key table (including
+  the v10.0.11 `otaku:schema_ddl_idx` cursor and new
+  `otaku:schema_pk_verified`), SQL schema section updated to the post-v8
+  `otaku_user_media` shape with the 13-table inventory, custom_id table
+  completed (17 ids, was 8), cooldown wording scoped to commands that do
+  work (`/help` is exempt).
+
+### Tests
+
+31 new immutable contracts in `tests/regression/test_v10_0_12.py` — including
+the fresh-install heal-skip contract, heal-failure containment at both call
+sites, unknown-truncated-shape fail-closed, vote success-path replies (the
+verify pass proved deleting the final followup passed every prior test), and
+the post-defer exception guard. Carve-outs (all documented in-place):
+test_v10_0_7 steady-state setup adds the pk_verified marker; test_v10_0_11's
+branch-(b) repair test re-targeted to the relocated heal; test_v9_1_0's Kitsu
+fixture slug placement; vote-reply assertions in test_v7_1_0/test_v7_2_0 read
+followups. Suite total: 723.
+
+### Deferred (unchanged from [10.0.11], still tracked)
+
+Schema-ready user-facing gate for the bootstrap window; admin-gating
+short-circuit on `member.permissions`; the five 1000-row sql.query
+truncation sites; advisory-lock doc correction; the five legacy
+`event["options"]` subcommand parsers; upstream SDK typing-gap report.
+
 ## [10.0.11] - 2026-06-11
 
 ### Live incident: every HTTP body unusable + bootstrap stuck on a fresh install
