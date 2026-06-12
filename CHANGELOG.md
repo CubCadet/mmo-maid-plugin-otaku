@@ -20,6 +20,59 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.14] - 2026-06-12
+
+### LIVE INCIDENT RESOLVED: host proxy compression regression, diagnosed by
+### the v10.0.11 anomaly line on its first live run
+
+The 2026-06-12 16:57 UTC retest logs closed the investigation opened
+2026-06-11. The `http body anomaly` diagnostics named the cause outright:
+
+- AniList and Jikan body heads = `\x1f\x8b\x08...` — the **gzip magic**.
+- Kitsu body head = `\x28\xb5\x2f\xfd` — the **zstd magic**.
+- Every byte ≥ 0x80 arrived as U+FFFD: the host proxy passes COMPRESSED
+  upstream bodies through and lossily utf-8-decodes the binary — the str the
+  plugin receives is unrecoverable client-side.
+- The host response dict also gained an `ok` key (shape evolution confirmed).
+
+So: the host proxy stopped handling Content-Encoding somewhere around the
+2026-06-11 rebrand window. Nothing client-side could have parsed those
+bodies; v10.0.11–13's tolerant extraction was necessary but not sufficient.
+Separately, the same logs show the bootstrap machinery fully healthy: the
+cursor walked all 16 DDL statements in one boot, both schema markers set.
+
+### Fixed
+
+- **`Accept-Encoding: identity` on all three transports** — upstreams no
+  longer compress, so the proxy's missing decompression stops mattering.
+  This is the actual fix, pending host-side repair.
+- **Recoverable gzip handling** — if a host ever forwards compressed bodies
+  as REAL bytes, `_http_json` gunzips them before decoding (corrupt streams
+  degrade to the normal None path; zstd has no stdlib decoder and stays
+  detection-only).
+- **Self-diagnosing anomaly line** — `_log_http_body_anomaly` gains a
+  `compression=` field naming gzip/zstd signatures in both str-mangled and
+  raw-bytes shapes, so the next such incident reads its own diagnosis.
+
+### Platform report (to file with YourBot)
+
+proxy.request responses deliver upstream bodies without decompressing
+Content-Encoding (observed gzip and zstd), then utf-8-decode the compressed
+bytes with replacement characters — destroying them. Either decompress
+before delivery, strip Accept-Encoding from forwarded requests, or deliver
+binary bodies base64-encoded under a distinct key.
+
+### Tests
+
+10 new immutable contracts in `tests/regression/test_v10_0_14.py` (identity
+headers ×3, bytes-gunzip recovery + corrupt-stream degradation, compression
+naming for gzip/zstd in both mangled-str and raw-bytes shapes, none-detected
+baseline). Suite: 747. Verified by two independent skeptics, one of which
+reproduced the diagnosis byte-for-byte against the live upstream APIs;
+honest odds the identity header works on live: ~60% (it fails only if the
+host appends/strips Accept-Encoding, in which case the fix is platform-side
+— see the report above — and the next anomaly line will say so itself).
+
 ## [10.0.13] - 2026-06-12
 
 ### Lean regression recheck: the final v10.0.12 edits get their review

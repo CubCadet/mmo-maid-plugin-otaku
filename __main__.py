@@ -19,6 +19,7 @@ The full per-phase contract lives in CHANGELOG.md and ROADMAP.md.
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import math
 import os
@@ -2111,7 +2112,16 @@ def _http_json(resp: dict | None):
     if isinstance(raw, (dict, list)):
         return raw
     if isinstance(raw, (bytes, bytearray)):
-        raw = bytes(raw).decode("utf-8", errors="replace")
+        raw = bytes(raw)
+        if raw[:2] == b"\x1f\x8b":
+            # v10.0.14 — a host that forwards compressed bodies as REAL bytes
+            # is recoverable: gunzip before decoding. (zstd has no stdlib
+            # decoder; it stays detection-only in the anomaly logger.)
+            try:
+                raw = gzip.decompress(raw)
+            except Exception:  # noqa: BLE001 — fall through to lossy decode
+                pass
+        raw = raw.decode("utf-8", errors="replace")
     if not isinstance(raw, str):
         return None
     try:
@@ -2172,6 +2182,22 @@ def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None
                 (r[k] for k in ("body_bytes", "body", "text", "body_b64", "body_base64") if k in r),
                 None,
             )
+        # v10.0.14 — name known compression signatures outright, so the next
+        # incident's log line carries its own diagnosis. The 2026-06-12 live
+        # logs showed gzip (AniList/Jikan) and zstd (Kitsu) bodies passed
+        # through the host proxy AND lossily utf-8-decoded: bytes >= 0x80
+        # became U+FFFD, so the str shape is unrecoverable client-side.
+        hint = ""
+        if isinstance(raw, str) and raw[:1] == "\x1f" and "�" in raw[:4]:
+            hint = "gzip magic + U+FFFD — compressed body lossily decoded host-side (unrecoverable)"
+        elif isinstance(raw, str) and raw[:1] == "(" and raw[2:3] == "/" and "�" in raw[:4]:
+            hint = "zstd magic + U+FFFD — compressed body lossily decoded host-side (unrecoverable)"
+        elif isinstance(raw, (bytes, bytearray)):
+            b4 = bytes(raw[:4])
+            if b4[:2] == b"\x1f\x8b":
+                hint = "gzip-compressed bytes (gunzip failed?)"
+            elif b4 == b"\x28\xb5\x2f\xfd":
+                hint = "zstd-compressed bytes (no stdlib decoder)"
         ctx.log(
             f"{source} http body anomaly",
             level="error",
@@ -2180,6 +2206,7 @@ def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None
             body_type=type(raw).__name__,
             body_len=str(len(raw)) if hasattr(raw, "__len__") else "n/a",
             truncated=str(r.get("truncated")),
+            compression=hint or "none-detected",
             head=repr(bytes(raw[:160]) if isinstance(raw, bytearray) else raw[:160])
             if isinstance(raw, (str, bytes, bytearray)) else "",
         )
@@ -2201,7 +2228,15 @@ def _anilist_post_once(ctx: Context, body: str) -> tuple[dict | None, str]:
         resp = ctx.http.post(
             ANILIST_URL,
             body=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                # v10.0.14 — the host proxy stopped decompressing upstream
+                # responses (2026-06-12 live diagnosis: gzip/zstd bodies passed
+                # through AND lossily utf-8-decoded → unrecoverable). Asking
+                # for identity keeps upstreams from compressing at all.
+                "Accept-Encoding": "identity",
+            },
         )
         return resp, "ok"
     except RpcTimeoutError as exc:
@@ -2400,7 +2435,8 @@ def _jikan_query(
     try:
         resp = ctx.http.get(
             url,
-            headers={"Accept": "application/json"},
+            # Accept-Encoding: identity — see _anilist_post_once (v10.0.14).
+            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
         )
     except RpcTimeoutError as exc:
         ctx.log(f"jikan timed out: {exc}", level="warning", tags=["jikan", "http"])
@@ -2478,7 +2514,8 @@ def _kitsu_query(
     try:
         resp = ctx.http.get(
             url,
-            headers={"Accept": "application/vnd.api+json"},
+            # Accept-Encoding: identity — see _anilist_post_once (v10.0.14).
+            headers={"Accept": "application/vnd.api+json", "Accept-Encoding": "identity"},
         )
     except RpcTimeoutError as exc:
         ctx.log(f"kitsu timed out: {exc}", level="warning", tags=["kitsu", "http"])
