@@ -300,7 +300,9 @@ def test_migration_branch_b_repairs_missing_pk():
 
     def _q(sql, params=None, limit=1000):
         if "to_regclass('otaku_user_media_pkey')" in sql:
-            return [{"pk": "missing"}]  # explicit sentinel → PK genuinely missing
+            # regression-fix (v10.0.13): tbl key included — the probe is
+            # table-aware and fails closed on rows missing expected keys.
+            return [{"tbl": "otaku_user_media", "pk": "missing"}]
         return []
 
     ctx.sql.query = _q

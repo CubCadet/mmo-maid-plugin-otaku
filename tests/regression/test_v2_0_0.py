@@ -103,6 +103,16 @@ def test_schema_ddl_idempotent():
     # idempotent DDLs on every boot would burn the budget). The "doesn't
     # raise" contract is preserved.
     ctx = MockContext()
+    # regression-fix (v10.0.13): the wide-PK probe now fails CLOSED on an
+    # indeterminate result, and MockContext's default query returns [] —
+    # indeterminate — so the pk_verified gate would never set and boot 2
+    # would re-probe (1 SELECT). Stub a healthy probe so this test keeps
+    # exercising the real steady state: zero SQL on the second boot.
+    def _q(sql, params=None, limit=1000):
+        if "to_regclass('otaku_user_media_pkey')" in sql:
+            return [{"tbl": "otaku_user_media", "pk": "otaku_user_media_pkey"}]
+        return []
+    ctx.sql.query = _q
     p._bootstrap_schema(ctx)
     first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)

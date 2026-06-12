@@ -20,6 +20,68 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.13] - 2026-06-12
+
+### Lean regression recheck: the final v10.0.12 edits get their review
+
+The v10.0.12 adversarial verify pass reviewed a draft; the blocker fix it
+forced was edited in afterward and never itself re-reviewed. A lean
+single-agent deep recheck (with skeptic verification) of those final edits
+confirmed one medium and one low defect, both fixed here. Also checked:
+yourbot-sdk 0.7.0 published — purely additive (`respond(update_message=)`
+for in-place component-message edits; nothing touches transport/proxy, so it
+is NOT the live body-drift explanation); pin stays `<0.7.0`, adoption noted
+as a future MINOR for in-place pagination.
+
+### Fixed
+
+- **pk_verified no longer set after a failed heal** — bootstrap completion
+  unconditionally set `otaku:schema_pk_verified` even when that boot's
+  wide-PK heal failed (swallowed at the mid-bootstrap call site),
+  permanently gating off the post-completion retry backstop — the exact
+  marker-set-while-broken lock-in class this machinery exists to eliminate,
+  reintroduced through a new door. Completion now gates the marker on a
+  `heal_ok` flag; after a failed heal the fast-path backstop probes (and
+  logs) every boot until the heal lands. Empirically reproduced before the
+  fix; pinned by a true two-boot-chain contract.
+- **PK probe fails CLOSED on indeterminate results** — the expert-fleet
+  verify pass on this patch found that `_ensure_wide_pk` treated an empty
+  rowset or a row without the expected `tbl`/`pk` keys as healthy, so SQL
+  response-shape drift (this host's documented specialty) could still set
+  `pk_verified` over a genuinely missing PK — the same lock-in through the
+  probe-drift door. The helper now returns a three-state verdict: positive
+  verification (present / repaired / table-pending-creation) → marker
+  allowed; indeterminate → one warning log, no repair DDL, no marker, retry
+  next boot. An indeterminate re-probe after a lost ADD CONSTRAINT race
+  likewise certifies nothing. Tests relying on MockContext's default empty
+  rows received documented `# regression-fix (v10.0.13):` stub updates
+  (test_v2_0_0, test_plugin idempotency twins, the v10.0.11/12 PK stubs).
+- **Vote-guard reply ordering** — the post-defer exception guards logged
+  before the error followup inside one try, so a log failure stranded the
+  user on the eternal spinner the guard exists to prevent (verified real but
+  low exposure: ctx.log is a fire-and-forget notify). Now: followup first,
+  independent guards, exc strings truncated to [:300] per house style.
+- **Fast-path marker reads/writes are not mislabeled** — a kv.set failure
+  after a SUCCESSFUL heal no longer logs "wide-PK heal failed" into the
+  pk-heal error channel being watched during the live investigation; the
+  marker READ has its own guard too (a kv.get failure skips the probe for
+  one boot with a distinct `bootstrap/kv` warning), and a swallowed marker
+  write now logs instead of disappearing silently.
+- **Non-dict cache entries are a true miss** — the v10.0.12 isinstance guard
+  returned None (reported as source failure for the TTL window); now falls
+  through to a real re-fetch, matching its own comment.
+
+### Tests
+
+14 new immutable contracts in `tests/regression/test_v10_0_13.py`, closing
+every coverage gap proved by mutation across all three verification rounds:
+indeterminate-probe fail-closed (empty rowset + re-keyed columns, helper and
+end-to-end, mid-path AND fast-path callers), the indeterminate re-probe
+after a lost race, the two-boot backstop chain, lock-in, log-failure
+ordering for BOTH vote handlers, anomaly-logger present-key fallback,
+steady-state zero-query pin, and cache fall-through for BOTH sources.
+Suite total: 737.
+
 ## [10.0.12] - 2026-06-12
 
 ### Full-codebase regression check: seven verified findings fixed

@@ -482,6 +482,15 @@ def test_schema_bootstrap_is_idempotent():
     # bootstrap short-circuits via the `otaku:schema_version` marker. The
     # host caps DDL at 5/hour, so any per-boot DDL would burn the budget.
     ctx = MockContext()
+    # regression-fix (v10.0.13): healthy wide-PK probe stub — the probe now
+    # fails CLOSED on MockContext's default empty rows (indeterminate), which
+    # would re-probe every boot; the zero-SQL steady-state contract needs the
+    # real healthy answer. See test_v2_0_0.py twin.
+    def _q(sql, params=None, limit=1000):
+        if "to_regclass('otaku_user_media_pkey')" in sql:
+            return [{"tbl": "otaku_user_media", "pk": "otaku_user_media_pkey"}]
+        return []
+    ctx.sql.query = _q
     p._bootstrap_schema(ctx)
     first_count = len(ctx.sql.executed)
     p._bootstrap_schema(ctx)

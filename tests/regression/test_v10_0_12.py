@@ -73,9 +73,12 @@ def test_truncated_unknown_shapes_fail_closed_not_open():
 
 
 def _pk_stub(pk_value):
+    # regression-fix (v10.0.13): the probe is table-aware AND fails closed on
+    # rows missing the tbl/pk keys (indeterminate), so the stub must answer
+    # like the real host: both columns present, table existing.
     def _q(sql, params=None, limit=1000):
         if "to_regclass('otaku_user_media_pkey')" in sql:
-            return [{"pk": pk_value}]
+            return [{"tbl": "otaku_user_media", "pk": pk_value}]
         return []
     return _q
 
@@ -132,6 +135,10 @@ def test_completed_healthy_tenant_probe_runs_once_then_steady_state_is_silent():
 def test_full_bootstrap_completion_sets_pk_verified_gate():
     ctx = MockContext()
     ctx.kv.set(p._SCHEMA_V8_MIGRATED_KV, "1")
+    # regression-fix (v10.0.13): pk_verified is now set only on a POSITIVE
+    # probe; MockContext's default [] rows are indeterminate (fail closed),
+    # so the healthy probe must be stubbed explicitly.
+    ctx.sql.query = _pk_stub("otaku_user_media_pkey")
     p._bootstrap_schema(ctx)
     assert ctx.kv.get(p._SCHEMA_VERSION_KV) == p._CURRENT_SCHEMA_VERSION
     assert ctx.kv.get(p._SCHEMA_PK_VERIFIED_KV) == "1"
@@ -139,7 +146,12 @@ def test_full_bootstrap_completion_sets_pk_verified_gate():
 
 def test_ensure_wide_pk_probe_without_pk_key_counts_as_healthy():
     """Back-compat with stubbed SQL that answers every to_regclass query with
-    a v7/v8-shaped row: no pk key → healthy → zero DDL."""
+    a v7/v8-shaped row: no pk key → zero DDL.
+
+    # regression-fix (v10.0.13): semantics refined from "healthy" to
+    # "indeterminate, fail closed" — still zero DDL (this test's pinned
+    # contract), but the helper now returns False so callers never set the
+    # permanent pk_verified marker off a drifted/keyless probe row."""
     ctx = MockContext()
 
     def _q(sql, params=None, limit=1000):
@@ -148,7 +160,7 @@ def test_ensure_wide_pk_probe_without_pk_key_counts_as_healthy():
         return []
 
     ctx.sql.query = _q
-    p._ensure_wide_pk(ctx)
+    assert p._ensure_wide_pk(ctx) is False
     assert ctx.sql.executed == []
 
 
@@ -163,7 +175,9 @@ def test_ensure_wide_pk_swallows_lost_add_constraint_race():
         if "to_regclass('otaku_user_media_pkey')" in sql:
             probes["n"] += 1
             # First probe: missing (triggers repair). Re-probe: present.
-            return [{"pk": "missing" if probes["n"] == 1 else "otaku_user_media_pkey"}]
+            # regression-fix (v10.0.13): tbl key included (fail-closed probe).
+            return [{"tbl": "otaku_user_media",
+                     "pk": "missing" if probes["n"] == 1 else "otaku_user_media_pkey"}]
         return []
 
     real_execute = ctx.sql.execute

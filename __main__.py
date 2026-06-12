@@ -2375,14 +2375,15 @@ def _jikan_query(
     cache_key = _cache_key("jikan", path, params or {}) if cache else None
     if cache_key is not None:
         cached = _cache_get(cache_key)
-        if cached is not None:
+        if isinstance(cached, dict):
             # v10.0.12 — unwrap the {"data": ...} cache envelope, mirroring
             # _kitsu_query. Returning the envelope raw made every cache HIT
             # return a different shape than a miss, so repeat MAL-fallback
             # searches within the TTL silently degraded to Kitsu/'not found'.
-            # isinstance guard: a non-dict cache entry (future put-site drift,
-            # hot-reload remnant) degrades to a miss instead of raising.
-            return cached.get("data") if isinstance(cached, dict) else None
+            # v10.0.13 — a non-dict cache entry (future put-site drift,
+            # hot-reload remnant) now falls through to a real re-fetch — a
+            # TRUE miss — instead of reporting source failure for the TTL.
+            return cached.get("data")
 
     _rate_acquire("jikan")
     # v10.0.7 — SDK's ctx.http.get(url, *, headers=None) does NOT accept a
@@ -2461,9 +2462,10 @@ def _kitsu_query(
     cache_key = _cache_key("kitsu", path, params or {}) if cache else None
     if cache_key is not None:
         cached = _cache_get(cache_key)
-        if cached is not None:
-            # unwrap the cache envelope (isinstance guard: v10.0.12)
-            return cached.get("data") if isinstance(cached, dict) else None
+        if isinstance(cached, dict):
+            # unwrap the cache envelope; non-dict entries fall through to a
+            # true re-fetch (v10.0.13 — was: reported as source failure)
+            return cached.get("data")
 
     _rate_acquire("kitsu")
     # v10.0.7 — see _jikan_query for the same fix rationale: SDK
@@ -2728,7 +2730,7 @@ _PK_PROBE_SQL = (
 )
 
 
-def _ensure_wide_pk(ctx: Context) -> None:
+def _ensure_wide_pk(ctx: Context) -> bool:
     """Verify otaku_user_media's wide primary key exists; finish the aborted
     v7→v8 dance if it doesn't (v10.0.12).
 
@@ -2741,19 +2743,42 @@ def _ensure_wide_pk(ctx: Context) -> None:
     AFTER _migrate_v7_to_v8 returns (covering every marker-skip path), and
     once post-completion via the _SCHEMA_PK_VERIFIED_KV gate.
 
-    A probe row without the pk key at all (possible only from stubbed SQL in
-    tests) counts as healthy. Plain SELECT probes are not DDL-rate-limited.
-    A mid-repair RateLimitError propagates to the caller's handler and the
-    next boot retries from the probe.
+    Returns True when the PK state was POSITIVELY verified (present, repaired,
+    or table-not-yet-created so the inline-PK CREATE TABLE handles it), and
+    False when the probe was INDETERMINATE — empty rowset or a row without
+    the expected tbl/pk keys (host response-shape drift, or stubbed SQL in
+    tests). v10.0.13: indeterminate fails CLOSED — no repair DDL is fired
+    (we can't act on what we can't see) and callers must NOT set the
+    permanent pk_verified marker, so the probe retries next boot. The
+    fail-open draft let drifted rows lock pk_verified in over a genuinely
+    missing PK — the exact marker-set-while-broken class this exists to kill.
+
+    Plain SELECT probes are not DDL-rate-limited. A mid-repair RateLimitError
+    propagates to the caller's handler and the next boot retries.
     """
     rows = ctx.sql.query(_PK_PROBE_SQL) or []
     row = rows[0] if rows else {}
-    if row.get("tbl") == "missing":
+    tbl, pk = row.get("tbl"), row.get("pk")
+    if tbl is None or pk is None:
+        # Indeterminate probe: log one bounded line and let the caller skip
+        # the marker. One SELECT per boot until the shape is sane.
+        try:
+            ctx.log(
+                "wide-PK probe indeterminate; will re-probe next boot",
+                level="warning",
+                tags=["bootstrap", "pk-heal"],
+                row_keys=",".join(sorted(str(k) for k in row.keys()))[:120],
+                rowcount=str(len(rows)),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+    if tbl == "missing":
         # The table doesn't exist yet — bootstrap's first DDL creates it with
         # the wide PK inline. Nothing to repair (and nothing repairable).
-        return
-    if row.get("pk") != "missing":
-        return
+        return True
+    if pk != "missing":
+        return True
     try:
         ctx.log(
             "wide-PK missing on otaku_user_media; running repair DDL",
@@ -2791,10 +2816,15 @@ def _ensure_wide_pk(ctx: Context) -> None:
     except Exception:  # noqa: BLE001
         # Either a cross-worker race (another worker added the PK between our
         # probe and this statement) or a genuine failure. Re-probe to decide:
-        # swallow the race, surface the failure.
+        # swallow the race, surface the failure. v10.0.13 — an indeterminate
+        # re-probe certifies nothing: return False so no marker is set.
         rows = ctx.sql.query(_PK_PROBE_SQL) or []
-        if (rows[0] if rows else {}).get("pk") == "missing":
+        pk_recheck = (rows[0] if rows else {}).get("pk")
+        if pk_recheck == "missing":
             raise
+        if pk_recheck is None:
+            return False
+    return True
 
 
 def _migrate_v7_to_v8(ctx: Context) -> None:
@@ -3072,23 +3102,52 @@ def _bootstrap_schema(ctx: Context) -> None:
             # v10.0.12 — one-time wide-PK verification for tenants that
             # completed bootstrap while the PK heal was unreachable
             # (v10.0.11): one kv.get per boot, one SELECT probe ever.
+            # v10.0.13 — the marker READ gets its own guard so a kv.get
+            # failure is not mislabeled "heal failed" (skip the probe this
+            # boot; retry when KV recovers).
             try:
-                if ctx.kv.get(_SCHEMA_PK_VERIFIED_KV) != "1":
-                    _ensure_wide_pk(ctx)
-                    ctx.kv.set(_SCHEMA_PK_VERIFIED_KV, "1")
-            except Exception as exc:  # noqa: BLE001 — heal must never block
-                # boot; the marker stays unset so the next boot retries. But
-                # never silently (v10.0.12): an unlogged genuine failure here
-                # would re-burn repair DDL every boot with zero diagnostics.
+                pk_unverified = ctx.kv.get(_SCHEMA_PK_VERIFIED_KV) != "1"
+            except Exception:  # noqa: BLE001
+                pk_unverified = False
                 try:
                     ctx.log(
-                        "wide-PK heal failed; will retry next boot",
-                        level="error",
-                        tags=["bootstrap", "pk-heal"],
-                        error=f"{type(exc).__name__}: {exc}"[:300],
+                        "pk-verified marker read failed; skipping probe this boot",
+                        level="warning",
+                        tags=["bootstrap", "kv"],
                     )
                 except Exception:  # noqa: BLE001
                     pass
+            if pk_unverified:
+                try:
+                    # v10.0.13 — the marker is set ONLY on a positive
+                    # verification; an indeterminate probe (False) retries
+                    # next boot without certifying anything.
+                    if _ensure_wide_pk(ctx):
+                        try:
+                            ctx.kv.set(_SCHEMA_PK_VERIFIED_KV, "1")
+                        except Exception:  # noqa: BLE001 — self-corrects
+                            try:
+                                ctx.log(
+                                    "pk-verified marker write failed; will retry next boot",
+                                    level="warning",
+                                    tags=["bootstrap", "kv"],
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                except Exception as exc:  # noqa: BLE001 — heal must never
+                    # block boot; the marker stays unset so the next boot
+                    # retries. But never silently (v10.0.12): an unlogged
+                    # genuine failure here would re-burn repair DDL every
+                    # boot with zero diagnostics.
+                    try:
+                        ctx.log(
+                            "wide-PK heal failed; will retry next boot",
+                            level="error",
+                            tags=["bootstrap", "pk-heal"],
+                            error=f"{type(exc).__name__}: {exc}"[:300],
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             return
     except Exception:  # noqa: BLE001
         pass
@@ -3119,9 +3178,14 @@ def _bootstrap_schema(ctx: Context) -> None:
     # v10.0.12 — wide-PK heal, AFTER the migration returns so it covers the
     # marker fast-paths that skip the migration body entirely. Guarded
     # separately from the migration so a heal failure can NEVER block table
-    # creation in the DDL loop below.
+    # creation in the DDL loop below. v10.0.13 — the outcome is tracked:
+    # setting otaku:schema_pk_verified at completion after a FAILED heal
+    # would permanently gate off the post-completion retry backstop (the
+    # exact marker-set-while-broken lock-in class this machinery exists to
+    # eliminate).
+    heal_ok = True
     try:
-        _ensure_wide_pk(ctx)
+        heal_ok = _ensure_wide_pk(ctx)
     except RateLimitError as exc:
         _log_bootstrap_rate_limit(
             ctx, exc,
@@ -3130,6 +3194,7 @@ def _bootstrap_schema(ctx: Context) -> None:
         )
         return
     except Exception as exc:  # noqa: BLE001 — log and continue into the loop
+        heal_ok = False
         try:
             ctx.log(
                 "wide-PK heal failed; continuing bootstrap",
@@ -3161,15 +3226,21 @@ def _bootstrap_schema(ctx: Context) -> None:
             return
         try:
             ctx.kv.set(_SCHEMA_DDL_CURSOR_KV, str(idx + 1))
-        except Exception:  # noqa: BLE001 — lost cursor → worst case replay
+        except Exception:  # noqa: BLE001 — a transiently lost cursor means a
+            # budget-hungry replay; a PERSISTENTLY failing cursor write on a
+            # fresh install degrades to the v10.0.11 no-progress mode (replay
+            # to the same rate-limit point each boot) until KV recovers.
             pass
 
     # v10.0.7 — bootstrap completed fully; gate subsequent boots.
     try:
         ctx.kv.set(_SCHEMA_VERSION_KV, _CURRENT_SCHEMA_VERSION)
-        # v10.0.12 — _ensure_wide_pk ran earlier this boot, so the one-time
-        # post-completion probe in the fast path is already satisfied.
-        ctx.kv.set(_SCHEMA_PK_VERIFIED_KV, "1")
+        # v10.0.13 — pk_verified is set ONLY when this boot's heal actually
+        # succeeded. After a failed heal the marker stays unset, so the
+        # version-marker fast path's one-time probe retries (and logs) on
+        # every subsequent boot until the heal lands.
+        if heal_ok:
+            ctx.kv.set(_SCHEMA_PK_VERIFIED_KV, "1")
     except Exception:  # noqa: BLE001
         pass
 
@@ -7303,9 +7374,18 @@ def _handle_poll_vote(ctx: Context, event: dict) -> None:
     try:
         _poll_vote_deferred(ctx, poll_id, option_key, user_id)
     except Exception as exc:  # noqa: BLE001 — never strand a deferred interaction
+        # v10.0.13 — the user-facing reply comes FIRST and each step has its
+        # own guard: with both in one try, a log failure skipped the followup
+        # and recreated the eternal-spinner this guard exists to prevent.
         try:
-            ctx.log(f"poll vote failed: {exc}", level="error", tags=["poll", "vote"])
             ctx.interaction.followup(content=S.VOTE_FAILED, ephemeral=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ctx.log(
+                f"poll vote failed: {f'{type(exc).__name__}: {exc}'[:300]}",
+                level="error", tags=["poll", "vote"],
+            )
         except Exception:  # noqa: BLE001
             pass
 
@@ -7661,9 +7741,17 @@ def _handle_aotw_vote(ctx: Context, event: dict) -> None:
     try:
         _aotw_vote_deferred(ctx, poll_id, media_id, user_id)
     except Exception as exc:  # noqa: BLE001 — never strand a deferred interaction
+        # v10.0.13 — reply first, then log; independent guards (see
+        # _handle_poll_vote).
         try:
-            ctx.log(f"aotw vote failed: {exc}", level="error", tags=["aotw", "vote"])
             ctx.interaction.followup(content=S.VOTE_FAILED, ephemeral=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ctx.log(
+                f"aotw vote failed: {f'{type(exc).__name__}: {exc}'[:300]}",
+                level="error", tags=["aotw", "vote"],
+            )
         except Exception:  # noqa: BLE001
             pass
 
