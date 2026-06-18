@@ -1,6 +1,6 @@
 # YourBot Plugin SDK — do not remove
 # Install: pip install yourbot-sdk
-yourbot-sdk>=0.6.1,<0.7.0
+yourbot-sdk>=0.7.1,<0.8.0
 
 # Add your own dependencies below:
 # requests>=2.31.0
