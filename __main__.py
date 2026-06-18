@@ -2214,6 +2214,29 @@ def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None
         pass
 
 
+def _record_http_metric(ctx: Context, source: str, outcome: str) -> None:
+    """Emit one per-(source, outcome) datapoint for each real HTTP transport
+    result (v10.0.15).
+
+    The 2026-06-11/12 proxy-compression incident was only diagnosed after an
+    anomaly log line was added and a live retest was hand-scraped. A
+    time-series metric makes the *next* upstream/proxy degradation visible on
+    the dev-portal dashboard without a log scrape — a spike in
+    outcome=bad_body / non_2xx / timeout for a source is the tell. `outcome`
+    is one of: ok, timeout, rate, validation, error, non_2xx, bad_body,
+    api_errors. Cache hits are intentionally NOT recorded — this measures
+    transport health, not call volume. Best-effort: observability must never
+    raise into a request path (mirrors the cache put-site and anomaly-log
+    guards). ctx.metrics needs no capability (available to all plugins).
+    """
+    try:
+        ctx.metrics.record(
+            "http.request", 1.0, tags={"source": source, "outcome": outcome}
+        )
+    except Exception:  # noqa: BLE001 — observability must never break a request
+        pass
+
+
 def _anilist_post_once(ctx: Context, body: str) -> tuple[dict | None, str]:
     """One POST to AniList.
 
@@ -2294,6 +2317,7 @@ def _anilist_query(
         if classification == "timeout":
             continue  # retry
         if classification in ("rate", "validation", "error"):
+            _record_http_metric(ctx, "anilist", classification)
             return None  # never retry these
         # classification == "ok"
         status = _http_status(resp)
@@ -2308,6 +2332,7 @@ def _anilist_query(
         break  # got a non-5xx response — stop retrying
     else:
         # Exhausted retries on transient failures.
+        _record_http_metric(ctx, "anilist", "timeout")
         return None
 
     if resp is None or _http_status(resp) != 200:
@@ -2320,12 +2345,14 @@ def _anilist_query(
             # triage line can't diverge from the gate on a drifted shape.
             status_coerced=str(_http_status(resp)),
         )
+        _record_http_metric(ctx, "anilist", "non_2xx")
         return None
 
     payload = _http_json(resp)
     if not isinstance(payload, dict):
         ctx.log("anilist returned unparseable JSON", level="error", tags=["anilist"])
         _log_http_body_anomaly(ctx, "anilist", resp)
+        _record_http_metric(ctx, "anilist", "bad_body")
         return None
 
     if payload.get("errors"):
@@ -2339,8 +2366,12 @@ def _anilist_query(
         user_msg = _classify_anilist_errors(errors)
         if user_msg:
             _LAST_USER_ERROR = user_msg
+        _record_http_metric(ctx, "anilist", "api_errors")
         return None
 
+    # A 200 with a parseable, error-free payload: the transport is healthy
+    # (a null `data` here is "no match", not a transport failure → "ok").
+    _record_http_metric(ctx, "anilist", "ok")
     data = payload.get("data")
     if cache_key is not None and data is not None:
         try:
@@ -2440,6 +2471,7 @@ def _jikan_query(
         )
     except RpcTimeoutError as exc:
         ctx.log(f"jikan timed out: {exc}", level="warning", tags=["jikan", "http"])
+        _record_http_metric(ctx, "jikan", "timeout")
         return None
     except RateLimitError as exc:
         ctx.log(
@@ -2447,12 +2479,15 @@ def _jikan_query(
             tags=["jikan", "http"],
             retry_after=getattr(exc, "retry_after", None),
         )
+        _record_http_metric(ctx, "jikan", "rate")
         return None
     except ValidationError as exc:
         ctx.log(f"jikan validation error: {exc}", level="error", tags=["jikan", "http"])
+        _record_http_metric(ctx, "jikan", "validation")
         return None
     except Exception as exc:  # noqa: BLE001
         ctx.log(f"jikan call failed: {exc}", level="error", tags=["jikan", "http"])
+        _record_http_metric(ctx, "jikan", "error")
         return None
 
     # v10.0.11 — status coerced via _http_status (handles status/status_code
@@ -2465,6 +2500,7 @@ def _jikan_query(
             "jikan non-2xx", level="warning", tags=["jikan", "http"],
             status=str((resp or {}).get("status", (resp or {}).get("status_code"))),
         )
+        _record_http_metric(ctx, "jikan", "non_2xx")
         return None
     payload = _http_json(resp)
     if not isinstance(payload, dict):
@@ -2472,7 +2508,9 @@ def _jikan_query(
         # bare JSON list): neither is the documented Jikan envelope. The
         # non-dict case used to fall through silently with no diagnostic.
         _log_http_body_anomaly(ctx, "jikan", resp)
+        _record_http_metric(ctx, "jikan", "bad_body")
         return None
+    _record_http_metric(ctx, "jikan", "ok")
     # Jikan wraps results in a `data` field; pagination metadata in `pagination`.
     data = payload.get("data")
     if data is None:
@@ -2519,6 +2557,7 @@ def _kitsu_query(
         )
     except RpcTimeoutError as exc:
         ctx.log(f"kitsu timed out: {exc}", level="warning", tags=["kitsu", "http"])
+        _record_http_metric(ctx, "kitsu", "timeout")
         return None
     except RateLimitError as exc:
         ctx.log(
@@ -2526,12 +2565,15 @@ def _kitsu_query(
             tags=["kitsu", "http"],
             retry_after=getattr(exc, "retry_after", None),
         )
+        _record_http_metric(ctx, "kitsu", "rate")
         return None
     except ValidationError as exc:
         ctx.log(f"kitsu validation error: {exc}", level="error", tags=["kitsu", "http"])
+        _record_http_metric(ctx, "kitsu", "validation")
         return None
     except Exception as exc:  # noqa: BLE001
         ctx.log(f"kitsu call failed: {exc}", level="error", tags=["kitsu", "http"])
+        _record_http_metric(ctx, "kitsu", "error")
         return None
 
     status = _http_status(resp)
@@ -2540,13 +2582,16 @@ def _kitsu_query(
             "kitsu non-2xx", level="warning", tags=["kitsu", "http"],
             status=str((resp or {}).get("status", (resp or {}).get("status_code"))),
         )
+        _record_http_metric(ctx, "kitsu", "non_2xx")
         return None
     payload = _http_json(resp)
     if not isinstance(payload, dict):
         # v10.0.12 — same as _jikan_query: non-dict bodies now get the
         # anomaly diagnostic instead of a silent drop.
         _log_http_body_anomaly(ctx, "kitsu", resp)
+        _record_http_metric(ctx, "kitsu", "bad_body")
         return None
+    _record_http_metric(ctx, "kitsu", "ok")
     data = payload.get("data")
     if data is None:
         return None

@@ -20,6 +20,42 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.15] - 2026-06-18
+
+### Added — per-(source, outcome) HTTP transport metrics
+
+Maintenance tune-up. The 2026-06-11/12 proxy-compression incident was only
+diagnosed after an anomaly *log line* was added and a live retest was
+hand-scraped from the dev-portal logs. This release makes the next
+upstream/proxy degradation visible on the dashboard without a log scrape.
+
+- **`_record_http_metric(ctx, source, outcome)`** — every real HTTP transport
+  result (`_anilist_query`, `_jikan_query`, `_kitsu_query`) now emits exactly
+  one `http.request` datapoint tagged `{source, outcome}`, where `outcome` ∈
+  `ok, timeout, rate, validation, error, non_2xx, bad_body, api_errors`. A
+  spike in `outcome=bad_body / non_2xx / timeout` for a source is the tell for
+  the next incident. Cache HITS emit nothing (the metric measures transport
+  health, not call volume). Best-effort and exception-guarded — observability
+  never raises into a request path. `ctx.metrics` needs no capability
+  (available to all plugins), so `capabilities_required` is unchanged.
+- 14 immutable contracts in `tests/regression/test_v10_0_15.py` (suite 747 →
+  761).
+
+### Verified (no change needed)
+
+- **SDK pin held at `yourbot-sdk>=0.6.1,<0.7.0`.** PyPI now publishes 0.7.0/
+  0.7.1; a 0.x minor is the breaking-review boundary (the `<0.7.0` pin says so)
+  and is deliberately not auto-adopted here.
+- **Dashboard `rpc_method` left as bare names** (`get_total_tracked`, …). The
+  SDK transport registers handlers under `dashboard.{name}` (`_plugin.py`)
+  while the SDK's own dashboard builder emits **bare** `rpc_method`
+  (`dashboard.py`), so the platform prepends the `dashboard.` namespace. Adding
+  the prefix in the manifest would produce `dashboard.dashboard.*` and break
+  routing — confirmed against the installed 0.6.1 source.
+- **Rebrand complete in code** — zero `mmo_maid` references in `__main__.py` or
+  `tests/`; remaining mentions are historical changelog/roadmap prose and the
+  real GitHub repo URL. Capabilities remain minimal and fully used.
+
 ## [10.0.14] - 2026-06-12
 
 ### LIVE INCIDENT RESOLVED: host proxy compression regression, diagnosed by
