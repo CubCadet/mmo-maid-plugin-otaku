@@ -94,6 +94,15 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 
 Every command that reaches AniList (or SQL) checks an ephemeral per-user cooldown (`otaku:user:<id>`, 2 s) first — the lone exception is `/help`, which only reads the manifest. The cooldown is sandbox-side only — AniList itself permits ~90 req/min globally, and the platform proxy enforces 30/min per (server, plugin). The 2 s per-user throttle stops a single chatty user from monopolising either budget.
 
+### Reliability & observability
+
+The HTTP transport is best-effort by design — any upstream failure logs and returns "no results" rather than crashing a handler:
+
+- **Multi-source fallback** — `/anime` and `/manga` fall through AniList → MAL (Jikan) → Kitsu, so one source being down doesn't kill search.
+- **Compression-proof bodies** — requests send `Accept-Encoding: identity` and recover gzip bytes client-side (v10.0.14), after a live incident where the platform proxy passed compressed bodies through lossily.
+- **Thread-safe throttling** — the per-source rate buckets and the response cache are lock-guarded (v10.0.16), since the platform runs several dispatcher threads per worker; the limiter can't overshoot an upstream budget or raise into a handler.
+- **Metrics & tracing** — every real transport call emits one `http.request` metric tagged `{source, outcome}` (v10.0.15; a spike in `outcome=non_2xx / timeout / bad_body` is the tell for an upstream/proxy incident), and every transport error/anomaly log carries the interaction's `request_id` (v10.0.16) so a burst correlates to its cause. `ctx.metrics` and `ctx.log` need no capability.
+
 ## KV key convention
 
 Durable KV keys (`ctx.kv`):

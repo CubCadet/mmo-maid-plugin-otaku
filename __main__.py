@@ -1979,6 +1979,12 @@ def _on_cooldown(ctx: Context, user_id: str) -> bool:
 # `_anilist_query` keys on a stable hash of (query, sorted-vars). Callers opt in
 # with `cache=True`. Per the roadmap, /similar stays uncached.
 _CACHE: dict[str, tuple[float, dict]] = {}
+# v10.0.16 — like the rate buckets, _CACHE is module-global and mutated from up
+# to 4 dispatcher threads. _cache_put's len-check-then-evict is a compound
+# read-modify-write; this lock serializes the eviction so two threads can't both
+# evict (or evict mid-insert). Guards the mutating helpers only — cheap, and the
+# read path stays lock-free where it can.
+_CACHE_LOCK = threading.Lock()
 
 
 def _cache_key(*parts) -> str:
@@ -2019,14 +2025,15 @@ def _cache_clear() -> None:
 
 
 def _cache_put(key: str, data: dict) -> None:
-    if len(_CACHE) >= ANILIST_CACHE_MAX_ENTRIES:
-        # Drop the oldest entry — dict preserves insertion order in 3.7+.
-        try:
-            oldest = next(iter(_CACHE))
-            _CACHE.pop(oldest, None)
-        except StopIteration:
-            pass
-    _CACHE[key] = (time.monotonic() + ANILIST_CACHE_TTL, data)
+    with _CACHE_LOCK:
+        if len(_CACHE) >= ANILIST_CACHE_MAX_ENTRIES:
+            # Drop the oldest entry — dict preserves insertion order in 3.7+.
+            try:
+                oldest = next(iter(_CACHE))
+                _CACHE.pop(oldest, None)
+            except StopIteration:
+                pass
+        _CACHE[key] = (time.monotonic() + ANILIST_CACHE_TTL, data)
 
 
 # Module-level slot for the most recent user-fixable error from AniList.
@@ -2154,6 +2161,25 @@ def _http_status(resp: dict | None) -> int:
     return 0
 
 
+def _http_log(ctx: Context, message: str, *, level: str = "warning", tags=None, **fields) -> None:
+    """ctx.log wrapper for the HTTP transport layer that stamps the SDK
+    request_id (v10.0.16).
+
+    Every upstream error/anomaly log now carries `request_id=ctx.request_id`, so
+    a burst of AniList/Jikan/Kitsu failures in the dev-portal log correlates back
+    to the one interaction that triggered it (the SDK's own ctx.log docstring
+    recommends exactly this). request_id is populated inside interaction handlers
+    (SDK 0.5.3+); best-effort via getattr so a scheduled/no-ctx caller still logs.
+    """
+    ctx.log(
+        message,
+        level=level,
+        tags=tags or [],
+        request_id=getattr(ctx, "request_id", None),
+        **fields,
+    )
+
+
 def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None:
     """One bounded log line describing an unusable HTTP body (v10.0.11 triage).
 
@@ -2198,7 +2224,8 @@ def _log_http_body_anomaly(ctx: Context, source: str, resp: dict | None) -> None
                 hint = "gzip-compressed bytes (gunzip failed?)"
             elif b4 == b"\x28\xb5\x2f\xfd":
                 hint = "zstd-compressed bytes (no stdlib decoder)"
-        ctx.log(
+        _http_log(
+            ctx,
             f"{source} http body anomaly",
             level="error",
             tags=[source, "http", "body-anomaly"],
@@ -2263,10 +2290,11 @@ def _anilist_post_once(ctx: Context, body: str) -> tuple[dict | None, str]:
         )
         return resp, "ok"
     except RpcTimeoutError as exc:
-        ctx.log(f"anilist timed out: {exc}", level="warning", tags=["anilist", "http"])
+        _http_log(ctx, f"anilist timed out: {exc}", level="warning", tags=["anilist", "http"])
         return None, "timeout"
     except RateLimitError as exc:
-        ctx.log(
+        _http_log(
+            ctx,
             "anilist rate limited",
             level="warning",
             tags=["anilist", "http"],
@@ -2274,10 +2302,10 @@ def _anilist_post_once(ctx: Context, body: str) -> tuple[dict | None, str]:
         )
         return None, "rate"
     except ValidationError as exc:
-        ctx.log(f"anilist validation error: {exc}", level="error", tags=["anilist", "http"])
+        _http_log(ctx, f"anilist validation error: {exc}", level="error", tags=["anilist", "http"])
         return None, "validation"
     except Exception as exc:  # noqa: BLE001 — last-resort guard around the proxy call
-        ctx.log(f"anilist call failed: {exc}", level="error", tags=["anilist", "http"])
+        _http_log(ctx, f"anilist call failed: {exc}", level="error", tags=["anilist", "http"])
         return None, "error"
 
 
@@ -2310,11 +2338,19 @@ def _anilist_query(
     body = json.dumps({"query": query, "variables": variables})
 
     resp: dict | None = None
+    # v10.0.16 — remember what kind of transient failure we last saw so the
+    # retry-exhaustion metric reflects reality. The old code hardcoded
+    # outcome="timeout" in the `else`, so a persistent 5xx storm was counted as
+    # a timeout on the very per-(source,outcome) dashboard added (v10.0.15) to
+    # triage upstream/proxy incidents. Now an all-5xx exhaustion records
+    # "non_2xx" and an all-timeout exhaustion records "timeout".
+    last_transient = "timeout"
     for attempt, backoff in enumerate((0.0, *ANILIST_RETRY_BACKOFFS_S)):
         if attempt > 0:
             _sleep_for_retry(backoff)
         resp, classification = _anilist_post_once(ctx, body)
         if classification == "timeout":
+            last_transient = "timeout"
             continue  # retry
         if classification in ("rate", "validation", "error"):
             _record_http_metric(ctx, "anilist", classification)
@@ -2322,7 +2358,9 @@ def _anilist_query(
         # classification == "ok"
         status = _http_status(resp)
         if 500 <= status < 600:
-            ctx.log(
+            last_transient = "non_2xx"
+            _http_log(
+                ctx,
                 "anilist 5xx",
                 level="warning",
                 tags=["anilist", "http"],
@@ -2331,12 +2369,15 @@ def _anilist_query(
             continue  # retry
         break  # got a non-5xx response — stop retrying
     else:
-        # Exhausted retries on transient failures.
-        _record_http_metric(ctx, "anilist", "timeout")
+        # Exhausted retries on transient failures — record the class of the
+        # failure that actually exhausted them (timeout vs 5xx), not a blanket
+        # "timeout".
+        _record_http_metric(ctx, "anilist", last_transient)
         return None
 
     if resp is None or _http_status(resp) != 200:
-        ctx.log(
+        _http_log(
+            ctx,
             "anilist non-200",
             level="warning",
             tags=["anilist", "http"],
@@ -2350,14 +2391,15 @@ def _anilist_query(
 
     payload = _http_json(resp)
     if not isinstance(payload, dict):
-        ctx.log("anilist returned unparseable JSON", level="error", tags=["anilist"])
+        _http_log(ctx, "anilist returned unparseable JSON", level="error", tags=["anilist"])
         _log_http_body_anomaly(ctx, "anilist", resp)
         _record_http_metric(ctx, "anilist", "bad_body")
         return None
 
     if payload.get("errors"):
         errors = payload["errors"]
-        ctx.log(
+        _http_log(
+            ctx,
             "anilist returned errors",
             level="warning",
             tags=["anilist"],
@@ -2393,6 +2435,18 @@ def _anilist_query(
 # plugin) tuple — which is what we want, since rate limits are per
 # source IP, not per server.
 _RATE_BUCKETS: dict[str, list[float]] = {s: [] for s in SOURCE_RATE_LIMITS}
+# v10.0.16 — the buckets are module-global and shared across the (server,
+# plugin) tuple, but the SDK runs up to MMO_SDK_DISPATCH_THREADS (default 4)
+# dispatcher threads per worker (see the achievements-cache note that fixed the
+# analogous leak with threading.local()). _rate_acquire did an unsynchronized
+# read-modify-write on _RATE_BUCKETS[source]: concurrent callers could both
+# pass the `len < max_n` check and overshoot the upstream budget, and a
+# concurrent pop(0) could make the `bucket[0]` read raise IndexError — which,
+# because _rate_acquire is called OUTSIDE the transport try/except, would unwind
+# into an already-deferred slash-command handler and hang the interaction. This
+# lock serializes every read-modify-write; the blocking time.sleep is done with
+# the lock RELEASED so callers for other sources aren't stalled behind it.
+_RATE_LOCK = threading.Lock()
 
 
 def _rate_acquire(source: str) -> float:
@@ -2400,29 +2454,39 @@ def _rate_acquire(source: str) -> float:
     budget admits a new request. Returns the seconds slept (0.0 if no
     wait needed). Sources without a configured limit are admitted
     unconditionally — useful for tests and for keep-AniList-only paths.
+
+    Thread-safe (v10.0.16): the bucket's trim/check/append is done under
+    _RATE_LOCK; the sleep happens between two locked sections so it never
+    holds the lock.
     """
     if source not in SOURCE_RATE_LIMITS:
         return 0.0
     max_n, window_s = SOURCE_RATE_LIMITS[source]
-    now = time.monotonic()
-    bucket = _RATE_BUCKETS.setdefault(source, [])
-    # Drop expired timestamps.
-    cutoff = now - window_s
-    while bucket and bucket[0] < cutoff:
-        bucket.pop(0)
-    slept = 0.0
-    if len(bucket) >= max_n:
-        # Sleep until the oldest in-window entry would expire.
-        wait_until = bucket[0] + window_s
-        slept = max(0.0, wait_until - now)
-        if slept > 0:
-            _sleep_for_retry(slept)
-        # Re-trim after sleeping.
+    with _RATE_LOCK:
         now = time.monotonic()
+        bucket = _RATE_BUCKETS.setdefault(source, [])
+        # Drop expired timestamps.
         cutoff = now - window_s
         while bucket and bucket[0] < cutoff:
             bucket.pop(0)
-    bucket.append(now)
+        if len(bucket) < max_n:
+            # Within budget — admit immediately.
+            bucket.append(now)
+            return 0.0
+        # Over budget: sleep until the oldest in-window entry would expire.
+        wait_until = bucket[0] + window_s
+        slept = max(0.0, wait_until - now)
+    # Sleep with the lock released.
+    if slept > 0:
+        _sleep_for_retry(slept)
+    with _RATE_LOCK:
+        now = time.monotonic()
+        bucket = _RATE_BUCKETS.setdefault(source, [])
+        # Re-trim after sleeping, then admit.
+        cutoff = now - window_s
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+        bucket.append(now)
     return slept
 
 
@@ -2470,11 +2534,12 @@ def _jikan_query(
             headers={"Accept": "application/json", "Accept-Encoding": "identity"},
         )
     except RpcTimeoutError as exc:
-        ctx.log(f"jikan timed out: {exc}", level="warning", tags=["jikan", "http"])
+        _http_log(ctx, f"jikan timed out: {exc}", level="warning", tags=["jikan", "http"])
         _record_http_metric(ctx, "jikan", "timeout")
         return None
     except RateLimitError as exc:
-        ctx.log(
+        _http_log(
+            ctx,
             "jikan rate limited", level="warning",
             tags=["jikan", "http"],
             retry_after=getattr(exc, "retry_after", None),
@@ -2482,11 +2547,11 @@ def _jikan_query(
         _record_http_metric(ctx, "jikan", "rate")
         return None
     except ValidationError as exc:
-        ctx.log(f"jikan validation error: {exc}", level="error", tags=["jikan", "http"])
+        _http_log(ctx, f"jikan validation error: {exc}", level="error", tags=["jikan", "http"])
         _record_http_metric(ctx, "jikan", "validation")
         return None
     except Exception as exc:  # noqa: BLE001
-        ctx.log(f"jikan call failed: {exc}", level="error", tags=["jikan", "http"])
+        _http_log(ctx, f"jikan call failed: {exc}", level="error", tags=["jikan", "http"])
         _record_http_metric(ctx, "jikan", "error")
         return None
 
@@ -2496,7 +2561,8 @@ def _jikan_query(
     # dev-portal log instead of masquerading as "no results".
     status = _http_status(resp)
     if status < 200 or status >= 300:
-        ctx.log(
+        _http_log(
+            ctx,
             "jikan non-2xx", level="warning", tags=["jikan", "http"],
             status=str((resp or {}).get("status", (resp or {}).get("status_code"))),
         )
@@ -2556,11 +2622,12 @@ def _kitsu_query(
             headers={"Accept": "application/vnd.api+json", "Accept-Encoding": "identity"},
         )
     except RpcTimeoutError as exc:
-        ctx.log(f"kitsu timed out: {exc}", level="warning", tags=["kitsu", "http"])
+        _http_log(ctx, f"kitsu timed out: {exc}", level="warning", tags=["kitsu", "http"])
         _record_http_metric(ctx, "kitsu", "timeout")
         return None
     except RateLimitError as exc:
-        ctx.log(
+        _http_log(
+            ctx,
             "kitsu rate limited", level="warning",
             tags=["kitsu", "http"],
             retry_after=getattr(exc, "retry_after", None),
@@ -2568,17 +2635,18 @@ def _kitsu_query(
         _record_http_metric(ctx, "kitsu", "rate")
         return None
     except ValidationError as exc:
-        ctx.log(f"kitsu validation error: {exc}", level="error", tags=["kitsu", "http"])
+        _http_log(ctx, f"kitsu validation error: {exc}", level="error", tags=["kitsu", "http"])
         _record_http_metric(ctx, "kitsu", "validation")
         return None
     except Exception as exc:  # noqa: BLE001
-        ctx.log(f"kitsu call failed: {exc}", level="error", tags=["kitsu", "http"])
+        _http_log(ctx, f"kitsu call failed: {exc}", level="error", tags=["kitsu", "http"])
         _record_http_metric(ctx, "kitsu", "error")
         return None
 
     status = _http_status(resp)
     if status < 200 or status >= 300:
-        ctx.log(
+        _http_log(
+            ctx,
             "kitsu non-2xx", level="warning", tags=["kitsu", "http"],
             status=str((resp or {}).get("status", (resp or {}).get("status_code"))),
         )

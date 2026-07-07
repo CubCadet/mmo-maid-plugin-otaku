@@ -20,6 +20,69 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [10.0.16] - 2026-07-07
+
+Maintenance tune-up. SDK dependency modernization plus three transport-layer
+fixes surfaced by a full-codebase audit. No new capabilities, slash commands,
+schema, or proxy domains — marketplace re-review should NOT trigger.
+
+### Changed — SDK pin `>=0.6.1,<0.7.0` → `>=0.8.2,<0.9.0`
+
+The pin was deliberately held below 0.7 pending a breaking-change review of the
+0.7/0.8 line. That review is now done: a source-level diff of the installed SDK
+across `0.6.1 → 0.8.2` is **additive-only** for everything this plugin uses.
+The only additions are `ctx.ws` / `@plugin.on_ws_*` (WebSocket support, needs
+`proxy:websocket` — unused here), optional `ctx.http(secret_auth=/auth=)` kwargs
+(the response shape is unchanged, so the v10.0.14 gunzip/`body_bytes` path is
+untouched), and a relaxed `ctx.kv.increment` signature (`amount` positional-or-
+keyword — and the plugin makes zero `increment` calls). `RateLimitError.retry_after`
+gained a `float` type hint (no runtime change). The full 761-test suite passes
+identically on 0.6.1 and 0.8.2; CI is green on 3.10/3.11/3.12.
+
+### Fixed — thread-safe rate buckets and cache eviction
+
+`_rate_acquire` did an unsynchronized read-modify-write on the module-global
+`_RATE_BUCKETS`, but the SDK runs up to `MMO_SDK_DISPATCH_THREADS` (default 4)
+dispatcher threads per worker (the same hazard the v10.0.2 achievements cache
+fixed with `threading.local()` — the rate buckets and `_CACHE` were missed).
+Two concurrent callers could both pass the `len < max_n` check and **overshoot**
+a source's upstream budget (drawing 429s, worst under Jikan's 3/s limit), and a
+concurrent `pop(0)` could make the `bucket[0]` read raise **IndexError** — which,
+because `_rate_acquire` runs *outside* the transport `try/except`, would unwind
+into an already-deferred `/anime` or `/manga` handler and hang the interaction.
+A new `_RATE_LOCK` serializes the bucket trim/check/append; the blocking
+`time.sleep` is done with the lock **released** so callers for other sources
+aren't stalled. `_cache_put`'s len-check-then-evict is likewise guarded by a new
+`_CACHE_LOCK`. Single-threaded behavior is byte-for-byte preserved (same admit/
+sleep outcomes) — verified by both the pre-existing v9.1 rate tests and new
+concurrency contracts.
+
+### Fixed — retry-exhaustion metric mislabeled a 5xx storm as a timeout
+
+When `_anilist_query` exhausted its retries, the `for/else` unconditionally
+recorded `_record_http_metric(ctx, "anilist", "timeout")` — even when every
+retry had failed on a **5xx**. That directly undercut the v10.0.15
+per-(source, outcome) dashboard, whose entire purpose is triaging upstream/proxy
+incidents. The loop now tracks the class of the last transient failure and
+records `non_2xx` for an all-5xx exhaustion, `timeout` for an all-timeout one.
+A single datapoint per transport call is preserved.
+
+### Added — `request_id` on HTTP-transport error/anomaly logs (observability)
+
+New `_http_log()` wrapper stamps `request_id=ctx.request_id` (populated inside
+interaction handlers; SDK 0.5.3+) onto every AniList/Jikan/Kitsu error, non-2xx,
+and body-anomaly log line, so a burst of upstream failures in the dev-portal log
+correlates back to the one interaction that triggered it — as the SDK's own
+`ctx.log` docstring recommends. `ctx.metrics` / `ctx.log` need no capability, so
+`capabilities_required` is unchanged.
+
+### Tests
+
+`tests/regression/test_v10_0_16.py` — 12 immutable contracts: 5xx-vs-timeout
+exhaustion labeling, single-datapoint invariant, rate-limiter no-overshoot and
+no-raise under concurrency, single-threaded behavior preservation, and
+`request_id` presence on transport/anomaly logs. Suite total: **773** (was 761).
+
 ## [10.0.15] - 2026-06-18
 
 ### Added — per-(source, outcome) HTTP transport metrics
