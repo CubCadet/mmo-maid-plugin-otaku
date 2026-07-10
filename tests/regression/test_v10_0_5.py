@@ -164,7 +164,7 @@ def test_poll_options_insert_uses_unnest_not_fstring(monkeypatch):
     ctx.sql.query = _q
     from yourbot_sdk.testing import make_event
     event = make_event(
-        "interaction_create", interaction_type=2, command_name="poll",
+        "interaction_create", interaction_type=2, command_name="otaku-poll",
         options=[{"name": "create", "type": 1, "options": [
             {"name": "question", "value": "Q?"},
             {"name": "a", "value": "tx"},

@@ -33,5 +33,8 @@ jobs:
       - name: Validate plugin
         run: python scripts/validate_plugin.py .
 
+      - name: Validate plugin (platform publish gate)
+        run: yourbot validate --path .
+
       - name: Run tests
         run: python -m pytest -q

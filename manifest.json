@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "10.0.16",
+  "version": "11.0.0",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -403,7 +403,7 @@
       ]
     },
     {
-      "name": "leaderboard",
+      "name": "otaku-leaderboard",
       "description": "Server-wide leaderboard for the otaku tracker.",
       "options": [
         {
@@ -568,7 +568,7 @@
       ]
     },
     {
-      "name": "stats",
+      "name": "otaku-stats",
       "description": "Show a user's aggregate anime stats — counts, mean score, hours, top genre.",
       "options": [
         {
@@ -629,7 +629,7 @@
       ]
     },
     {
-      "name": "poll",
+      "name": "otaku-poll",
       "description": "Server polls — create a free-form vote, check status, or end one.",
       "options": [
         {
@@ -649,7 +649,7 @@
           "description": "Show a poll's current standings.",
           "type": 1,
           "options": [
-            {"name": "id", "description": "Poll id (shown in /poll create output)", "type": 4, "required": true}
+            {"name": "id", "description": "Poll id (shown in /otaku-poll create output)", "type": 4, "required": true}
           ]
         },
         {

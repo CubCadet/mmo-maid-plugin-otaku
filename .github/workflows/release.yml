@@ -43,6 +43,9 @@ jobs:
       - name: Build upload zip
         run: python scripts/build_release.py --output dist/
 
+      - name: Validate zip (platform publish gate, artifact parity)
+        run: python scripts/validate_zip.py dist/
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:

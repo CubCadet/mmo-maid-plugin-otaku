@@ -22,11 +22,16 @@ lint:
 # __pycache__/.pytest_cache, which trip the validator's top-level layout
 # check (v10.0.12). Cache-only so a standalone `make validate` doesn't
 # delete a previously built dist/ zip.
+# Two layers (v11.0.0): scripts/validate_plugin.py is the repo-hygiene layer
+# (SQL safety, proxy domains, layout); `yourbot validate` is the SDK's
+# platform publish gate (reserved names, handler consistency, option shapes).
 validate: clean-caches
 	python scripts/validate_plugin.py .
+	yourbot validate --path .
 
 release: clean lint validate test
 	python scripts/build_release.py --output dist/
+	python scripts/validate_zip.py dist/
 
 clean: clean-caches
 	rm -rf dist/ htmlcov/ .coverage

@@ -133,7 +133,7 @@ def test_poll_options_use_single_multi_row_insert(monkeypatch):
     ctx.sql.query = _q
     from yourbot_sdk.testing import make_event
     event = make_event(
-        "interaction_create", interaction_type=2, command_name="poll",
+        "interaction_create", interaction_type=2, command_name="otaku-poll",
         options=[{"name": "create", "type": 1, "options": [
             {"name": "question", "value": "Best vibe?"},
             {"name": "a", "value": "opt-a"},

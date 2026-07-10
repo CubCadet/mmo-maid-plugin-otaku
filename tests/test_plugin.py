@@ -124,6 +124,8 @@ def test_anime_command_responds_with_embed_and_caches_id():
 
     # KV cache for the user.
     assert ctx.kv.get("last_anime:user:u1") == SAMPLE_MEDIA["id"]
+    cache_write = next(w for w in ctx.kv.writes if w["key"] == "last_anime:user:u1")
+    assert cache_write["ttl_seconds"] == p.LAST_ANIME_TTL  # v11: TTL bound to the constant
 
     # HTTP went to AniList.
     assert ctx.http.requests, "expected an HTTP call"
@@ -1344,7 +1346,7 @@ def test_leaderboard_default_metric_is_completed():
         return [{"user_id": "a", "n": 5}]
 
     ctx.sql.query = _q  # type: ignore[assignment]
-    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {}, user_id="anyone"))
+    p.cmd_leaderboard(ctx, _slash_event("otaku-leaderboard", {}, user_id="anyone"))
 
     assert "status = 'completed'" in captured["sql"]
     follow = ctx.interaction.followups[-1]
@@ -1362,7 +1364,7 @@ def test_leaderboard_score_metric_has_min_rated_filter():
         return [{"user_id": "a", "avg_rating": 18.0, "rated": 5}]
 
     ctx.sql.query = _q  # type: ignore[assignment]
-    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "score"}, user_id="anyone"))
+    p.cmd_leaderboard(ctx, _slash_event("otaku-leaderboard", {"metric": "score"}, user_id="anyone"))
 
     assert "HAVING COUNT(*) >= %s" in captured["sql"]
     assert "AVG(rating)" in captured["sql"]
@@ -1377,7 +1379,7 @@ def test_leaderboard_hours_metric_uses_episode_sum():
         return [{"user_id": "a", "episodes": 100}]
 
     ctx.sql.query = _q  # type: ignore[assignment]
-    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "hours"}, user_id="anyone"))
+    p.cmd_leaderboard(ctx, _slash_event("otaku-leaderboard", {"metric": "hours"}, user_id="anyone"))
 
     follow = ctx.interaction.followups[-1]
     # 100 eps × 24 min ÷ 60 = 40.0 hours
@@ -1387,7 +1389,7 @@ def test_leaderboard_hours_metric_uses_episode_sum():
 def test_leaderboard_empty_state():
     ctx = MockContext()
     ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
-    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {}, user_id="anyone"))
+    p.cmd_leaderboard(ctx, _slash_event("otaku-leaderboard", {}, user_id="anyone"))
     follow = ctx.interaction.followups[-1]
     assert "Nobody" in (follow.get("content") or "")
 
@@ -1401,7 +1403,7 @@ def test_leaderboard_unknown_metric_falls_back_to_completed():
         return [{"user_id": "a", "n": 1}]
 
     ctx.sql.query = _q  # type: ignore[assignment]
-    p.cmd_leaderboard(ctx, _slash_event("leaderboard", {"metric": "garbage"}, user_id="anyone"))
+    p.cmd_leaderboard(ctx, _slash_event("otaku-leaderboard", {"metric": "garbage"}, user_id="anyone"))
     assert "status = 'completed'" in captured["sql"]
 
 
@@ -2231,7 +2233,7 @@ def test_import_idempotency_marks_existing_as_updated():
 def test_stats_empty_user_replies_empty_state():
     ctx = MockContext()
     ctx.sql.query = lambda sql, params=None: []  # type: ignore[assignment]
-    p.cmd_stats(ctx, _slash_event("stats", {}, user_id="stats-empty"))
+    p.cmd_stats(ctx, _slash_event("otaku-stats", {}, user_id="stats-empty"))
     follow = ctx.interaction.followups[-1]
     assert follow.get("ephemeral") is True
     assert "haven't" in (follow.get("content") or "")
@@ -2267,7 +2269,7 @@ def test_stats_aggregates_by_status_and_computes_hours():
         {**_make_other(2, "B"), "genres": ["Action"]},
     ]}})
 
-    p.cmd_stats(ctx, _slash_event("stats", {}, user_id="stats-1"))
+    p.cmd_stats(ctx, _slash_event("otaku-stats", {}, user_id="stats-1"))
 
     follow = ctx.interaction.followups[-1]
     embed = follow["embeds"][0]

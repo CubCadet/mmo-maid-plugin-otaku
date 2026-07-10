@@ -2,6 +2,8 @@
 
 IMMUTABLE — what shipped at v7.2.0:
 - /poll root with three subcommands: `create`, `status`, `end`.
+  (v11.0.0 amendment: renamed /otaku-poll — the platform reserved /poll for a
+  built-in; subcommands, admin gating, and vote flow are unchanged.)
 - `create` and `end` are admin-gated via _caller_is_admin; `status` is
   public.
 - 2–4 options per poll (POLL_MIN_OPTIONS=2, POLL_MAX_OPTIONS=4),
@@ -35,7 +37,7 @@ def _poll_event(sub: str, sub_options: dict | None = None, **extra) -> dict:
     return make_event(
         "interaction_create",
         interaction_type=2,
-        command_name="poll",
+        command_name="otaku-poll",
         options=[
             {
                 "name": sub,
@@ -64,7 +66,7 @@ def _component(custom_id: str, **extra) -> dict:
 
 def test_manifest_includes_poll_with_three_subcommands():
     cmd = next(
-        (c for c in _manifest().get("slash_commands", []) if c["name"] == "poll"),
+        (c for c in _manifest().get("slash_commands", []) if c["name"] == "otaku-poll"),
         None,
     )
     assert cmd is not None
@@ -73,7 +75,7 @@ def test_manifest_includes_poll_with_three_subcommands():
 
 
 def test_poll_create_requires_question_a_b():
-    cmd = next(c for c in _manifest()["slash_commands"] if c["name"] == "poll")
+    cmd = next(c for c in _manifest()["slash_commands"] if c["name"] == "otaku-poll")
     create = next(o for o in cmd["options"] if o["name"] == "create")
     by_name = {o["name"]: o for o in create["options"]}
     assert by_name["question"]["required"] is True

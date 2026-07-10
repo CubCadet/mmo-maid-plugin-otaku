@@ -2,6 +2,8 @@
 
 IMMUTABLE — what shipped at v2.3.0:
 - /stats [user] slash command present in manifest.
+  (v11.0.0 amendment: renamed /otaku-stats — the platform reserved /stats for a
+  built-in; the v2.3.0 intent, a per-user stats command in the manifest, survives.)
 - Aggregation pulls from otaku_user_anime via a single GROUP BY status query.
 - "Est. hours" uses STATS_MINUTES_PER_EPISODE = 24.
 - Top genre is sampled from the user's STATS_TOP_GENRE_SAMPLE = 50 most-recent anime.
@@ -32,7 +34,7 @@ def _manifest() -> dict:
 
 def test_manifest_includes_stats():
     names = {c["name"] for c in _manifest().get("slash_commands", [])}
-    assert "stats" in names
+    assert "otaku-stats" in names
 
 
 def test_stats_constants_frozen():

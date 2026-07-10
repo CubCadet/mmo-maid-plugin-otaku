@@ -20,6 +20,82 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [11.0.0] - 2026-07-10
+
+**MAJOR: three slash commands renamed** — the platform now reserves their old
+names for built-in YourBot plugins. No capability, schema, or proxy-domain
+changes; the bump is MAJOR solely because a rename removes the old command
+names.
+
+### Changed — `/stats` → `/otaku-stats`, `/poll` → `/otaku-poll`, `/leaderboard` → `/otaku-leaderboard` (BREAKING)
+
+yourbot-sdk 0.8.3 (published 2026-07-09) vendors the platform's publish gate,
+whose `_RESERVED_COMMAND_NAMES` — "reserved by a built-in YourBot plugin…
+blocks publish outright (`artifact_store_put` raises)" — includes `stats`,
+`poll`, and `leaderboard`. v10.0.16 published cleanly on 2026-07-07 with all
+three names, so the platform gate is at most two days older than this release;
+whether already-published versions are grandfathered could not be confirmed
+(yourbot.gg was unreachable during the review), but every future upload
+containing the old names is at risk of outright rejection, and a
+keep-both-names decorator alias is impossible (the gate applies to the union
+of manifest names and decorator names). New names follow the existing
+`otaku-admin` / `otaku-reset` convention. `/my-stats` is not reserved and is
+unchanged.
+
+What survives untouched: all `otaku:*` component custom_ids (in-flight poll
+vote buttons keep working), the `otaku_polls`/`otaku_poll_options`/
+`otaku_poll_votes` tables, every KV key, and `/help` (it enumerates command
+names from the manifest at runtime). Users typing the OLD names will reach
+YourBot's built-in stats/poll/leaderboard, not this plugin — the two
+user-facing strings that named `/poll` (`S.POLL_NOT_ADMIN`,
+`S.POLL_VOTE_CLOSED`) and the poll-status option description now say
+`/otaku-poll` so closed-poll button replies don't misdirect voters to the
+built-in.
+
+### Added — platform publish gate wired into local validation and CI
+
+`make validate`, ci.yml, and release.yml previously ran only the repo's own
+`scripts/validate_plugin.py` (repo-hygiene layer: SQL safety, proxy domains,
+layout) — which is how a green `make release` could still build a zip the
+platform would refuse. Now: `yourbot validate --path .` runs after it in
+`make validate` and ci.yml (tree mode, fast feedback), and a new
+`scripts/validate_zip.py` runs `yourbot_sdk._validation.validate_artifact`
+against the built `dist/*.zip` in `make release` and release.yml — the exact
+bytes and the exact checks of the platform's upload gate (reserved names,
+manifest↔decorator consistency, option shapes, forbidden-pattern scan). A new
+regression contract asserts no command name is in the SDK's reserved set, so
+future reserved-list growth fails in `pytest`, not at upload.
+
+### Changed — SDK pin `>=0.8.2,<0.9.0` → `>=0.8.3,<0.9.0`
+
+0.8.2 → 0.8.3 is additive/internal (source-level diff reviewed): a dashboard
+error-log fix (handler exceptions now log the handler that actually threw —
+previously always the last-registered name), transport event-id correlation
+for pool-mode tenant resolution (stamped outside any key this plugin uses;
+`testing.py`/`responses.py` byte-identical, so MockContext behavior and the
+v10.0.14 gunzip path are untouched), and the new slash-command validator. The
+floor is raised for **validator determinism**, not behavior: a stale 0.8.2
+resolution in CI would silently skip the reserved-name gate this release
+depends on. Full suite: 786 tests green on 0.8.3.
+
+### Changed — single-source component routing
+
+`_route_components`' 15-way `startswith` or-chain (which had to mirror
+`_component_dispatch`'s prefix branches, a dual-list footgun) collapsed to one
+`startswith("otaku:")` guard. Behavior-preserving: `otaku:expand` was already
+excluded (owned by `@plugin.on_component`), modal ids never reach the
+component branch, and unknown `otaku:*` ids fall through `_component_dispatch`
+silently exactly as the old filter ignored them. `_component_dispatch` is now
+the single place a new component prefix is registered.
+
+### Added — deterministic TTL contracts (MockClock)
+
+First use of `yourbot_sdk.testing.MockClock`: the 2s command cooldown
+(guarding 60 handler call sites) now has active-reply + expiry coverage, and
+airing-notification dedup (`NOTIFY_DEDUP_TTL`), the last-anime KV pointer
+(`LAST_ANIME_TTL`), and the genres cache (`GENRES_TTL`) each have
+expiry-boundary tests (`tests/regression/test_v11_0_0.py`, 13 contracts).
+
 ## [10.0.16] - 2026-07-07
 
 Maintenance tune-up. SDK dependency modernization plus three transport-layer

@@ -332,7 +332,7 @@ def test_leaderboard_completed_query_filters_media_type_anime():
     ctx.sql.query = _q
     p.cmd_leaderboard(ctx, make_event(
         "interaction_create", interaction_type=2,
-        command_name="leaderboard", options=[], user_id="u",
+        command_name="otaku-leaderboard", options=[], user_id="u",
     ))
     assert "media_type = 'anime'" in captured["sql"], \
         "leaderboard MUST filter to anime rows in v8.0+"

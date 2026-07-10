@@ -1,11 +1,12 @@
 """
 Otaku — anime discovery, tracking, and community plugin for Discord via AniList.
 
-Surfaces 35 slash commands across discovery (/anime, /discover, /trending,
+Surfaces 45 slash commands (manifest.json is the canonical list) across discovery (/anime, /discover, /trending,
 /similar, /random, /character, /genres, /mood, /genre-trends), personal
 tracking (/favorite, /favorites, /watch, /list, /rate, /ratings, /progress,
-/import, /stats, /my-stats, /otaku-reset), social/community (/compare, /wp,
-/server-watchlist, /leaderboard, /aotw, /poll, /review, /reviews), and
+/import, /otaku-stats, /my-stats, /otaku-reset), social/community (/compare,
+/wp, /server-watchlist, /otaku-leaderboard, /aotw, /otaku-poll, /review,
+/reviews), and
 airing notifications (/notify, /unnotify, /notify-list, /season-premieres).
 Admin tools live under /otaku-admin.
 
@@ -414,7 +415,7 @@ class _Strings:
         "the channel where each user subscribed."
     )
 
-    # /leaderboard.
+    # /otaku-leaderboard.
     LEADERBOARD_HEADER_COMPLETED = "🏆 Server leaderboard — most completed"
     LEADERBOARD_HEADER_SCORE = "🏆 Server leaderboard — highest mean score"
     LEADERBOARD_HEADER_HOURS = "🏆 Server leaderboard — most hours watched"
@@ -544,7 +545,7 @@ class _Strings:
     )
     MY_STATS_NONE = "*(none yet)*"
 
-    # /stats.
+    # /otaku-stats.
     STATS_HEADER_OWN = "📊 Your anime stats"
     STATS_HEADER_OTHER = "📊 {who}'s anime stats"
     STATS_EMPTY_OWN = (
@@ -582,9 +583,9 @@ class _Strings:
         "after a `/anime` lookup."
     )
 
-    # /poll (v7.2.0).
+    # /otaku-poll (v7.2.0; renamed from /poll in v11.0.0).
     POLL_NOT_ADMIN = (
-        "Only server admins can run `/poll {action}`. Ask a moderator with "
+        "Only server admins can run `/otaku-poll {action}`. Ask a moderator with "
         "`Manage Server` or `Administrator`."
     )
     POLL_USAGE = "Pick a subcommand: `create`, `status`, or `end`."
@@ -596,7 +597,7 @@ class _Strings:
     POLL_NOT_FOUND = "No poll with id `{poll_id}` on this server."
     POLL_ENDED_OK = "Closed poll #{poll_id} ({n} votes)."
     POLL_VOTE_BUTTON_MALFORMED = "Poll vote button malformed."
-    POLL_VOTE_CLOSED = "That poll is closed — `/poll status id: {poll_id}` shows the result."
+    POLL_VOTE_CLOSED = "That poll is closed — `/otaku-poll status id: {poll_id}` shows the result."
     POLL_VOTE_RECORDED = "🗳 Voted **{label}**."
     POLL_VOTE_CHANGED = "🗳 Changed your vote to **{label}**."
     POLL_VOTE_NOOP = "You already voted for **{label}**."
@@ -5327,7 +5328,7 @@ def dash_save_settings(ctx: Context, params: dict) -> dict:
     return {"ok": True}
 
 
-# ── v3.3.0 — /leaderboard ───────────────────────────────────────────────────
+# ── v3.3.0 — /otaku-leaderboard (renamed from /leaderboard in v11.0.0) ──────
 
 LEADERBOARD_TOP_N = 10
 LEADERBOARD_SCORE_MIN_RATED = 3  # require at least N rated rows to qualify for the score board
@@ -5388,7 +5389,7 @@ def _format_leaderboard_lines(rows: list[dict], metric: str) -> str:
     return "\n".join(lines)
 
 
-@plugin.on_slash_command("leaderboard")
+@plugin.on_slash_command("otaku-leaderboard")
 def cmd_leaderboard(ctx: Context, event: dict) -> None:
     user_id = event.get("user_id") or ""
     if _on_cooldown(ctx, user_id):
@@ -6353,7 +6354,7 @@ def cmd_my_stats(ctx: Context, event: dict) -> None:
     ctx.interaction.followup(embeds=[embed], ephemeral=True)
 
 
-# ── v2.3.0 — /stats ─────────────────────────────────────────────────────────
+# ── v2.3.0 — /otaku-stats (renamed from /stats in v11.0.0) ──────────────────
 
 # Heuristic episode length for the "total hours" estimate. Real anime episodes
 # vary 11–24 min; 24 lines up with AniList's standard TV slot length.
@@ -6371,7 +6372,7 @@ def _aggregate_user_stats(ctx: Context, user_id: str) -> dict:
     cause not yet isolated (same error fires for the simpler
     `_recommend_user_vector` query, so it isn't aggregates per se).
     v10.0.8 splits this into a plain row-shape SELECT and aggregates in
-    Python — sidesteps any complex-query parser issue and keeps `/stats`
+    Python — sidesteps any complex-query parser issue and keeps `/otaku-stats`
     serving the typical user (≤1 000 rows; capped at the SDK ceiling).
     """
     rows = ctx.sql.query(
@@ -6436,7 +6437,7 @@ def _top_genre_for_user(ctx: Context, user_id: str) -> str | None:
     return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
-@plugin.on_slash_command("stats")
+@plugin.on_slash_command("otaku-stats")
 def cmd_stats(ctx: Context, event: dict) -> None:
     user_id = event.get("user_id") or ""
     if _on_cooldown(ctx, user_id):
@@ -6687,9 +6688,12 @@ def cmd_ratings(ctx: Context, event: dict) -> None:
 # ── Component handlers ──────────────────────────────────────────────────────
 
 # Components with dynamic args (otaku:similar:<id>, otaku:page:<g>:<s>:<p>,
-# otaku:trend:<p>) can't use @plugin.on_component (it matches exact custom_id),
-# so we hook the raw event and dispatch ourselves. The static otaku:expand
-# select is handled by its own @plugin.on_component registration below.
+# otaku:trend:<p>) are routed here. The SDK does offer
+# @plugin.on_component(prefix=...) since 0.8.x, but we keep one raw
+# interaction_create hook so component AND modal routing share a single entry
+# point (on_modal_submit has no prefix= equivalent) — see _route_components.
+# The static otaku:expand select is handled by its own @plugin.on_component
+# registration below.
 
 def _component_dispatch(ctx: Context, event: dict) -> None:
     cid = event.get("custom_id") or ""
@@ -6913,8 +6917,9 @@ def _component_dispatch(ctx: Context, event: dict) -> None:
         return
 
 
-# Register the dispatcher under every dynamic prefix we use. The SDK matches on
-# exact custom_id, so we hook the raw interaction_create event and filter ourselves.
+# One raw interaction_create hook covers modal submits AND dynamic otaku:*
+# components (the SDK's on_component(prefix=) can't route modals), so all
+# interaction routing outside the static otaku:expand lives in one place.
 @plugin.on_event("interaction_create")
 def _route_components(ctx: Context, event: dict) -> None:
     itype = event.get("interaction_type")
@@ -6931,23 +6936,10 @@ def _route_components(ctx: Context, event: dict) -> None:
         return
     if cid == "otaku:expand":
         return  # handled by @plugin.on_component above
-    if (
-        cid.startswith("otaku:page:")
-        or cid.startswith("otaku:mpage:")
-        or cid.startswith("otaku:popchar:")
-        or cid.startswith("otaku:trend:")
-        or cid.startswith("otaku:similar:")
-        or cid.startswith("otaku:list:")
-        or cid.startswith("otaku:reset-confirm:")
-        or cid.startswith("otaku:reset-cancel:")
-        or cid.startswith("otaku:swl:")
-        or cid.startswith("otaku:wp-join:")
-        or cid.startswith("otaku:premieres:")
-        or cid.startswith("otaku:mood:")
-        or cid.startswith("otaku:reviews:")
-        or cid.startswith("otaku:aotw-vote:")
-        or cid.startswith("otaku:poll-vote:")
-    ):
+    # Forward every otaku:* component to _component_dispatch, whose prefix
+    # branches are the single source of truth; unknown ids fall through it
+    # silently, exactly as the old duplicate prefix filter ignored them.
+    if cid.startswith("otaku:"):
         _component_dispatch(ctx, event)
 
 
@@ -7261,7 +7253,7 @@ def cmd_reviews(ctx: Context, event: dict) -> None:
     _render_reviews(ctx, media_id, page=1, deferred=True, viewer_id=user_id)
 
 
-# ── v7.2.0 — /poll (generic server polls) ───────────────────────────────────
+# ── v7.2.0 — /otaku-poll (generic server polls; renamed from /poll in v11) ──
 #
 # Free-form question + 2-to-4 options. Unlike /aotw, multiple polls can be
 # open at once per server, each addressed by its poll_id (returned at create
@@ -7476,7 +7468,7 @@ def _cmd_poll_end(ctx: Context, user_id: str, sub_opts: dict) -> None:
     )
 
 
-@plugin.on_slash_command("poll")
+@plugin.on_slash_command("otaku-poll")
 def cmd_poll(ctx: Context, event: dict) -> None:
     user_id = event.get("user_id") or ""
     if _on_cooldown(ctx, user_id):
@@ -7953,7 +7945,7 @@ def _aotw_vote_deferred(ctx: Context, poll_id: int, media_id: int, user_id: str)
 # genres, then pull AniList's currently-trending anime filtered to those
 # genres. Anime the user already tracks (any status) are filtered out so
 # the surface stays "what's new for me." Uses the same 50-anime sample
-# heuristic as /stats's _top_genre_for_user so we never pay for a full
+# heuristic as /otaku-stats's _top_genre_for_user so we never pay for a full
 # tracker scan.
 
 GENRE_TRENDS_TOP_N = 3       # how many of the user's genres to filter by

@@ -60,7 +60,7 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/rate <score>` | Rate the user's last `/anime` lookup on a 1.0–10.0 scale (half-points OK). Stored as `SMALLINT` (score × 2). |
 | `/ratings [user]` | Show a user's rated anime, top 25 sorted by score. |
 | `/progress <episodes>` | Record episodes watched for the user's last `/anime` lookup. Caps at the anime's total; auto-promotes status to `completed` at total. |
-| `/stats [user]` | Aggregate per-user view: counts by status, episodes, est. hours (24min/ep heuristic), mean score, top genre. |
+| `/otaku-stats [user]` | Aggregate per-user view: counts by status, episodes, est. hours (24min/ep heuristic), mean score, top genre. |
 | `/import anilist <username>` | Bulk-import an AniList user's list into your tracker. Streams 50 entries per page. Idempotent — re-imports update, don't duplicate. |
 | `/otaku-reset` | Self-service deletion of every tracked row for the caller on this server. Asks to confirm. |
 | `/otaku-admin reset-user <user>` | Server-admin-only moderation. Deletes every tracked row for a specific user. Gated to anyone with `Administrator` or `Manage Server`. |
@@ -72,20 +72,20 @@ If/when new capabilities are added, update this table *and* `CHANGELOG.md`.
 | `/wp join <id>` | Manually join a watch party by id. |
 | `/wp status <id>` | Show the party's members and their progress, plus status (active/completed/abandoned). |
 | `/wp progress <id> <episode>` | Update your episode count. If everyone in the party is at the same episode, a public sync announcement fires. |
-| `/leaderboard [metric]` | Server-wide top-10 board. Metric: `completed` (default), `score` (≥3 rated), or `hours`. |
+| `/otaku-leaderboard [metric]` | Server-wide top-10 board. Metric: `completed` (default), `score` (≥3 rated), or `hours`. |
 | `/notify <anime>` | Subscribe to airing notifications for an anime. |
 | `/unnotify <anime>` | Stop airing notifications for an anime. |
 | `/notify-list` | Show your active subscriptions with the next-episode ETA. |
 | `/otaku-admin set-channel <#channel>` | Admin-only. Sets where airing pings post. Omit the channel to clear. |
 | `/season-premieres [season] [year]` | Paginated browse of upcoming anime premieres. Defaults to next season. |
-| `/my-stats` | Richer personal view than `/stats` — top rated, top favorites, recently completed, with completion percentage. |
+| `/my-stats` | Richer personal view than `/otaku-stats` — top rated, top favorites, recently completed, with completion percentage. |
 | `/recommend` | Personalized recommendations via collaborative filtering over this server's rated rows. Cosine similarity across up to 50 peers; peers must share ≥3 rated titles. Falls back to AniList `/similar` (seeded by your top-rated tracked anime) if you have <3 ratings or no peer overlaps enough. |
 | `/mood <feeling>` | Mood-based picks. Ten curated moods (`uplifting`, `tense`, `cathartic`, `chill`, `epic`, `nostalgic`, `dark`, `funny`, `romantic`, `adventurous`) each map to an AniList genre/tag blend. Paginated like `/discover`. |
 | `/genre-trends` | Trending anime right now in your top 3 most-tracked genres. Bridges discovery and personalization — anime you already track are filtered out. Ephemeral. |
 | `/review` | Open a modal to write or edit a review of your last `/anime` lookup. Existing review (if any) is pre-filled. One review per user per anime. |
 | `/reviews [anime]` | Browse this server's reviews for an anime. Accepts a title, a numeric AniList ID, or defaults to your last `/anime` lookup. Paginated, sorted by most-recently-edited. Spoiler-marked lines (`SPOILER:`, `[SPOILER]`, `(spoiler)`) are wrapped in Discord's spoiler syntax by default; opt out via `/preferences spoilers: show`. |
 | `/aotw start \| status \| end` | Anime-of-the-week voting. Admin starts (top 5 from server watchlist); members vote via numbered buttons; admin ends and winner gets posted in the announcement channel. One active poll per server. |
-| `/poll create \| status \| end` | Free-form server polls. Admin creates with a question and 2–4 options; members vote via A/B/C/D buttons; admin ends. Multiple concurrent polls allowed; each has its own `poll_id`. |
+| `/otaku-poll create \| status \| end` | Free-form server polls. Admin creates with a question and 2–4 options; members vote via A/B/C/D buttons; admin ends. Multiple concurrent polls allowed; each has its own `poll_id`. |
 | `/manga <query>` | Multi-source manga search (AniList → MAL → Kitsu fallback). Renders chapters, volumes, start year. Footer shows the source. Cached as "last manga" (7 days) — AniList results only. |
 | `/manga-discover <genre> [sort]` | Browse manga by genre. Paginated 5 results per page; sorts `popular`/`trending`/`score`. |
 | `/manga-favorites [manga] [remove]` | Favorite or unfavorite a manga (defaults to your last `/manga` lookup), or list your manga favorites when called with no args. Manga rows are stored in the same `otaku_user_media` table as anime, separated by `media_type='manga'`. |
@@ -203,7 +203,7 @@ All component custom_ids are prefixed with `otaku:`:
 | `otaku:reviews:<media_id>:<page>` | `/reviews` prev/next buttons | Spoiler redaction re-applied per viewer. |
 | `otaku:reset-confirm:<user_id>` / `otaku:reset-cancel:<user_id>` | `/otaku-reset` confirmation buttons | User-scoped so only the invoker can confirm. |
 | `otaku:aotw-vote:<poll_id>:<media_id>` | `/aotw start` candidate buttons | One active poll per server. |
-| `otaku:poll-vote:<poll_id>:<key>` | `/poll create` option buttons (A–D) | Vote upserts on PK (poll_id, user_id). |
+| `otaku:poll-vote:<poll_id>:<key>` | `/otaku-poll create` option buttons (A–D) | Vote upserts on PK (poll_id, user_id). |
 | `otaku:review-modal:<media_id>` | `/review` modal (interaction_type 5) | Pre-fills the user's existing review. |
 | `otaku:noop:prev` / `otaku:noop:next` | Disabled pagination filler buttons | Never clickable; no route needed. |
 
