@@ -20,6 +20,28 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [11.0.1] - 2026-07-13
+
+### Fixed — airing cron now runs in pooled production
+
+- Added the missing manifest schedule
+  `{"spec": "5 * * * *", "name": "cron_airing_check"}` for the existing
+  `@plugin.cron("5 * * * *")` handler. Pooled workers do not run decorator-only
+  background threads; the platform reads the manifest schedule and dispatches
+  the named handler per installed server. This restores hourly airing pings and
+  the seasonal-premieres digest in production without changing capabilities,
+  SQL, KV schemas, or command names.
+- Updated stale comments and documentation that described the cron as
+  single-tenant-only. Existing episode-level ephemeral dedup and the durable
+  per-season digest marker continue to guard normal at-least-once replays.
+
+### Tests
+
+- Added a manifest-to-decorator cron invariant. It requires every
+  `@plugin.cron` function name/spec pair to have an exact `manifest.json`
+  counterpart, and pins `cron_airing_check` at `5 * * * *` so this production
+  wiring cannot silently disappear again.
+
 ## [11.0.0] - 2026-07-10
 
 **MAJOR: three slash commands renamed** — the platform now reserves their old

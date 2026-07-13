@@ -11,9 +11,10 @@ airing notifications (/notify, /unnotify, /notify-list, /season-premieres).
 Admin tools live under /otaku-admin.
 
 Backed by Postgres (per-user tracker, reviews, polls, watch parties,
-notifications), KV (last-anime cache + per-server settings), an hourly UTC
-cron for airing pings + seasonal premieres digest, and a manifest-mode
-dashboard. Storage is auto-scoped per (server_id, plugin_id) by the runner.
+notifications), KV (last-anime cache + per-server settings), a manifest-backed
+hourly UTC cron for airing pings + seasonal premieres digest, and a
+manifest-mode dashboard. Storage is auto-scoped per (server_id, plugin_id) by
+the runner.
 
 The full per-phase contract lives in CHANGELOG.md and ROADMAP.md.
 """
@@ -5185,10 +5186,16 @@ def _dispatch_premieres_digest(ctx: Context) -> bool:
     return True
 
 
-@plugin.cron("5 * * * *")  # every hour at :05 UTC (single-tenant only)
+@plugin.cron("5 * * * *")  # every hour at :05 UTC; manifest-backed in production
 def cron_airing_check(ctx: Context) -> None:
-    """In pool mode this never fires. See CHANGELOG v4.0.0 — fallback runs from
-    /notify-list so users still see fresh data."""
+    """Dispatch hourly airing notifications and the seasonal digest.
+
+    The matching manifest cron entry makes the platform deliver this handler
+    per installed server in pool mode. Both dispatch paths carry
+    duplicate-suppression guards for ordinary sequential replays: airing
+    episodes use ephemeral dedup and the seasonal digest uses a durable
+    per-season KV marker.
+    """
     try:
         n = _dispatch_airing_announcements(ctx)
     except Exception as exc:  # noqa: BLE001

@@ -583,7 +583,8 @@ Two slices of the original Phase 4 plan rolled into one tag because of SDK gaps.
 - **Added in v4.0**: `/otaku-admin set-channel` (was originally planned for v4.1). Admin-gated via the existing `_caller_is_admin` helper.
 
 **Cron implementation:**
-- ~~"register a server-side cron in the manifest"~~ — the manifest field name isn't documented in this skill ("consult the dev portal docs"). Shipped with `@plugin.cron("5 * * * *")` which works in single-tenant deployments. In pool mode it doesn't fire — documented as a known limitation. Lazy fallback: `/notify-list` exercises the live AniList query so users still see fresh data even without the cron.
+- v4.0 originally shipped only `@plugin.cron("5 * * * *")`, before the server-side manifest shape was documented, so pooled production could not dispatch it.
+- **Resolved in v11.0.1:** `manifest.json` now declares the matching `{"spec": "5 * * * *", "name": "cron_airing_check"}` entry. The platform can deliver the hourly task per installed server in pool mode; episode and seasonal-digest guards handle normal at-least-once replays.
 
 **Schema:** added `channel_id TEXT` column vs. the roadmap's two-column shape — needed for the fallback channel when no announcement channel is set.
 

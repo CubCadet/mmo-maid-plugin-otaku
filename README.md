@@ -21,7 +21,7 @@ This plugin requests the following capabilities. Each is listed in `manifest.jso
 | `discord:read` | Safe | Read the caller's guild membership and roles to gate `/otaku-admin` to server admins (anyone with `Administrator` or `Manage Server`). Used purely for permission checks. |
 | `discord:send_message` | Safe | Post airing notifications to the per-server announcement channel (or the channel each user subscribed in) when AniList reports a new episode is airing. |
 
-The plugin uses one Discord-side write capability — `discord:send_message` — exclusively for posting airing notifications to a server-designated channel. All other Discord interactions are slash command replies.
+The plugin uses one Discord-side write capability — `discord:send_message` — exclusively for posting airing notifications to a server-designated channel. A manifest-backed `@plugin.cron("5 * * * *")` runs the airing and seasonal-digest checks hourly at `:05` UTC for each installed server. All other Discord interactions are slash command replies.
 
 ## Dashboard
 

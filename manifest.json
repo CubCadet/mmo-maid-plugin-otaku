@@ -1,7 +1,7 @@
 {
   "id": "otaku",
   "name": "Otaku",
-  "version": "11.0.0",
+  "version": "11.0.1",
   "description": "Discover anime, track your own, and get pinged when new episodes air. Search via AniList, browse by genre, see what's trending, watch parties, server leaderboards — and per-user subscriptions to airing schedules delivered to a server-designated announcement channel.",
   "author": "CubCadetXT1",
   "tags": ["anime", "anilist", "discovery", "search", "tracking", "notifications"],
@@ -14,6 +14,12 @@
     "storage:sql"
   ],
   "proxy_domains_requested": ["graphql.anilist.co", "api.jikan.moe", "kitsu.io"],
+  "cron": [
+    {
+      "spec": "5 * * * *",
+      "name": "cron_airing_check"
+    }
+  ],
   "slash_commands": [
     {
       "name": "anime",
